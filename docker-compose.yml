@@ -1,0 +1,21 @@
+# Local infrastructure for AI Growth OS (SPRINT-02).
+# PostgreSQL 16 + pgvector (ARCHITECTURE_LOCK D-032). No Redis / Temporal yet.
+#
+#   docker compose up -d && docker compose ps     # wait for "healthy"
+#   alembic upgrade head
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aigos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aigos_dev_only}   # dev only — override in .env
+      POSTGRES_DB: ${POSTGRES_DB:-ai_growth_os}
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aigos} -d ${POSTGRES_DB:-ai_growth_os}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  pgdata:
