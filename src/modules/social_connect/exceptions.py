@@ -45,6 +45,14 @@ class MetaTokenExpiredError(MetaOAuthError):
     """Token expired (code 190, subcode 463/464) or session invalidated (460)."""
 
 
+class MetaTokenInvalidError(MetaOAuthError):
+    """``/debug_token`` reported ``is_valid == false`` for a freshly issued token."""
+
+
+class MetaTokenForeignAppError(MetaOAuthError):
+    """Token belongs to another app (``app_id`` mismatch) or ``user_id`` ≠ ``/me``."""
+
+
 class MetaPermissionError(MetaGraphError):
     """Missing permission (code 10 or 200-299)."""
 

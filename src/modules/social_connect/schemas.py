@@ -123,6 +123,15 @@ class ConnectionStartRequest(BaseModel):
     tenant_id: str = Field(..., min_length=1, max_length=64)
 
 
+class MetaUserInfo(BaseModel):
+    """Trusted identity from ``GET /me`` (SPRINT-02.1 F2) — the token's own user."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str | None = None
+
+
 class MetaDebugTokenInfo(BaseModel):
     """Subset of ``/debug_token`` used to validate a stored token."""
 
@@ -133,6 +142,8 @@ class MetaDebugTokenInfo(BaseModel):
     user_id: str | None = None
     scopes: list[str] = Field(default_factory=list)
     expires_at: int | None = None
+    # ``data.error.code`` when Meta explains *why* ``is_valid`` is false (e.g. 190).
+    error_code: int | None = None
 
 
 # ------------------------------------------------------------ public views ---
@@ -159,10 +170,15 @@ class PageAssetPublic(BaseModel):
     category: str | None = None
     tasks: list[str] = Field(default_factory=list)
     instagram: InstagramAssetPublic | None = None
+    # Derived flag only — tells the client whether this Page can be acted upon; the
+    # ciphertext itself is never exposed (Zero-Secret).
+    has_page_token: bool = False
 
     @classmethod
     def from_domain(cls, page: PageAsset) -> PageAssetPublic:
-        return cls.model_validate(page.model_dump(exclude=set(_SENSITIVE_PAGE_FIELDS)))
+        data = page.model_dump(exclude=set(_SENSITIVE_PAGE_FIELDS))
+        data["has_page_token"] = page.encrypted_page_token is not None
+        return cls.model_validate(data)
 
 
 class ConnectedAccountPublic(BaseModel):

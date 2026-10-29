@@ -48,7 +48,8 @@ class PageAsset(BaseModel):
     page_name: str
     category: str | None = None
     tasks: list[str] = Field(default_factory=list)
-    encrypted_page_token: str = Field(..., repr=False)
+    # ``None`` = no Page token was granted (never an empty-string ciphertext).
+    encrypted_page_token: str | None = Field(default=None, repr=False)
     instagram: InstagramAsset | None = None
 
 

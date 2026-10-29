@@ -31,7 +31,13 @@ from src.modules.social_connect.domain.repository import ConnectedAccountReposit
 from src.modules.social_connect.infrastructure.postgres_repository import (
     PostgresConnectedAccountRepository,
 )
-from tests.conftest import FAKE_STATE_SECRET, debug_token_payload, pages_payload, token_payload
+from tests.conftest import (
+    FAKE_STATE_SECRET,
+    debug_token_payload,
+    me_payload,
+    pages_payload,
+    token_payload,
+)
 from tests.integration.conftest import (
     TABLES,
     TEST_DATABASE_URL,
@@ -248,6 +254,9 @@ def test_full_callback_flow_persists_via_api(
     graph_mock.get("/oauth/access_token").mock(
         return_value=httpx.Response(200, json=token_payload("SHORT_LIVED", 5000))
     )
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload(user_id="90001"))
+    )
     graph_mock.get("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(user_id="90001"))
     )
@@ -264,7 +273,8 @@ def test_full_callback_flow_persists_via_api(
         created = cb.json()
         assert created["provider_user_id"] == "90001"
         assert "LONG_LIVED" not in cb.text and "PAGE_TOKEN" not in cb.text
-        assert "token" not in cb.text.lower()
+        # ``has_page_token`` is a derived boolean (F4); nothing else may mention tokens.
+        assert "token" not in cb.text.lower().replace("has_page_token", "")
 
         listed = client.get(f"{BASE}/connections", params={"tenant_id": "demo"})
         assert [a["id"] for a in listed.json()] == [created["id"]]
@@ -300,3 +310,141 @@ def test_full_callback_flow_persists_via_api(
             await eng.dispose()
 
     assert asyncio.run(_fresh_count()) == (0, 0)
+
+
+# ------------------------------------------------------------ SPRINT-02.1 ---
+async def test_page_without_token_stored_as_null(
+    session: AsyncSession,
+    engine: AsyncEngine,
+    integration_encryption: TokenEncryptionService,
+) -> None:
+    """H9 — a Page with no granted token round-trips as SQL ``NULL`` (never ``''``)."""
+    repo: ConnectedAccountRepository = PostgresConnectedAccountRepository(session)
+    account = _account(
+        pages=[
+            PageAsset(
+                page_id="3001",
+                page_name="With token",
+                encrypted_page_token=integration_encryption.encrypt_token("PAGE_TOKEN_3001"),
+            ),
+            PageAsset(page_id="3002", page_name="Without token", encrypted_page_token=None),
+        ]
+    )
+    saved = await repo.upsert(account)
+    await session.commit()
+
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            text(
+                "SELECT page_id, encrypted_page_token, encrypted_page_token IS NULL AS is_null "
+                "FROM social_connection_pages ORDER BY page_id"
+            )
+        )
+        by_page = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_page["3002"] == (None, True)
+    assert by_page["3001"][1] is False
+    assert by_page["3001"][0].startswith("gAAAA")
+
+    fetched = await repo.get(account.tenant_id, saved.id)
+    assert fetched is not None
+    pages = {p.page_id: p for p in fetched.pages}
+    assert pages["3002"].encrypted_page_token is None
+    assert integration_encryption.decrypt_token(pages["3001"].encrypted_page_token or "") == (
+        "PAGE_TOKEN_3001"
+    )
+
+
+def test_alembic_0002_upgrade_downgrade_roundtrip_with_null_rows() -> None:
+    """H10 — 0001→0002 makes the column nullable; downgrade rewrites NULL → '' first."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    cfg = alembic_config(TEST_DATABASE_URL)
+
+    async def _run(sql: str, *, scalar: bool = False) -> object:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            async with eng.begin() as conn:
+                result = await conn.execute(text(sql))
+                return result.scalar_one() if scalar else None
+        finally:
+            await eng.dispose()
+
+    nullable_sql = (
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'social_connection_pages' AND column_name = 'encrypted_page_token'"
+    )
+
+    command.downgrade(cfg, "0001")
+    assert asyncio.run(_run(nullable_sql, scalar=True)) == "NO"
+    assert asyncio.run(_run("SELECT version_num FROM alembic_version", scalar=True)) == "0001"
+
+    command.upgrade(cfg, "0002")
+    assert asyncio.run(_run(nullable_sql, scalar=True)) == "YES"
+    assert asyncio.run(_run("SELECT version_num FROM alembic_version", scalar=True)) == "0002"
+
+    # Seed a connection with one NULL-token page and one real one, then downgrade.
+    asyncio.run(_run(f"TRUNCATE {', '.join(TABLES)} CASCADE"))
+    asyncio.run(
+        _run(
+            "INSERT INTO social_connections (id, tenant_id, provider, provider_user_id, "
+            "encrypted_user_token, granted_scopes, status, connected_at) VALUES "
+            "('00000000-0000-0000-0000-000000000001', 't', 'meta', 'u', 'gAAAAA-u', "
+            "'[]'::jsonb, 'active', now())"
+        )
+    )
+    asyncio.run(
+        _run(
+            "INSERT INTO social_connection_pages (id, connection_id, page_id, page_name, "
+            "tasks, encrypted_page_token) VALUES "
+            "('00000000-0000-0000-0000-000000000011', "
+            "'00000000-0000-0000-0000-000000000001', 'p-null', 'No token', '[]'::jsonb, NULL), "
+            "('00000000-0000-0000-0000-000000000012', "
+            "'00000000-0000-0000-0000-000000000001', 'p-tok', 'Token', '[]'::jsonb, 'gAAAAA-p')"
+        )
+    )
+    assert (
+        asyncio.run(
+            _run(
+                "SELECT COUNT(*) FROM social_connection_pages WHERE encrypted_page_token IS NULL",
+                scalar=True,
+            )
+        )
+        == 1
+    )
+
+    command.downgrade(cfg, "0001")  # must not fail on the NULL row
+    assert asyncio.run(_run(nullable_sql, scalar=True)) == "NO"
+    assert (
+        asyncio.run(
+            _run(
+                "SELECT encrypted_page_token FROM social_connection_pages "
+                "WHERE page_id = 'p-null'",
+                scalar=True,
+            )
+        )
+        == ""
+    )
+    assert (
+        asyncio.run(
+            _run(
+                "SELECT encrypted_page_token FROM social_connection_pages WHERE page_id = 'p-tok'",
+                scalar=True,
+            )
+        )
+        == "gAAAAA-p"
+    )
+
+    command.upgrade(cfg, "head")  # leave the database at head for the other tests
+    assert asyncio.run(_run(nullable_sql, scalar=True)) == "YES"
+    asyncio.run(_run(f"TRUNCATE {', '.join(TABLES)} CASCADE"))
+
+
+def test_health_ready_200_with_db(integration_app: FastAPI) -> None:
+    """H12 — readiness probe performs a real ``SELECT 1`` against PostgreSQL."""
+    with TestClient(integration_app) as client:
+        res = client.get("/health/ready")
+        assert res.status_code == 200, res.text
+        assert res.json() == {"status": "ready", "database": "ok"}
+        assert client.get("/health").status_code == 200

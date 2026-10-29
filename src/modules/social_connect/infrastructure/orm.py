@@ -77,7 +77,8 @@ class SocialConnectionPageRow(Base):
     tasks: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )
-    encrypted_page_token: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL = the user has no token for this Page (no Page role) — SPRINT-02.1 F4.
+    encrypted_page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     ig_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ig_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ig_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
