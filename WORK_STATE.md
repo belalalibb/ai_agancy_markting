@@ -9,7 +9,7 @@
 ## 1. ملخص الحالة العامة للمشروع (Project Snapshot)
 
 - **اسم المشروع:** AI Marketing Platform (AI Growth OS / BrandMind AI / QEVION)
-- **الحالة الإجمالية:** `READY_FOR_FOUNDATION_SPRINT`
+- **الحالة الإجمالية:** `SPRINT_01_DELIVERED_AWAITING_REVIEW`
 - **المرحلة الحالية:** المرحلة 0 و 1 (Phase 0: Environment Foundation & Phase 1: Meta Graph API Integration)
 - **الفرع المعتمد المستقر:** `main`
 - **فرع التطوير المستمر:** `work/implementation`
@@ -32,7 +32,9 @@
 
 ## 3. المهمة النشطة الحالية (Active Task)
 
-- **معرف المهمة:** `TASK-01-FOUNDATION-META-FASTAPI`
+> **آخر تحديث:** 2026-10-29 — المهمة `SPRINT-01-FASTAPI-META-FOUNDATION` **مُسلَّمة ومختبرة** على فرع `work/implementation` (كوميت الكود: `118c0bb`). التقرير الكامل في `CURRENT_DIRECTIVE.md` §6. بانتظار مراجعة المخطط/المراجع.
+
+- **معرف المهمة:** `TASK-01-FOUNDATION-META-FASTAPI` (= `SPRINT-01-FASTAPI-META-FOUNDATION`)
 - **الهدف التنفيذي:**
   1. تأسيس هيكل تطبيق FastAPI الموحد المعتمد على نمط الـ Modular Monolith.
   2. تثبيت التبعيات الأساسية (`requirements.txt` / `pyproject.toml`).
@@ -50,16 +52,25 @@
 
 ## 4. معايير القبول للمهمة الحالية (Acceptance Criteria)
 
-- [ ] تشغيل خادم FastAPI بنجاح وظهور صفحة التوثيق التفاعلية (`/docs`).
-- [ ] وجود اختبارات تغطية وحدات (Unit Tests) بنسبة تزيد عن 85% للوحدات المضافة.
-- [ ] مسارات ربط Meta OAuth تعمل بصورة Mocking ومجهزة للاتصال الحقيقي.
-- [ ] عدم وجود أي أسرار أو توكنات في الكود المصدري.
-- [ ] اجتياز جميع اختبارات `pytest` بنجاح كامل (Zero Failures).
+- [x] تشغيل خادم FastAPI بنجاح وظهور صفحة التوثيق التفاعلية (`/docs`) — تم التحقق على uvicorn فعلي (HTTP 200).
+- [x] وجود اختبارات تغطية وحدات (Unit Tests) بنسبة تزيد عن 85% للوحدات المضافة — **99.6%**.
+- [x] مسارات ربط Meta OAuth تعمل بصورة Mocking ومجهزة للاتصال الحقيقي — `respx` mocks، بدون شبكة.
+- [x] عدم وجود أي أسرار أو توكنات في الكود المصدري — `.env.template` فقط، `SecretStr` + تقنيع في JSON.
+- [x] اجتياز جميع اختبارات `pytest` بنجاح كامل (Zero Failures) — **123 passed**.
 
 ---
 
 ## 5. الخطوة الدقيقة التالية (Exact Next Step)
 
-1. إعداد فرع العمل `work/implementation` والانتقال إليه.
-2. إنشاء هيكل مشروع FastAPI الموحد (`src/core`, `src/modules/social_connect`).
-3. إعداد اختبارات الـ Contract والـ Mock لـ Meta OAuth API وتشغيلها للتحقق من نجاحها.
+1. **المراجع/المخطط:** مراجعة `CURRENT_DIRECTIVE.md` §6 وإصدار ملاحظات أو اعتماد الدمج إلى `main`.
+2. **المنفذ (عند استلام "تابع"):** تطبيق ملاحظات المراجعة إن وُجدت، أو بدء المهمة التالية المقترحة:
+   - طبقة Repository لتخزين `MetaConnectionResult` (جدول `social_connections` في PostgreSQL، توكن مشفّر فقط).
+   - مسار `/api/v1/social/meta/callback` خادمي يتحقق من `state` ويستدعي تدفق `connect`.
+   - توثيق صلاحيات Meta App Review المطلوبة.
+3. **قبل أي كود جديد:** `pytest -v tests/` يجب أن يُظهر 123 passed (خط الأساس)، و`bash scripts/backup_progress.sh` بعد كل نقطة تقدم.
+
+## 6. سجل الاستئناف (Recovery Log)
+
+| التاريخ | الحدث | الإجراء |
+|---|---|---|
+| 2026-10-29 | انقطاع الجلسة ×3 أثناء التنفيذ | الاستعادة من `origin/work/implementation` (النسخ المحلية و AI Drive لم تنجُ من إعادة تهيئة الصندوق؛ الدفع البعيد بعد كل نقطة تقدم هو ما ضمن عدم فقدان العمل). |
