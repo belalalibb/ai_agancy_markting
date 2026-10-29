@@ -19,9 +19,12 @@ from src.core.config import Settings, get_settings
 from src.core.security import TokenEncryptionService
 from src.modules.social_connect.meta_client import MetaGraphClient
 
+from tests.fakes import FakeConnectedAccountRepository
+
 FAKE_APP_ID = "123456789012345"
 FAKE_APP_SECRET = "fake-app-secret-for-tests-only"
-GRAPH_VERSION = "v19.0"
+FAKE_STATE_SECRET = "fake-oauth-state-secret-for-tests-only"
+GRAPH_VERSION = "v26.0"
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
 
@@ -40,6 +43,7 @@ def _test_env(monkeypatch: pytest.MonkeyPatch, fernet_key: str) -> Iterator[None
         "META_APP_ID": FAKE_APP_ID,
         "META_APP_SECRET": FAKE_APP_SECRET,
         "META_GRAPH_API_VERSION": GRAPH_VERSION,
+        "OAUTH_STATE_SECRET": FAKE_STATE_SECRET,
         "META_HTTP_MAX_RETRIES": "2",
         "META_HTTP_TIMEOUT_SECONDS": "1",
     }
@@ -79,10 +83,19 @@ async def meta_client(settings: Settings) -> AsyncIterator[MetaGraphClient]:
 
 
 @pytest.fixture
-def app(settings: Settings) -> FastAPI:
-    from src.main import create_app
+def fake_repo() -> FakeConnectedAccountRepository:
+    return FakeConnectedAccountRepository()
 
-    return create_app(settings)
+
+@pytest.fixture
+def app(settings: Settings, fake_repo: FakeConnectedAccountRepository) -> FastAPI:
+    """App wired to the fake repository — isolated tests never touch PostgreSQL."""
+    from src.main import create_app
+    from src.modules.social_connect.router import get_repository
+
+    application = create_app(settings)
+    application.dependency_overrides[get_repository] = lambda: fake_repo
+    return application
 
 
 @pytest.fixture
@@ -120,6 +133,24 @@ def pages_payload() -> dict[str, Any]:
         ],
         "paging": {"cursors": {"before": "a", "after": "b"}},
     }
+
+
+def debug_token_payload(
+    user_id: str = "10001",
+    scopes: list[str] | None = None,
+    expires_at: int | None = 1_900_000_000,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "app_id": FAKE_APP_ID,
+        "type": "USER",
+        "application": "AI Growth OS",
+        "is_valid": True,
+        "user_id": user_id,
+        "scopes": scopes if scopes is not None else ["pages_show_list", "instagram_basic"],
+    }
+    if expires_at is not None:
+        data["expires_at"] = expires_at
+    return {"data": data}
 
 
 def oauth_error_payload(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+from uuid import UUID
 
 from pydantic import (
     AliasChoices,
@@ -13,9 +14,10 @@ from pydantic import (
     Field,
     SecretStr,
     computed_field,
-    field_serializer,
     field_validator,
 )
+
+from src.modules.social_connect.domain.models import ConnectedAccount, PageAsset
 
 TokenType = Literal["bearer"]
 
@@ -56,10 +58,6 @@ class MetaTokenResponse(BaseModel):
             return None
         return self.issued_at + timedelta(seconds=self.expires_in)
 
-    @field_serializer("short_lived_token", "long_lived_token", when_used="json")
-    def _mask_tokens(self, value: SecretStr | None) -> str | None:
-        return "***" if value is not None else None
-
 
 class MetaPageInfo(BaseModel):
     """A Facebook Page the user manages plus its linked Instagram Business account."""
@@ -72,6 +70,9 @@ class MetaPageInfo(BaseModel):
     page_name: str = Field(..., validation_alias=AliasChoices("page_name", "name"))
     category: str | None = None
     instagram_business_account_id: str | None = None
+    instagram_username: str | None = None
+    instagram_name: str | None = None
+    instagram_profile_picture_url: str | None = None
     permissions: list[str] = Field(
         default_factory=list, validation_alias=AliasChoices("permissions", "tasks")
     )
@@ -93,10 +94,6 @@ class MetaPageInfo(BaseModel):
         msg = "permissions must be a list of strings"
         raise ValueError(msg)
 
-    @field_serializer("page_access_token", when_used="json")
-    def _mask_page_token(self, value: SecretStr | None) -> str | None:
-        return "***" if value is not None else None
-
     @classmethod
     def from_graph(cls, node: dict[str, object]) -> MetaPageInfo:
         """Build from a raw ``/me/accounts`` node (flattens ``instagram_business_account``)."""
@@ -104,26 +101,26 @@ class MetaPageInfo(BaseModel):
         ig = data.pop("instagram_business_account", None)
         if isinstance(ig, dict):
             data["instagram_business_account_id"] = ig.get("id")
+            data["instagram_username"] = ig.get("username")
+            data["instagram_name"] = ig.get("name")
+            data["instagram_profile_picture_url"] = ig.get("profile_picture_url")
         return cls.model_validate(data)
-
-
-class MetaConnectionResult(BaseModel):
-    """Response returned by the OAuth callback endpoint (tokens are already encrypted)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    provider: Literal["meta"] = "meta"
-    encrypted_user_token: str = Field(..., description="Fernet ciphertext; store as-is.")
-    token_expires_at: datetime | None
-    pages: list[MetaPageInfo]
-    instagram_accounts: list[str] = Field(default_factory=list)
 
 
 class MetaAuthorizeUrlResponse(BaseModel):
     """URL the frontend should redirect the user to in order to start OAuth."""
 
-    authorize_url: str
+    authorization_url: str
     state: str
+
+
+class ConnectionStartRequest(BaseModel):
+    """Body of ``POST /connections/start``."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    # TEMPORARY until auth module: the tenant is an explicit, caller-supplied value.
+    tenant_id: str = Field(..., min_length=1, max_length=64)
 
 
 class MetaDebugTokenInfo(BaseModel):
@@ -136,3 +133,62 @@ class MetaDebugTokenInfo(BaseModel):
     user_id: str | None = None
     scopes: list[str] = Field(default_factory=list)
     expires_at: int | None = None
+
+
+# ------------------------------------------------------------ public views ---
+# Zero-Secret: these are the ONLY shapes returned by the API. They have no
+# ``*_token`` / ``encrypted_*`` fields at all — not masked, simply absent.
+_SENSITIVE_ACCOUNT_FIELDS = frozenset({"encrypted_user_token"})
+_SENSITIVE_PAGE_FIELDS = frozenset({"encrypted_page_token"})
+
+
+class InstagramAssetPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
+
+    ig_user_id: str
+    username: str | None = None
+    name: str | None = None
+    profile_picture_url: str | None = None
+
+
+class PageAssetPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
+
+    page_id: str
+    page_name: str
+    category: str | None = None
+    tasks: list[str] = Field(default_factory=list)
+    instagram: InstagramAssetPublic | None = None
+
+    @classmethod
+    def from_domain(cls, page: PageAsset) -> PageAssetPublic:
+        return cls.model_validate(page.model_dump(exclude=set(_SENSITIVE_PAGE_FIELDS)))
+
+
+class ConnectedAccountPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
+
+    id: UUID
+    tenant_id: str
+    provider: str
+    provider_user_id: str
+    provider_user_name: str | None = None
+    # Named ``expires_at`` (not ``token_expires_at``) so the public contract has no field
+    # whose name even mentions a token. NULL = unknown, not "never expires" (D-055).
+    expires_at: datetime | None = Field(
+        default=None,
+        validation_alias=AliasChoices("expires_at", "token_expires_at"),
+        description="When the stored credential expires; null = unknown (D-055).",
+    )
+    granted_scopes: list[str] = Field(default_factory=list)
+    status: str
+    connected_at: datetime
+    last_synced_at: datetime | None = None
+    updated_at: datetime
+    pages: list[PageAssetPublic] = Field(default_factory=list)
+
+    @classmethod
+    def from_domain(cls, account: ConnectedAccount) -> ConnectedAccountPublic:
+        data = account.model_dump(exclude={"pages", *_SENSITIVE_ACCOUNT_FIELDS})
+        data["pages"] = [PageAssetPublic.from_domain(page) for page in account.pages]
+        return cls.model_validate(data)

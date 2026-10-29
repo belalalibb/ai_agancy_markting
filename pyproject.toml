@@ -17,7 +17,9 @@ dependencies = [
     "pydantic-settings>=2.2.0",
     "httpx>=0.27.0",
     "cryptography>=42.0.0",
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,7 @@ addopts = "-ra --strict-markers"
 markers = [
     "unit: isolated unit tests (no I/O)",
     "contract: contract tests against mocked external APIs",
+    "integration: requires a real PostgreSQL (TEST_DATABASE_URL); skipped otherwise",
 ]
 filterwarnings = [
     "error::DeprecationWarning:src.*",
@@ -56,7 +59,7 @@ filterwarnings = [
 [tool.ruff]
 target-version = "py312"
 line-length = 99
-src = ["src", "tests"]
+src = ["src", "tests", "alembic"]
 
 [tool.ruff.lint]
 select = [

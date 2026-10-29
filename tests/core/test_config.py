@@ -46,3 +46,42 @@ def test_invalid_graph_version_rejected(monkeypatch: pytest.MonkeyPatch, bad: st
 def test_get_settings_is_cached() -> None:
     get_settings.cache_clear()
     assert get_settings() is get_settings()
+
+
+# ------------------------------------------------------- SPRINT-02 Part A (C1/C3)
+def test_default_graph_version_is_v26(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("META_GRAPH_API_VERSION", raising=False)
+    assert Settings(_env_file=None).meta_graph_api_version == "v26.0"  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("expired", ["v19.0", "v20.0", "v12.0", "v2.11"])
+def test_rejects_expired_graph_version(monkeypatch: pytest.MonkeyPatch, expired: str) -> None:
+    monkeypatch.setenv("META_GRAPH_API_VERSION", expired)
+    with pytest.raises(ValueError, match="no longer supported.*v21.0.*2027-01-21"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("alive", ["v21.0", "v24.0", "v26.0", "v30.0"])
+def test_accepts_live_graph_versions(monkeypatch: pytest.MonkeyPatch, alive: str) -> None:
+    monkeypatch.setenv("META_GRAPH_API_VERSION", alive)
+    assert Settings(_env_file=None).meta_graph_api_version == alive  # type: ignore[call-arg]
+
+
+def test_default_scopes_are_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("META_OAUTH_SCOPES", raising=False)
+    scopes = Settings(_env_file=None).meta_scopes_list  # type: ignore[call-arg]
+    assert scopes == ["pages_show_list", "pages_read_engagement", "instagram_basic"]
+    assert not any("manage" in s or "publish" in s for s in scopes)
+
+
+def test_oauth_state_settings(settings: Settings) -> None:
+    assert settings.oauth_state_secret is not None
+    assert settings.oauth_state_secret.get_secret_value() not in repr(settings)
+    assert settings.oauth_state_ttl_seconds == 600
+
+
+def test_database_url_default_uses_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert Settings(_env_file=None).database_url.startswith(  # type: ignore[call-arg]
+        "postgresql+asyncpg://"
+    )

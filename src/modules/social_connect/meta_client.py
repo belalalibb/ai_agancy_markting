@@ -5,7 +5,8 @@ Design notes
 * Pure transport layer — no persistence, no encryption (those live in the service).
 * All calls go through :meth:`MetaGraphClient._request`, which centralises:
   - timeout handling,
-  - bounded exponential back-off for transient / throttled responses,
+  - bounded exponential back-off for *transient* failures only (rate limits are
+    surfaced immediately — Meta extends the block if you keep calling),
   - mapping of Graph API error payloads to typed exceptions.
 * An ``httpx.AsyncClient`` may be injected (tests inject a mocked transport).
 """
@@ -27,7 +28,6 @@ from src.core.config import Settings, get_settings
 from src.modules.social_connect.exceptions import (
     MetaGraphError,
     MetaNetworkError,
-    MetaRateLimitError,
     MetaTransientError,
     map_graph_error,
 )
@@ -37,7 +37,10 @@ from src.modules.social_connect.schemas import (
     MetaTokenResponse,
 )
 
-PAGE_FIELDS = "id,name,category,tasks,access_token,instagram_business_account{id,username}"
+PAGE_FIELDS = (
+    "id,name,category,tasks,access_token,"
+    "instagram_business_account{id,username,name,profile_picture_url}"
+)
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -236,17 +239,17 @@ class MetaGraphClient:
                 response.status_code,
                 retry_after_seconds=_retry_after(response),
             )
-            retryable = isinstance(error, MetaRateLimitError | MetaTransientError)
+            # C4: never retry on rate limiting — ``MetaRateLimitError`` is raised at once
+            # (its ``retry_after_seconds`` is forwarded as a ``Retry-After`` header upstream).
+            retryable = isinstance(error, MetaTransientError)
             if retryable and attempt < self._max_retries:
-                hint = error.retry_after_seconds if isinstance(error, MetaRateLimitError) else None
-                await self._backoff(attempt, hint=hint)
+                await self._backoff(attempt)
                 attempt += 1
                 continue
             raise error
 
-    async def _backoff(self, attempt: int, hint: float | None = None) -> None:
-        delay = hint if hint is not None else min(0.5 * (2**attempt), 8.0)
-        await self._sleep(delay)
+    async def _backoff(self, attempt: int) -> None:
+        await self._sleep(min(0.5 * (2**attempt), 8.0))
 
 
 # ------------------------------------------------------------------ utils ----

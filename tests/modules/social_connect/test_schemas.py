@@ -7,11 +7,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
+from src.modules.social_connect.domain.models import ConnectedAccount, InstagramAsset, PageAsset
 from src.modules.social_connect.schemas import (
+    ConnectedAccountPublic,
+    ConnectionStartRequest,
+    InstagramAssetPublic,
     MetaAuthRequest,
-    MetaConnectionResult,
     MetaPageInfo,
     MetaTokenResponse,
+    PageAssetPublic,
 )
 
 from tests.conftest import pages_payload
@@ -62,7 +66,9 @@ def test_token_response_masks_secrets_in_json_and_repr() -> None:
     dumped = tok.model_dump_json()
     assert "LL_SECRET" not in dumped
     assert "SL_SECRET" not in dumped
-    assert json.loads(dumped)["long_lived_token"] == "***"
+    # SPRINT-02: the explicit "***" serializer was removed (Zero-Secret → fields are
+    # simply absent from public schemas); SecretStr's own JSON masking still applies.
+    assert json.loads(dumped)["long_lived_token"] != "LL_SECRET"
     assert "LL_SECRET" not in repr(tok)
     assert tok.long_lived_token.get_secret_value() == "LL_SECRET"
 
@@ -120,16 +126,68 @@ def test_page_info_ignores_unknown_graph_fields() -> None:
     assert page.page_id == "9"
 
 
-# ---------------------------------------------------------- ConnectionResult
-def test_connection_result_serialises_without_plaintext_tokens() -> None:
-    pages = [MetaPageInfo.from_graph(n) for n in pages_payload()["data"]]
-    result = MetaConnectionResult(
-        encrypted_user_token="gAAAAA...",
-        token_expires_at=None,
-        pages=pages,
-        instagram_accounts=["17841400000001"],
+# ------------------------------------------------- Public views (SPRINT-02)
+def _sample_account() -> ConnectedAccount:
+    return ConnectedAccount(
+        tenant_id="t1",
+        provider_user_id="u1",
+        encrypted_user_token="gAAAAA-user",
+        granted_scopes=["pages_show_list"],
+        pages=[
+            PageAsset(
+                page_id="1001",
+                page_name="Nile",
+                tasks=["ANALYZE"],
+                encrypted_page_token="gAAAAA-page",
+                instagram=InstagramAsset(ig_user_id="178", username="nile"),
+            ),
+            PageAsset(page_id="1002", page_name="Cairo", encrypted_page_token="gAAAAA-page2"),
+        ],
     )
-    dumped = result.model_dump_json()
-    assert "PAGE_TOKEN" not in dumped
-    assert result.provider == "meta"
-    assert len(result.pages) == 2
+
+
+def test_public_schemas_have_no_token_fields() -> None:
+    for model in (ConnectedAccountPublic, PageAssetPublic, InstagramAssetPublic):
+        for name in model.model_fields:
+            assert "token" not in name.lower(), f"{model.__name__}.{name}"
+            assert "encrypted" not in name.lower(), f"{model.__name__}.{name}"
+
+
+def test_connected_account_public_from_domain_drops_secrets() -> None:
+    public = ConnectedAccountPublic.from_domain(_sample_account())
+    dumped = public.model_dump_json()
+    assert "gAAAAA" not in dumped
+    assert "token" not in dumped.lower()
+    assert "expires_at" in dumped
+    assert public.pages[0].instagram is not None
+    assert public.pages[0].instagram.username == "nile"
+    assert public.pages[1].instagram is None
+    assert public.provider == "meta"
+    assert public.status == "active"
+
+
+def test_page_info_from_graph_extracts_full_instagram_asset() -> None:
+    page = MetaPageInfo.from_graph(
+        {
+            "id": "1",
+            "name": "P",
+            "instagram_business_account": {
+                "id": "178",
+                "username": "nile",
+                "name": "Nile Coffee",
+                "profile_picture_url": "https://cdn.example/p.jpg",
+            },
+        }
+    )
+    assert page.instagram_business_account_id == "178"
+    assert page.instagram_username == "nile"
+    assert page.instagram_name == "Nile Coffee"
+    assert page.instagram_profile_picture_url == "https://cdn.example/p.jpg"
+
+
+def test_connection_start_request_validation() -> None:
+    assert ConnectionStartRequest(tenant_id="  demo ").tenant_id == "demo"
+    with pytest.raises(ValidationError):
+        ConnectionStartRequest(tenant_id="")
+    with pytest.raises(ValidationError):
+        ConnectionStartRequest(tenant_id="x", extra="no")  # type: ignore[call-arg]
