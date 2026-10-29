@@ -99,3 +99,38 @@ flowchart TD
 المستودع مهيأ بالكامل وموثق بـ 57 وثيقة معتمدة وميثاق معماري شامل.
 الخطوة التنفيذية النشطة المحددة في [`WORK_STATE.md`](./WORK_STATE.md) هي:
 **المرحلة 0 و 1 (Phase 0 & 1):** تأسيس هيكل تطبيق FastAPI الموحد وبناء تكامل منصات التواصل الاجتماعي الرسمية (**Meta Graph API / Facebook & Instagram**).
+
+---
+
+## ⚡ بروتوكول التشغيل المباشر الذاتي (Zero-Copy Agent Protocol)
+
+لتقليل مجهود المالك إلى أدنى حد ومنع الحاجة لأي نسخ ولصق بين الشاشات، يتواصل الوكلاء مباشرة عبر ملفات المستودع:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Owner as المالك (أنت)
+    participant Planner as 🧠 الوكيل المخطط
+    participant Repo as 📁 مستودع GitHub
+    participant Executor as 💻 الوكيل المنفذ
+
+    Note over Owner,Planner: 1. أمر التخطيط
+    Owner->>Planner: "اكتب التوجيه التالي في الريبو"
+    Planner->>Repo: يُنشئ ويُحدث CURRENT_DIRECTIVE.md + WORK_STATE.md
+
+    Note over Owner,Executor: 2. أمر التنفيذ
+    Owner->>Executor: "نفذ التوجيه الموجود في الريبو"
+    Repo-->>Executor: يقرأ CURRENT_DIRECTIVE.md
+    Executor->>Executor: يكتب الكود + ينفذ pytest
+    Executor->>Repo: يرفع الكود على work/implementation ويملأ تقرير الإنجاز
+
+    Note over Owner,Planner: 3. أمر المراجعة
+    Owner->>Planner: "راجع شغل المنفذ في الريبو"
+    Repo-->>Planner: يفحص الكود والـ Commit والتقرير
+    Planner->>Owner: "تمت المراجعة بنجاح، جاهز للدمج واقتراح الخطوة التالية"
+```
+
+### الأوامر البسيطة التي يحتاجها المالك فقط:
+1. **للمخطط:** *"اكتب التوجيه التالي في الريبو"*
+2. **للمنفذ:** *"نفذ التوجيه الموجود في الريبو"*
+3. **للمخطط:** *"راجع شغل المنفذ في الريبو واكتب التوجيه التالي"*
