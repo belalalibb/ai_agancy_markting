@@ -93,8 +93,19 @@ pytest -v tests/
 
 *يتم ملء هذا القسم من قِبل المنفذ فور الانتهاء وقبل تسليم المهمة للمالك والمخطط:*
 
-- **حالة التنفيذ:** `[ ] مكتمل ومختبر`
-- **رقم الكوميت (Commit SHA):** `...`
-- **نتيجة تشغيل pytest:** `...`
-- **الملفات التي تم إنشاؤها:** `...`
-- **ملاحظات أو أسئلة:** `...`
+- **حالة التنفيذ:** `[x] مكتمل ومختبر`
+- **رقم الكوميت (Commit SHA):** `118c0bbae1882012e1825fc1595d24db19489657` (كوميت الكود الموحّد على `work/implementation`؛ يليه كوميت توثيقي لهذا التقرير و `WORK_STATE.md`)
+- **نتيجة تشغيل pytest:** `pytest -v tests/` → **123 passed, 0 failed** (≈31s) — التغطية الإجمالية **99.6%** (`--cov=src`, الحد الأدنى المضبوط 85%) — `ruff check` + `ruff format --check`: **All checks passed** (PEP 8 + Type Hints كاملة).
+- **الملفات التي تم إنشاؤها:**
+  - **الإعدادات والحزم:** `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.env.template` (بدون أي أسرار؛ `.env` مستثنى من Git).
+  - **النواة `src/core/`:** `config.py` (Settings مكتوبة بـ pydantic-settings، أسرار بنوع `SecretStr`)، `security.py` (`TokenEncryptionService` بـ Fernet/MultiFernet: `encrypt_token` / `decrypt_token` / `rotate` + مصنع يفشل مبكراً عند غياب المفتاح)، `database.py` (محرك SQLAlchemy كسول لـ PostgreSQL 16+ وفق D-032؛ لا اتصال عند الاستيراد).
+  - **وحدة `src/modules/social_connect/`:** `schemas.py` (`MetaAuthRequest`, `MetaTokenResponse`, `MetaPageInfo`, `MetaConnectionResult`, `MetaAuthorizeUrlResponse`, `MetaDebugTokenInfo` — التوكنات مقنّعة `***` في JSON/repr)، `exceptions.py` (تحويل أخطاء Graph API إلى استثناءات مكتوبة: `MetaOAuthError`/`MetaTokenExpiredError` لكود 190، `MetaPermissionError`، `MetaRateLimitError`، `MetaTransientError`، `MetaNetworkError`)، `meta_client.py` (`MetaGraphClient`: بناء رابط Facebook Login مع `state` CSRF، تبادل الـ code → توكن قصير → توكن طويل المدى، `GET /me/accounts` مع تتبّع الصفحات (pagination) و`appsecret_proof`، إعادة محاولة محدودة مع backoff أُسّي واحترام `Retry-After`)، `service.py` (`MetaConnectService`: التدفق الكامل وتشفير التوكن قبل مغادرة الطبقة)، `router.py` (مسارات `/api/v1/social/meta/authorize-url|token|connect` مع تحويل الأخطاء إلى 401/403/429/502/400/503).
+  - **نقطة الدخول:** `src/main.py` (مصنع التطبيق، `/docs`, `/redoc`, `/health`).
+  - **الاختبارات `tests/`:** `conftest.py` (بيئة معزولة + Mock لـ Graph API عبر `respx`)، `core/test_config.py`, `core/test_security.py`, `core/test_database.py`, `modules/social_connect/test_schemas.py`, `test_exceptions.py`, `test_meta_client.py`, `test_service.py`, `test_router.py`.
+  - **أدوات التشغيل:** `scripts/backup_progress.sh` (نسخة احتياطية قابلة للاسترجاع: git bundle + patch للتغييرات غير المُكمَّتة → محلياً + AI Drive + دفع للفرع البعيد؛ وضع `--restore` للاستعادة).
+- **ملاحظات أو أسئلة:**
+  1. **معايير القبول — كلها محققة:** `/docs` يعمل على خادم uvicorn فعلي (HTTP 200 + Swagger UI)؛ اختبارات التشفير/فك التشفير ومطابقة الأصل (+ رفض العبث وتدوير المفاتيح)؛ دورة OAuth كاملة بـ Mock؛ استرجاع الصفحات وحسابات Instagram Business (مع pagination)؛ معالجة `OAuthException` كود 190/463 للتوكن المنتهي → `MetaTokenExpiredError` → HTTP 401 ببنية خطأ موحّدة تتضمن `fbtrace_id`.
+  2. **قرار تصميمي يحتاج تأكيد المخطط:** أخطاء الصلاحيات التي يُرجعها Graph بنوع `OAuthException` (مثل `(#200) Requires pages_show_list`) تُصنَّف كـ `MetaOAuthError` → 401 (يتطلب إعادة تفويض) وليس 403؛ أما كود 10/200-299 بدون نوع OAuth فتُصنَّف 403. يمكن عكس الأولوية بسطر واحد في `map_graph_error` إن رغب المخطط.
+  3. **خارج نطاق هذا السبرنت (مقترح للمهمة التالية):** تخزين `MetaConnectionResult` خلف واجهة Repository (جدول `social_connections` في PostgreSQL)، مسار `/callback` خادمي يتحقق من `state` ويستدعي `/connect`، وتوثيق صلاحيات App Review المطلوبة لدى Meta.
+  4. **الأمن:** لا توجد أي أسرار في الكود أو الاختبارات أو رسائل الكوميت؛ الاختبارات تستخدم قيماً وهمية صريحة ومفتاح Fernet يُولَّد لحظياً. ملاحظات bandit المتبقية (S105/S107) إيجابيات كاذبة مُعلَّقة بـ `noqa` مع التبرير.
+  5. **ملاحظة بيئة:** `pytest-asyncio` بوضع `auto`؛ تحذير Starlette حول `httpx2` تحذير توافقي من المكتبة ولا يؤثر على النتائج.
