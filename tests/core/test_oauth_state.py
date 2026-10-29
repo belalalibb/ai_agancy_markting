@@ -61,9 +61,14 @@ def test_oauth_state_tampered_rejected(signer: OAuthStateSigner) -> None:
     )
     with pytest.raises(InvalidOAuthStateError, match="signature"):
         signer.verify(f"{forged_body}.{sig}")
-    # Flipping a signature character must fail too.
-    flipped = sig[:-1] + ("A" if sig[-1] != "A" else "B")
-    with pytest.raises(InvalidOAuthStateError):
+    # Flipping a signature *bit* must fail too (SPRINT-02.1 F1).
+    # The 32-byte HMAC is 43 base64url chars; the last char only carries 2 significant
+    # bits, so swapping that *character* could decode to the very same bytes and the
+    # old "A"/"B" character swap was therefore flaky. Tamper at the byte level instead.
+    sig_bytes = bytearray(base64.urlsafe_b64decode(sig + "=" * (-len(sig) % 4)))
+    sig_bytes[0] ^= 0x01
+    flipped = base64.urlsafe_b64encode(bytes(sig_bytes)).rstrip(b"=").decode()
+    with pytest.raises(InvalidOAuthStateError, match="signature"):
         signer.verify(f"{body}.{flipped}")
 
 

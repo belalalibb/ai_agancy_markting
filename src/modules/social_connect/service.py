@@ -4,7 +4,10 @@ Responsibilities
 ----------------
 1. ``start_connection``    — issue a signed CSRF ``state`` and the Facebook Login URL.
 2. ``complete_connection`` — verify ``state`` → exchange ``code`` → identify the user via
-   ``/debug_token`` → list Pages (+ IG accounts) → encrypt every token → persist.
+   ``GET /me`` (mandatory, trusted identity) → validate the token via ``/debug_token``
+   (optional: when present it must be valid, issued to *our* app and belong to the same
+   user as ``/me``) → list Pages (+ IG accounts) → encrypt every token → persist.
+   There is deliberately **no derived / fallback identity** (SPRINT-02.1 F3).
 3. ``list/get/disconnect`` — tenant-scoped reads/deletes through the repository.
 
 The service never touches SQLAlchemy (ARCHITECTURE_LOCK D-013); persistence is behind
@@ -29,7 +32,12 @@ from src.modules.social_connect.domain.models import (
     Provider,
 )
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
-from src.modules.social_connect.exceptions import MetaGraphError, MetaTokenExpiredError
+from src.modules.social_connect.exceptions import (
+    MetaGraphError,
+    MetaTokenExpiredError,
+    MetaTokenForeignAppError,
+    MetaTokenInvalidError,
+)
 from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.social_connect.schemas import (
     MetaAuthorizeUrlResponse,
@@ -75,25 +83,43 @@ class MetaConnectService:
         )
         long_lived = token.long_lived_token.get_secret_value()
 
-        # Step 3 (§5-C): identity, scopes and expiry come from ``/debug_token``; when it is
-        # unavailable we deliberately record *unknown* (``None`` / ``[]``) rather than guess.
+        # Step 3 (SPRINT-02.1 F2/F3): the identity is *always* the token owner per ``/me``.
+        # A failure here is fatal — we never persist a connection with a guessed identity.
+        me = await self._client.get_me(long_lived)
+
+        # ``/debug_token`` is best-effort for scopes/expiry, but when it does answer its
+        # verdict is binding (F5): the token must be valid, ours, and belong to ``me``.
         debug = await self._inspect_token(long_lived)
-        provider_user_id = debug.user_id if debug and debug.user_id else None
+        if debug is not None:
+            if not debug.is_valid:
+                raise MetaTokenInvalidError(
+                    "debug_token reports the access token as invalid",
+                    code=debug.error_code or 190,
+                    error_type="OAuthException",
+                    http_status=200,
+                )
+            if debug.app_id and debug.app_id != self._settings.meta_app_id:
+                raise MetaTokenForeignAppError(
+                    "debug_token app_id does not match this application",
+                    error_type="OAuthException",
+                    http_status=200,
+                )
+            if debug.user_id and debug.user_id != me.id:
+                raise MetaTokenForeignAppError(
+                    "debug_token user_id does not match /me",
+                    error_type="OAuthException",
+                    http_status=200,
+                )
         granted_scopes = list(debug.scopes) if debug else []
         token_expires_at = _expiry_from_debug(debug) if debug else None
 
         pages = await self._client.get_user_pages(long_lived)
 
-        if provider_user_id is None:
-            # ``/debug_token`` did not identify the user; fall back to a stable, derived
-            # identity so the unique constraint still de-duplicates re-connections.
-            provider_user_id = _fallback_identity(pages)
-
         account = ConnectedAccount(
             tenant_id=tenant_id,
             provider=Provider.META,
-            provider_user_id=provider_user_id,
-            provider_user_name=None,
+            provider_user_id=me.id,
+            provider_user_name=me.name,
             encrypted_user_token=self._encryption.encrypt_token(long_lived),
             token_expires_at=token_expires_at,
             granted_scopes=granted_scopes,
@@ -124,7 +150,8 @@ class MetaConnectService:
         """``/debug_token`` with graceful degradation (SPRINT-02 §5-C step 3).
 
         A 190 (invalid/expired token) is fatal — the token we just received is unusable.
-        Any other Graph failure is logged (without the token) and treated as *unknown*.
+        Any other Graph failure is logged (without the token) and treated as *unknown*
+        scopes/expiry; identity is unaffected because it comes from ``/me``.
         """
         try:
             return await self._client.debug_token(long_lived)
@@ -141,13 +168,14 @@ class MetaConnectService:
             return None
 
     def _to_page_asset(self, page: MetaPageInfo) -> PageAsset:
-        # A Page without ``access_token`` (user lacks a Page role) is stored with an empty
-        # ciphertext so the Page is still visible; nothing can be decrypted from it.
+        # A Page without ``access_token`` (user lacks a Page role) is stored with
+        # ``encrypted_page_token = NULL`` (F4): the Page stays visible, nothing is
+        # encrypted (``encrypt_token("")`` would raise) and nothing can be decrypted.
         raw_page_token = (
-            page.page_access_token.get_secret_value() if page.page_access_token else ""
+            page.page_access_token.get_secret_value() if page.page_access_token else None
         )
         encrypted_page_token = (
-            self._encryption.encrypt_token(raw_page_token) if raw_page_token else ""
+            self._encryption.encrypt_token(raw_page_token) if raw_page_token else None
         )
         instagram = (
             InstagramAsset(
@@ -174,10 +202,3 @@ def _expiry_from_debug(debug: MetaDebugTokenInfo) -> datetime | None:
     if not debug.expires_at:
         return None
     return datetime.fromtimestamp(debug.expires_at, tz=UTC)
-
-
-def _fallback_identity(pages: list[MetaPageInfo]) -> str:
-    """Derive a deterministic provider identity when ``/debug_token`` is unavailable."""
-    if pages:
-        return "pages:" + ",".join(sorted(p.page_id for p in pages))[:58]
-    return "unknown"

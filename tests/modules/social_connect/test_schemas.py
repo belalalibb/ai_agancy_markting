@@ -13,8 +13,10 @@ from src.modules.social_connect.schemas import (
     ConnectionStartRequest,
     InstagramAssetPublic,
     MetaAuthRequest,
+    MetaDebugTokenInfo,
     MetaPageInfo,
     MetaTokenResponse,
+    MetaUserInfo,
     PageAssetPublic,
 )
 
@@ -146,9 +148,16 @@ def _sample_account() -> ConnectedAccount:
     )
 
 
+# The single sanctioned exception: a derived boolean flag (SPRINT-02.1 F4) — not a token.
+_ALLOWED_FLAG_FIELDS = frozenset({"has_page_token"})
+
+
 def test_public_schemas_have_no_token_fields() -> None:
     for model in (ConnectedAccountPublic, PageAssetPublic, InstagramAssetPublic):
-        for name in model.model_fields:
+        for name, info in model.model_fields.items():
+            if name in _ALLOWED_FLAG_FIELDS:
+                assert info.annotation is bool, f"{model.__name__}.{name} must be a bool flag"
+                continue
             assert "token" not in name.lower(), f"{model.__name__}.{name}"
             assert "encrypted" not in name.lower(), f"{model.__name__}.{name}"
 
@@ -157,7 +166,7 @@ def test_connected_account_public_from_domain_drops_secrets() -> None:
     public = ConnectedAccountPublic.from_domain(_sample_account())
     dumped = public.model_dump_json()
     assert "gAAAAA" not in dumped
-    assert "token" not in dumped.lower()
+    assert "token" not in dumped.lower().replace("has_page_token", "")
     assert "expires_at" in dumped
     assert public.pages[0].instagram is not None
     assert public.pages[0].instagram.username == "nile"
@@ -191,3 +200,29 @@ def test_connection_start_request_validation() -> None:
         ConnectionStartRequest(tenant_id="")
     with pytest.raises(ValidationError):
         ConnectionStartRequest(tenant_id="x", extra="no")  # type: ignore[call-arg]
+
+
+def test_page_asset_public_has_page_token_flag() -> None:
+    """H9 — ``has_page_token`` is derived from ``encrypted_page_token`` and leaks nothing."""
+    with_token = PageAssetPublic.from_domain(
+        PageAsset(page_id="1", page_name="A", encrypted_page_token="gAAAAA-cipher")
+    )
+    without_token = PageAssetPublic.from_domain(
+        PageAsset(page_id="2", page_name="B", encrypted_page_token=None)
+    )
+    assert with_token.has_page_token is True
+    assert without_token.has_page_token is False
+    assert "gAAAAA" not in with_token.model_dump_json()
+    assert "encrypted" not in with_token.model_dump_json()
+    # Default ``PageAsset`` (no token supplied at all) also maps to False.
+    assert (
+        PageAssetPublic.from_domain(PageAsset(page_id="3", page_name="C")).has_page_token is False
+    )
+
+
+def test_meta_user_info_and_debug_error_code_schema() -> None:
+    assert MetaUserInfo(id="1").name is None
+    assert MetaUserInfo(id="1", name="N").name == "N"
+    info = MetaDebugTokenInfo(app_id="a", is_valid=False, error_code=190)
+    assert info.error_code == 190
+    assert MetaDebugTokenInfo(app_id="a", is_valid=True).error_code is None

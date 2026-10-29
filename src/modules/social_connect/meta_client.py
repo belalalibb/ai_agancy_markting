@@ -35,12 +35,17 @@ from src.modules.social_connect.schemas import (
     MetaDebugTokenInfo,
     MetaPageInfo,
     MetaTokenResponse,
+    MetaUserInfo,
 )
 
 PAGE_FIELDS = (
     "id,name,category,tasks,access_token,"
     "instagram_business_account{id,username,name,profile_picture_url}"
 )
+
+# F8: hard upper bound on cursor-pagination hops for ``/me/accounts`` (100 Pages per
+# hop → 5 000 Pages). A ``paging.next`` that never ends must not loop forever.
+MAX_PAGINATION_REQUESTS: int = 50
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -164,12 +169,31 @@ class MetaGraphClient:
         )
         data = payload.get("data") or {}
         scopes = data.get("scopes") or []
+        error = data.get("error") if isinstance(data.get("error"), dict) else {}
         return MetaDebugTokenInfo(
             app_id=str(data.get("app_id", "")),
             is_valid=bool(data.get("is_valid", False)),
             user_id=str(data["user_id"]) if data.get("user_id") is not None else None,
             scopes=[str(s) for s in scopes],
             expires_at=int(data["expires_at"]) if data.get("expires_at") is not None else None,
+            error_code=_as_optional_int(error.get("code")),
+        )
+
+    async def get_me(self, user_access_token: str) -> MetaUserInfo:
+        """``GET /me`` — the *trusted* identity of the token's owner (SPRINT-02.1 F2)."""
+        payload = await self._request(
+            "GET",
+            "/me",
+            params={
+                "fields": "id,name",
+                "access_token": user_access_token,
+                "appsecret_proof": self.appsecret_proof(user_access_token),
+            },
+        )
+        name = payload.get("name")
+        return MetaUserInfo(
+            id=_require_str(payload, "id"),
+            name=str(name) if isinstance(name, str) and name else None,
         )
 
     # ------------------------------------------------------------- Pages ----
@@ -183,12 +207,19 @@ class MetaGraphClient:
             "limit": 100,
         }
         next_url: str | None = None
+        requests_made = 0
         while True:
+            if requests_made >= MAX_PAGINATION_REQUESTS:
+                raise MetaGraphError(
+                    "Pagination exceeded MAX_PAGINATION_REQUESTS",
+                    http_status=200,
+                )
             payload = (
                 await self._request("GET", "/me/accounts", params=params)
                 if next_url is None
                 else await self._request_absolute("GET", next_url)
             )
+            requests_made += 1
             for node in payload.get("data") or []:
                 if isinstance(node, dict):
                     pages.append(MetaPageInfo.from_graph(node))
@@ -268,6 +299,13 @@ def _retry_after(response: httpx.Response) -> float | None:
     try:
         return float(header)
     except ValueError:
+        return None
+
+
+def _as_optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
         return None
 
 

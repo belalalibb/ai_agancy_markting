@@ -34,6 +34,7 @@ from tests.conftest import (
     FAKE_APP_SECRET,
     FAKE_STATE_SECRET,
     debug_token_payload,
+    me_payload,
     oauth_error_payload,
     pages_payload,
     token_payload,
@@ -43,7 +44,11 @@ from tests.fakes import FakeConnectedAccountRepository
 pytestmark = pytest.mark.contract
 
 BASE = "/api/v1/social/meta"
-SECRET_PATTERNS = re.compile(r"token|encrypted|\*\*\*|EAA|LONG_LIVED|PAGE_TOKEN", re.IGNORECASE)
+# ``has_page_token`` is a derived boolean (SPRINT-02.1 F4) — the only "token"-named key
+# allowed in a public body; everything else matching this pattern is a leak.
+SECRET_PATTERNS = re.compile(
+    r"(?<!has_page_)token|encrypted|\*\*\*|EAA|LONG_LIVED|PAGE_TOKEN_", re.IGNORECASE
+)
 
 
 @pytest.fixture
@@ -62,6 +67,9 @@ def _stub_oauth(graph_mock: respx.MockRouter) -> None:
 
 def _stub_happy_path(graph_mock: respx.MockRouter) -> None:
     _stub_oauth(graph_mock)
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload())
+    )
     graph_mock.get("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
@@ -106,6 +114,7 @@ def test_openapi_lists_exactly_the_new_meta_routes(client: TestClient) -> None:
         f"{BASE}/connections",
         f"{BASE}/connections/{{connection_id}}",
         "/health",
+        "/health/ready",
     }
     assert set(paths[f"{BASE}/connections/{{connection_id}}"]) == {"get", "delete"}
     assert schema["info"]["title"] == "AI Growth OS"
@@ -156,8 +165,10 @@ def test_callback_persists_and_returns_public_account(
     body = res.json()
     assert body["tenant_id"] == "demo"
     assert body["provider"] == "meta"
-    assert body["provider_user_id"] == "10001"
+    assert body["provider_user_id"] == "10001"  # from /me, not /debug_token
+    assert body["provider_user_name"] == "Nile Owner"
     assert body["status"] == "active"
+    assert all(p["has_page_token"] is True for p in body["pages"])
     assert body["granted_scopes"] == ["pages_show_list", "instagram_basic"]
     assert body["expires_at"].startswith("2030-03-17")  # from debug_token expires_at
     assert "token_expires_at" not in body
@@ -229,6 +240,9 @@ def test_callback_expired_token_returns_401(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
     _stub_oauth(graph_mock)
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload())
+    )
     graph_mock.get("/debug_token").mock(
         return_value=httpx.Response(401, json=oauth_error_payload())
     )
@@ -242,6 +256,9 @@ def test_callback_rate_limited_returns_429_with_retry_after(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
     _stub_oauth(graph_mock)
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload())
+    )
     graph_mock.get("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
@@ -263,6 +280,9 @@ def test_callback_rate_limited_without_retry_after(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
     _stub_oauth(graph_mock)
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload())
+    )
     graph_mock.get("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
@@ -278,6 +298,9 @@ def test_callback_permission_error_returns_403(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
     _stub_oauth(graph_mock)
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload())
+    )
     graph_mock.get("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
@@ -430,7 +453,7 @@ def test_missing_state_secret_returns_503(app: FastAPI, monkeypatch: pytest.Monk
         (MetaRateLimitError("limit", code=4), 429, "retry_later"),
         (MetaTransientError("oops", http_status=503), 502, None),
         (MetaNetworkError("timeout"), 502, None),
-        (MetaGraphError("unknown", code=100), 400, None),
+        (MetaGraphError("unmapped", code=100), 400, None),
     ],
 )
 def test_required_action_in_error_detail(

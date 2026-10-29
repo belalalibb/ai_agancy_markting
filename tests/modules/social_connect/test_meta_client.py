@@ -22,7 +22,11 @@ from src.modules.social_connect.exceptions import (
     MetaTokenExpiredError,
     MetaTransientError,
 )
-from src.modules.social_connect.meta_client import PAGE_FIELDS, MetaGraphClient
+from src.modules.social_connect.meta_client import (
+    MAX_PAGINATION_REQUESTS,
+    PAGE_FIELDS,
+    MetaGraphClient,
+)
 
 from tests.conftest import (
     FAKE_APP_ID,
@@ -440,3 +444,138 @@ async def test_debug_token_handles_sparse_payload(
     assert info.is_valid is False
     assert info.user_id is None
     assert info.expires_at is None
+
+
+# -------------------------------------------------------- SPRINT-02.1 (H2, H13)
+async def test_get_me_returns_identity_and_sends_appsecret_proof(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    """H2 — ``GET /me?fields=id,name`` carries the token + its ``appsecret_proof``."""
+    route = graph_mock.get("/me").mock(
+        return_value=httpx.Response(200, json={"id": "10001", "name": "Nile Owner"})
+    )
+    me = await meta_client.get_me("USER_TOKEN")
+    assert me.id == "10001"
+    assert me.name == "Nile Owner"
+    qs = dict(route.calls[0].request.url.params)
+    assert qs["fields"] == "id,name"
+    assert qs["access_token"] == "USER_TOKEN"
+    assert qs["appsecret_proof"] == meta_client.appsecret_proof("USER_TOKEN")
+    assert route.calls[0].request.url.path.endswith(f"/{GRAPH_VERSION}/me")
+
+
+async def test_get_me_without_name_and_numeric_id(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    graph_mock.get("/me").mock(return_value=httpx.Response(200, json={"id": "7", "name": ""}))
+    me = await meta_client.get_me("T")
+    assert me.id == "7"
+    assert me.name is None
+
+
+async def test_get_me_missing_id_is_malformed(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    graph_mock.get("/me").mock(return_value=httpx.Response(200, json={"name": "x"}))
+    with pytest.raises(MetaGraphError, match="missing 'id'"):
+        await meta_client.get_me("T")
+
+
+async def test_get_me_expired_token_raises_token_expired(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    graph_mock.get("/me").mock(return_value=httpx.Response(401, json=oauth_error_payload()))
+    with pytest.raises(MetaTokenExpiredError):
+        await meta_client.get_me("T")
+
+
+async def test_debug_token_reads_error_code(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    graph_mock.get("/debug_token").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "app_id": FAKE_APP_ID,
+                    "is_valid": False,
+                    "error": {"code": 190, "message": "Invalid OAuth access token."},
+                }
+            },
+        )
+    )
+    info = await meta_client.debug_token("TOKEN")
+    assert info.is_valid is False
+    assert info.error_code == 190
+
+
+async def test_debug_token_error_code_tolerates_garbage(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    graph_mock.get("/debug_token").mock(
+        return_value=httpx.Response(
+            200, json={"data": {"is_valid": False, "error": {"code": "not-a-number"}}}
+        )
+    )
+    assert (await meta_client.debug_token("TOKEN")).error_code is None
+    graph_mock.get("/debug_token").mock(
+        return_value=httpx.Response(200, json={"data": {"is_valid": False, "error": "weird"}})
+    )
+    assert (await meta_client.debug_token("TOKEN")).error_code is None
+
+
+async def test_pagination_cap_raises_after_max(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    """H13 — a ``paging.next`` that never ends is cut off at ``MAX_PAGINATION_REQUESTS``."""
+    endless = {
+        "data": [{"id": "1", "name": "Loop", "tasks": []}],
+        "paging": {"next": f"{GRAPH_BASE}/me/accounts?after=zzz&access_token=T"},
+    }
+    route = graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=endless))
+    with pytest.raises(MetaGraphError, match="MAX_PAGINATION_REQUESTS") as exc_info:
+        await meta_client.get_user_pages("T")
+    assert route.call_count == MAX_PAGINATION_REQUESTS
+    assert exc_info.value.http_status == 200
+    assert MAX_PAGINATION_REQUESTS == 50
+
+
+async def test_pagination_exactly_at_cap_succeeds(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    """Exactly ``MAX_PAGINATION_REQUESTS`` hops (last one without ``next``) is allowed."""
+    counter = {"n": 0}
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        counter["n"] += 1
+        body: dict = {"data": [{"id": str(counter["n"]), "name": "P", "tasks": []}]}
+        if counter["n"] < MAX_PAGINATION_REQUESTS:
+            body["paging"] = {"next": f"{GRAPH_BASE}/me/accounts?after={counter['n']}"}
+        return httpx.Response(200, json=body)
+
+    graph_mock.get("/me/accounts").mock(side_effect=_respond)
+    pages = await meta_client.get_user_pages("T")
+    assert len(pages) == MAX_PAGINATION_REQUESTS
+    assert counter["n"] == MAX_PAGINATION_REQUESTS
+
+
+async def test_repeated_5xx_stops_after_max_retries_plus_one(
+    settings: Settings, graph_mock: respx.MockRouter
+) -> None:
+    """F8 — ``_request_absolute`` is bounded: ``max_retries + 1`` attempts, then raise."""
+    sleeps: list[float] = []
+
+    async def _record(delay: float) -> None:
+        sleeps.append(delay)
+
+    route = graph_mock.get("/me").mock(return_value=httpx.Response(503, text="down"))
+    for max_retries in (0, 1, 4):
+        before = route.call_count
+        cfg = settings.model_copy(update={"meta_http_max_retries": max_retries})
+        async with httpx.AsyncClient() as http:
+            client = MetaGraphClient(settings=cfg, http_client=http, sleep=_record)
+            with pytest.raises(MetaTransientError):
+                await client.get_me("T")
+        assert route.call_count - before == max_retries + 1, max_retries
+        assert len(sleeps) == max_retries
+        sleeps.clear()

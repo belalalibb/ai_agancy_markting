@@ -13,9 +13,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core import database
 from src.core.config import Settings, get_settings
+from src.core.database import get_db_session
 from src.modules.social_connect import router as social_connect_router
 
 
@@ -25,7 +31,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     One shared ``httpx.AsyncClient`` (connection pool) lives for the app's lifetime and is
     injected into ``MetaGraphClient``. No database connection is opened eagerly — the
-    async engine connects lazily on first request.
+    async engine connects lazily on first request. On shutdown the engine's pool is
+    disposed *only if it was ever created* (SPRINT-02.1 F6) so a DB-less boot stays DB-less.
     """
     settings: Settings = getattr(app.state, "settings", None) or get_settings()
     app.state.settings = settings
@@ -37,6 +44,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.http_client.aclose()
+        if database.get_engine.cache_info().currsize > 0:
+            await database.get_engine().dispose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -63,6 +72,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", tags=["System"], summary="Liveness probe")
     def health() -> dict[str, str]:
         return {"status": "ok", "app": settings.app_name, "env": settings.app_env}
+
+    @app.get(
+        "/health/ready",
+        tags=["System"],
+        summary="Readiness probe (database reachable)",
+        responses={503: {"description": "Database unreachable"}},
+    )
+    async def health_ready(
+        session: AsyncSession = Depends(get_db_session),  # noqa: B008 - FastAPI DI idiom
+    ) -> JSONResponse:
+        # F7: a real round-trip; the error body never echoes the DSN or driver message.
+        try:
+            await session.execute(text("SELECT 1"))
+        except (SQLAlchemyError, OSError):
+            return JSONResponse(
+                status_code=503, content={"status": "not_ready", "database": "unreachable"}
+            )
+        return JSONResponse(status_code=200, content={"status": "ready", "database": "ok"})
 
     return app
 

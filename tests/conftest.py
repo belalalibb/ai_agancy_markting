@@ -135,21 +135,35 @@ def pages_payload() -> dict[str, Any]:
     }
 
 
+def me_payload(user_id: str = "10001", name: str | None = "Nile Owner") -> dict[str, Any]:
+    """``GET /me?fields=id,name`` — the trusted identity (SPRINT-02.1 F2)."""
+    data: dict[str, Any] = {"id": user_id}
+    if name is not None:
+        data["name"] = name
+    return data
+
+
 def debug_token_payload(
     user_id: str = "10001",
     scopes: list[str] | None = None,
     expires_at: int | None = 1_900_000_000,
+    *,
+    app_id: str = FAKE_APP_ID,
+    is_valid: bool = True,
+    error_code: int | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
-        "app_id": FAKE_APP_ID,
+        "app_id": app_id,
         "type": "USER",
         "application": "AI Growth OS",
-        "is_valid": True,
+        "is_valid": is_valid,
         "user_id": user_id,
         "scopes": scopes if scopes is not None else ["pages_show_list", "instagram_basic"],
     }
     if expires_at is not None:
         data["expires_at"] = expires_at
+    if error_code is not None:
+        data["error"] = {"code": error_code, "message": "Invalid OAuth access token."}
     return {"data": data}
 
 
