@@ -46,8 +46,10 @@ pytestmark = pytest.mark.contract
 BASE = "/api/v1/social/meta"
 # ``has_page_token`` is a derived boolean (SPRINT-02.1 F4) — the only "token"-named key
 # allowed in a public body; everything else matching this pattern is a leak.
+# ``EAA`` (Meta token prefix) is matched case-sensitively: with IGNORECASE a random UUID such
+# as ``7a69deaa-…`` produced a false positive (flaky CI run on SPRINT-03 PR #7).
 SECRET_PATTERNS = re.compile(
-    r"(?<!has_page_)token|encrypted|\*\*\*|EAA|LONG_LIVED|PAGE_TOKEN_", re.IGNORECASE
+    r"(?<!has_page_)token|encrypted|\*\*\*|(?-i:EAA)|LONG_LIVED|PAGE_TOKEN_", re.IGNORECASE
 )
 
 

@@ -59,7 +59,7 @@ filterwarnings = [
 [tool.ruff]
 target-version = "py312"
 line-length = 99
-src = ["src", "tests", "alembic"]
+src = ["src", "tests", "alembic", "scripts"]
 
 [tool.ruff.lint]
 select = [

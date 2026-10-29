@@ -441,8 +441,8 @@ def test_alembic_0002_upgrade_downgrade_roundtrip_with_null_rows() -> None:
     asyncio.run(_run(f"TRUNCATE {', '.join(TABLES)} CASCADE"))
 
 
-def test_health_ready_200_with_db(integration_app: FastAPI) -> None:
-    """H12 — readiness probe performs a real ``SELECT 1`` against PostgreSQL."""
+def test_health_ready_live_200(integration_app: FastAPI) -> None:
+    """A-T3 (ex-H12) — readiness probe does a real ``engine.connect()`` + ``SELECT 1`` on PG."""
     with TestClient(integration_app) as client:
         res = client.get("/health/ready")
         assert res.status_code == 200, res.text
