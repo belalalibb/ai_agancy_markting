@@ -21,7 +21,8 @@ from src.modules.social_connect.meta_client import MetaGraphClient
 
 FAKE_APP_ID = "123456789012345"
 FAKE_APP_SECRET = "fake-app-secret-for-tests-only"
-GRAPH_VERSION = "v19.0"
+FAKE_STATE_SECRET = "fake-oauth-state-secret-for-tests-only"
+GRAPH_VERSION = "v26.0"
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
 
@@ -40,6 +41,7 @@ def _test_env(monkeypatch: pytest.MonkeyPatch, fernet_key: str) -> Iterator[None
         "META_APP_ID": FAKE_APP_ID,
         "META_APP_SECRET": FAKE_APP_SECRET,
         "META_GRAPH_API_VERSION": GRAPH_VERSION,
+        "OAUTH_STATE_SECRET": FAKE_STATE_SECRET,
         "META_HTTP_MAX_RETRIES": "2",
         "META_HTTP_TIMEOUT_SECONDS": "1",
     }

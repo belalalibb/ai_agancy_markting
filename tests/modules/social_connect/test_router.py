@@ -10,6 +10,16 @@ from fastapi.testclient import TestClient
 from src.core.config import Settings, get_settings
 from src.core.security import TokenEncryptionService
 from src.main import app as module_level_app
+from src.modules.social_connect.exceptions import (
+    MetaGraphError,
+    MetaNetworkError,
+    MetaOAuthError,
+    MetaPermissionError,
+    MetaRateLimitError,
+    MetaTokenExpiredError,
+    MetaTransientError,
+)
+from src.modules.social_connect.router import _to_http
 
 from tests.conftest import FAKE_APP_SECRET, oauth_error_payload, pages_payload, token_payload
 
@@ -268,3 +278,28 @@ def test_authorize_url_works_without_encryption_key(
         assert res.json()["authorize_url"].startswith("https://www.facebook.com/")
     finally:
         app.dependency_overrides.clear()
+
+
+# ----------------------------------------- SPRINT-02 A4: required_action --
+@pytest.mark.parametrize(
+    ("exc", "expected_status", "expected_action"),
+    [
+        (MetaTokenExpiredError("expired", code=190), 401, "reconnect"),
+        (MetaOAuthError("bad code", code=100), 401, "reconnect"),
+        (
+            MetaPermissionError("(#200) missing", code=200),
+            403,
+            "reauthorize_with_additional_scopes",
+        ),
+        (MetaRateLimitError("limit", code=4), 429, "retry_later"),
+        (MetaTransientError("oops", http_status=503), 502, None),
+        (MetaNetworkError("timeout"), 502, None),
+        (MetaGraphError("unknown", code=100), 400, None),
+    ],
+)
+def test_required_action_in_error_detail(
+    exc: MetaGraphError, expected_status: int, expected_action: str | None
+) -> None:
+    http_exc = _to_http(exc)
+    assert http_exc.status_code == expected_status
+    assert http_exc.detail["required_action"] == expected_action  # type: ignore[index]

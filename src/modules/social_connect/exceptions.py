@@ -95,12 +95,18 @@ def map_graph_error(
         exc.retry_after_seconds = retry_after_seconds
         return exc
 
+    # Permission codes win over the generic ``OAuthException`` type: Meta reports a
+    # *missing permission* (code 10 / 200-299) with ``type == "OAuthException"`` too,
+    # but the remedy is re-authorising with extra scopes (403), not re-login (401).
+    if code in _PERMISSION_CODES:
+        return MetaPermissionError(message, **common)
+
     if error_type == "OAuthException" or code == 190 or http_status == 401:
         if code == 190 or subcode in _TOKEN_EXPIRED_SUBCODES:
             return MetaTokenExpiredError(message, **common)
         return MetaOAuthError(message, **common)
 
-    if code in _PERMISSION_CODES or http_status == 403:
+    if http_status == 403:
         return MetaPermissionError(message, **common)
 
     if code in _TRANSIENT_CODES or http_status >= 500:

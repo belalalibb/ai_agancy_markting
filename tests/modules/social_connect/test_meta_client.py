@@ -208,9 +208,14 @@ async def test_oauth_errors_are_not_retried(
 
 
 # --------------------------------------------------------------- Permissions
-async def test_missing_permission_with_oauth_type_requires_reauth(
+async def test_permission_error_with_oauth_type_maps_to_403(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
+    """SPRINT-02 A4: permission codes (10 / 200-299) win over ``type == OAuthException``.
+
+    (Renamed from ``test_missing_permission_with_oauth_type_requires_reauth`` — the
+    planner's SPRINT-01 review §5 reversed the 401/403 precedence.)
+    """
     payload = {
         "error": {
             "message": "(#200) Requires pages_show_list permission",
@@ -219,12 +224,20 @@ async def test_missing_permission_with_oauth_type_requires_reauth(
         }
     }
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(403, json=payload))
-    # Graph reports missing-permission failures as ``OAuthException`` → the user must
-    # re-authorise, so the OAuth classification (401) deliberately wins over 403.
-    with pytest.raises(MetaOAuthError) as info:
+    with pytest.raises(MetaPermissionError) as info:
         await meta_client.get_user_pages("T")
-    assert not isinstance(info.value, MetaTokenExpiredError)
+    assert not isinstance(info.value, MetaOAuthError | MetaTokenExpiredError)
     assert info.value.code == 200
+
+
+async def test_code_190_with_oauth_type_still_maps_to_401(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    graph_mock.get("/me/accounts").mock(
+        return_value=httpx.Response(400, json=oauth_error_payload(code=190, subcode=None))
+    )
+    with pytest.raises(MetaTokenExpiredError):
+        await meta_client.get_user_pages("T")
 
 
 async def test_permission_code_10_without_oauth_type(
@@ -243,7 +256,10 @@ async def test_permission_code_10_without_oauth_type(
 
 
 # --------------------------------------------------------------- Rate limit
-async def test_rate_limit_retries_then_succeeds(
+# SPRINT-02 A3 (C4): rate limits are *never* retried. The former
+# ``test_rate_limit_retries_then_succeeds`` / ``test_rate_limit_exhausts_retries`` are
+# superseded by the two tests below (Meta extends the block if you keep calling).
+async def test_rate_limit_raises_immediately_without_retry(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
     throttled = httpx.Response(
@@ -254,12 +270,13 @@ async def test_rate_limit_retries_then_succeeds(
     route = graph_mock.get("/me/accounts").mock(
         side_effect=[throttled, httpx.Response(200, json=pages_payload())]
     )
-    pages = await meta_client.get_user_pages("T")
-    assert len(pages) == 2
-    assert route.call_count == 2
+    with pytest.raises(MetaRateLimitError) as info:
+        await meta_client.get_user_pages("T")
+    assert route.call_count == 1
+    assert info.value.retry_after_seconds == 1.0
 
 
-async def test_rate_limit_exhausts_retries(
+async def test_http_429_raises_immediately_and_keeps_status(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
     route = graph_mock.get("/me/accounts").mock(
@@ -268,12 +285,39 @@ async def test_rate_limit_exhausts_retries(
     with pytest.raises(MetaRateLimitError) as info:
         await meta_client.get_user_pages("T")
     assert info.value.http_status == 429
-    assert route.call_count == 1 + 2  # initial + META_HTTP_MAX_RETRIES
+    assert info.value.retry_after_seconds is None
+    assert route.call_count == 1
+
+
+async def test_transient_5xx_still_retries(
+    settings: Settings, graph_mock: respx.MockRouter
+) -> None:
+    """A3 must not break the Transient path: 503 → backoff → 503 → backoff → 200."""
+    sleeps: list[float] = []
+
+    async def _record(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient() as http:
+        client = MetaGraphClient(settings=settings, http_client=http, sleep=_record)
+        route = graph_mock.get("/me/accounts").mock(
+            side_effect=[
+                httpx.Response(503, json={}),
+                httpx.Response(503, json={}),
+                httpx.Response(200, json={"data": []}),
+            ]
+        )
+        pages = await client.get_user_pages("T")
+    assert pages == []
+    assert route.call_count == 3
+    assert sleeps == [0.5, 1.0]  # exponential: 0.5 * 2**attempt
 
 
 async def test_backoff_honours_retry_after(
     settings: Settings, graph_mock: respx.MockRouter
 ) -> None:
+    """``Retry-After`` is no longer used for sleeping (no retry on 429) but it must
+    still be parsed and surfaced on the exception for the API layer's header."""
     sleeps: list[float] = []
 
     async def _record(delay: float) -> None:
@@ -282,35 +326,24 @@ async def test_backoff_honours_retry_after(
     async with httpx.AsyncClient() as http:
         client = MetaGraphClient(settings=settings, http_client=http, sleep=_record)
         graph_mock.get("/me/accounts").mock(
-            side_effect=[
-                httpx.Response(429, json={}, headers={"Retry-After": "7"}),
-                httpx.Response(503, json={}),
-                httpx.Response(200, json={"data": []}),
-            ]
+            return_value=httpx.Response(429, json={}, headers={"Retry-After": "7"})
         )
-        await client.get_user_pages("T")
-    assert sleeps[0] == 7.0  # from Retry-After
-    assert sleeps[1] == 0.5 * (2**1)  # exponential fallback on 2nd attempt
+        with pytest.raises(MetaRateLimitError) as info:
+            await client.get_user_pages("T")
+    assert info.value.retry_after_seconds == 7.0
+    assert sleeps == []
 
 
 async def test_invalid_retry_after_header_falls_back_to_exponential(
-    settings: Settings, graph_mock: respx.MockRouter
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    sleeps: list[float] = []
-
-    async def _record(delay: float) -> None:
-        sleeps.append(delay)
-
-    async with httpx.AsyncClient() as http:
-        client = MetaGraphClient(settings=settings, http_client=http, sleep=_record)
-        graph_mock.get("/me/accounts").mock(
-            side_effect=[
-                httpx.Response(429, json={}, headers={"Retry-After": "Wed, 21 Oct 2026"}),
-                httpx.Response(200, json={"data": []}),
-            ]
-        )
-        await client.get_user_pages("T")
-    assert sleeps == [0.5]
+    """An unparseable ``Retry-After`` yields ``None`` (callers fall back to their own policy)."""
+    graph_mock.get("/me/accounts").mock(
+        return_value=httpx.Response(429, json={}, headers={"Retry-After": "Wed, 21 Oct 2026"})
+    )
+    with pytest.raises(MetaRateLimitError) as info:
+        await meta_client.get_user_pages("T")
+    assert info.value.retry_after_seconds is None
 
 
 # ---------------------------------------------------------- Transient / net

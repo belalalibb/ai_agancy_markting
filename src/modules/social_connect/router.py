@@ -18,6 +18,7 @@ from src.modules.social_connect.exceptions import (
     MetaOAuthError,
     MetaPermissionError,
     MetaRateLimitError,
+    MetaTokenExpiredError,
     MetaTransientError,
 )
 from src.modules.social_connect.meta_client import MetaGraphClient
@@ -105,6 +106,17 @@ async def connect(
 
 
 # ---------------------------------------------------------- error mapping --
+def _required_action(exc: MetaGraphError) -> str | None:
+    """Tell the client what to do next (machine-readable, see SPRINT-01 review §5)."""
+    if isinstance(exc, MetaRateLimitError):
+        return "retry_later"
+    if isinstance(exc, MetaTokenExpiredError | MetaOAuthError):
+        return "reconnect"
+    if isinstance(exc, MetaPermissionError):
+        return "reauthorize_with_additional_scopes"
+    return None
+
+
 def _to_http(exc: MetaGraphError) -> HTTPException:
     detail = {
         "provider": "meta",
@@ -113,6 +125,7 @@ def _to_http(exc: MetaGraphError) -> HTTPException:
         "code": exc.code,
         "subcode": exc.subcode,
         "fbtrace_id": exc.fbtrace_id,
+        "required_action": _required_action(exc),
     }
     if isinstance(exc, MetaRateLimitError):
         headers = (

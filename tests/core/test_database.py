@@ -53,7 +53,8 @@ def test_default_settings_target_postgresql(settings: Settings) -> None:
     """ARCHITECTURE_LOCK D-032: the default DSN must be PostgreSQL (driver not required here)."""
     url = make_url(settings.database_url)
     assert url.get_backend_name() == "postgresql"
-    assert url.get_driver_name() == "psycopg"
+    # SPRINT-02 B2: the driver is now asyncpg (was psycopg in SPRINT-01).
+    assert url.get_driver_name() == "asyncpg"
 
 
 def test_session_dependency_commits_on_success(engine: Engine) -> None:
