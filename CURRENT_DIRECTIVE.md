@@ -449,20 +449,39 @@ uvicorn src.main:app --reload --port 8000             # http://127.0.0.1:8000/do
 
 ## 11. تقرير المنفذ عند الانتهاء (يملؤه الوكيل المنفذ)
 
-- **حالة التنفيذ:** `[ ] Part A مكتمل` `[ ] Part B مكتمل` `[ ] متوقف بانتظار قرار`
-- **Commit SHA — Part A:** `...`
-- **Commit SHA — Part B:** `...`
-- **رابط الـ Pull Request:** `...`
-- **`pytest -m "not integration"`:** `... passed / ... failed`
-- **`pytest -m integration`:** `... passed / ... failed / skipped (السبب)`
-- **التغطية الكلية على `src/`:** `...%`
-- **`ruff check` / `ruff format --check`:** `...`
-- **اختبارات SPRINT-01 المُعدَّلة أو المحذوفة وسبب كل منها:** `...`
-- **الملفات الموسومة `# TEMPORARY` وعددها:** `...`
-- **تبعيات خارج القائمة ومبرراتها:** `لا يوجد` / `...`
-- **انحرافات عن التوجيه ومبرراتها:** `لا يوجد` / `...`
-- **ما يحتاج المالك لاختباره يدوياً:** `...`
-- **أسئلة مفتوحة للمخطط:** `...`
+- **حالة التنفيذ:** `[x] Part A مكتمل` `[x] Part B مكتمل` `[ ] متوقف بانتظار قرار`
+- **Commit SHA — Part A:** `c85c0bd` — `fix(social-connect): SPRINT-02 Part A hardening (C1–C4, 401/403 order)`
+- **Commit SHA — Part B:** `96b1008` — `feat(social-connect): SPRINT-02 Part B — PostgreSQL persistence, Alembic, callback flow`
+- **رابط الـ Pull Request:** https://github.com/belalalibb/ai_agancy_markting/pull/3 (`work/implementation` → `main`، **غير مدموج**)
+- **`pytest -m "not integration"`:** `181 passed / 0 failed` (1 skipped = حزمة التكامل بدون `TEST_DATABASE_URL`)
+- **`pytest -m integration`:** `8 passed / 0 failed` (I1–I8) ضد PostgreSQL 17.11 + pgvector 0.8.0 محلية؛ بدون `TEST_DATABASE_URL` ⇒ `skipped ("integration DB not configured")`
+- **التغطية الكلية على `src/`:** `99%` (المعزولة وحدها: `97%`) — `189 passed` إجمالاً
+- **`ruff check` / `ruff format --check`:** نظيفان على `src tests alembic`
+- **اختبارات SPRINT-01 المُعدَّلة أو المحذوفة وسبب كل منها:**
+  - `test_rate_limit_retries_then_succeeds` ⇒ `test_rate_limit_raises_immediately_without_retry` (A3/C4: لا إعادة محاولة؛ `call_count == 1`).
+  - `test_rate_limit_exhausts_retries` ⇒ `test_http_429_raises_immediately_and_keeps_status` (A3/C4).
+  - `test_backoff_honours_retry_after` و `test_invalid_retry_after_header_falls_back_to_exponential`: كانا يعتمدان على النوم بعد 429؛ الآن يثبتان أن `retry_after_seconds` يُحلَّل (أو `None`) **بدون أي نوم** (A3). أُضيف `test_transient_5xx_still_retries` لتغطية مسار Transient.
+  - `test_missing_permission_with_oauth_type_requires_reauth` ⇒ `test_permission_error_with_oauth_type_maps_to_403` (A4 — قرار المراجعة §5). أُضيف `test_code_190_with_oauth_type_still_maps_to_401`.
+  - `tests/conftest.py`: `GRAPH_VERSION = "v19.0"` ⇒ `"v26.0"` (القيمة القديمة أصبحت مرفوضة من الـ validator) + `OAUTH_STATE_SECRET` وهمي.
+  - `test_default_settings_target_postgresql`: السائق `psycopg` ⇒ `asyncpg` (B2).
+  - `test_token_response_masks_secrets_in_json_and_repr`: لم يعد يتوقع `"***"` (أُلغي التقنيع لصالح الحذف)؛ يثبت فقط غياب النص الخام.
+  - `tests/core/test_database.py`: أُعيدت كتابته async **بدون SQLite** (D-032) — الدورة الحقيقية في اختبارات التكامل.
+  - `test_router.py`: اختبارات `/authorize-url`، `/token`، `/connect` (11) **حُذفت مع المسارات** (مسموح صراحة) واستُبدلت باختبارات المسارات الخمسة + `test_removed_routes_return_404`؛ سيناريوهات 401/403/429/502/400/503 نُقلت إلى `GET /callback`.
+  - `test_service.py`: اختبارات `build_authorize_url/connect/exchange_code/list_pages` (5) أُعيدت كتابتها لواجهة الخدمة الجديدة.
+  - `test_schemas.py`: `test_connection_result_serialises_without_plaintext_tokens` حُذف مع `MetaConnectionResult` (كان مستهلَكه الوحيد `POST /connect` المحذوف)؛ أُضيفت اختبارات `ConnectedAccountPublic/PageAssetPublic`.
+- **الملفات الموسومة `# TEMPORARY` وعددها:** 3 — `src/core/oauth_state.py` (replay داخل TTL)، `src/modules/social_connect/router.py` (`tenant_id` كمعامل استعلام)، `src/modules/social_connect/schemas.py` (`ConnectionStartRequest.tenant_id`).
+- **تبعيات خارج القائمة ومبرراتها:** `لا يوجد` (أُضيفت فقط `sqlalchemy[asyncio]`, `asyncpg`, `alembic`؛ لم يُضَف `testcontainers` ولا `pytest-postgresql`).
+- **انحرافات عن التوجيه ومبرراتها:**
+  1. **Docker غير متاح في بيئة المنفذ** ⇒ اختبارات التكامل شُغِّلت ضد PostgreSQL **17.11** + pgvector محلية (مثبّتة عبر apt) بدلاً من `pgvector/pgvector:pg16`. `docker-compose.yml` يستهدف pg16 كما هو مطلوب؛ الهجرة تستخدم SQL/JSONB/TIMESTAMPTZ قياسية فلا فرق متوقع. **يُرجى تأكيدها على pg16 عند المراجعة.**
+  2. حقل الانتهاء في `ConnectedAccountPublic` اسمه `expires_at` (لا `token_expires_at`) كي لا يحوي أي اسم حقل عام كلمة "token" — `U16` يفحص الأسماء حرفياً.
+  3. عند فشل `/debug_token` بخطأ غير 190: `provider_user_id` يُشتق حتمياً من معرّفات الصفحات (`pages:1001,1002`) أو `unknown` بدل تركه فارغاً، كي يبقى القيد الفريد فعّالاً عند إعادة الربط.
+  4. صفحة بلا `access_token` تُخزَّن بـ `encrypted_page_token = ""` (لا نشفّر سلسلة فارغة) لتبقى مرئية.
+  5. `alembic/env.py` يقبل `-x database_url=…` و `config.attributes["configure_logger"]=False` لتشغيله برمجياً من الاختبارات.
+- **ما يحتاج المالك لاختباره يدوياً:** خطوات §8 (G3) كاملة: `docker compose up -d` ⇒ `alembic upgrade head` ⇒ `uvicorn` ⇒ `POST /connections/start` ⇒ موافقة Meta ⇒ `/callback` يعرض الحساب بلا توكن ⇒ `GET /connections?tenant_id=demo` ⇒ إعادة تشغيل الخادم ⇒ الحساب ما زال موجوداً ⇒ `psql`: `encrypted_user_token` يبدأ بـ `gAAAA` ⇒ `tenant_id=other` قائمة فارغة.
+- **أسئلة مفتوحة للمخطط:**
+  1. هل يجب أن يُسقط `alembic downgrade base` الإضافة `vector`؟ (تُركت عمداً كبنية مشتركة).
+  2. تأكيد أن `tenant_id` كمعامل صريح مقبول حتى وحدة المصادقة (SPRINT-03؟).
+  3. هل تريد `set_status` مكشوفاً عبر API الآن (موجود في الـ Repository فقط، بلا مسار)؟
 
 ---
 
