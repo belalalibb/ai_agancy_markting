@@ -50,6 +50,21 @@ graph TD
 
 ---
 
+### 1-ج. نقاط Meta Graph المستخدمة فعلياً (v26.0، `main` @ `d026a2e`)
+
+| النقطة | الطريقة | قناة الأسرار (D-064) | الاستخدام |
+|---|---|---|---|
+| `/oauth/access_token` | POST (جسم form) | `client_secret` في الجسم | تبادل الكود / long-lived |
+| `/debug_token` | POST + `method=GET` | Bearer `app_id\|app_secret`؛ `input_token` في الجسم | تحقق `is_valid`/`app_id`/`user_id`/scopes/expiry |
+| `/me` | GET | Bearer + `appsecret_proof` | هوية Meta (D-061) |
+| `/me/accounts` | GET | Bearer + `appsecret_proof`؛ `paging.next` يُنقّى | قائمة الصفحات + IG + توكنات الصفحات |
+| `/{page_id}/posts` | GET | Bearer توكن الصفحة + proof | B3 قراءة مباشرة (D-065)؛ الحقول `id,message,created_time,permalink_url,status_type,full_picture,is_published` (+`attachments` في SPRINT-06) |
+| `/{ig_user_id}/media` | GET | Bearer توكن الصفحة + proof | B4 قراءة مباشرة؛ `instagram_basic` |
+
+> الحقول التي أوقفتها Meta في v3.3 على `/page/posts` (`caption, description, link, name, object_id, picture, source, type`) **غير مستخدمة**؛ البديل `attachments{…}`.
+
+---
+
 ## 🌐 2. مصفوفة التكاملات الخارجية الرسمية
 
 | المنصة الخارجية | بروتوكول الربط | الصلاحيات المطلوبة | التكلفة / القيود |

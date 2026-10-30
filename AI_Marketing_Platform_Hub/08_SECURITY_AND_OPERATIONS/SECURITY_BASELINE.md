@@ -23,7 +23,7 @@
 
 ## 📊 2. حالة التنفيذ الفعلية (تُحدَّث من مراجعات المخطط)
 
-| البند | الحالة (2026-10-30، `main` @ `32c20cb` بعد SPRINT-04.1) | المرجع |
+| البند | الحالة (2026-10-30، `main` @ `d026a2e` بعد SPRINT-05) | المرجع |
 |---|---|---|
 | Zero-Secret في الكود والمستودع | ✅ فحص أسرار يدوي في كل مراجعة + `gitleaks` في CI على كامل التاريخ | `.github/workflows/ci.yml` |
 | Zero-Secret في واجهات API | ✅ حارس اختباري على `/openapi.json`: لا حقل باسم يحوي `token` إلا `has_page_token` | `tests/modules/social_connect/test_router.py` |
@@ -38,4 +38,6 @@
 | سباقات الفهارس الفريدة | ✅ 409 حتمي لا 500 (اختبارات تزامن حقيقية على PG) | `tests/integration/test_postgres_persistence.py` |
 | تراخيص شجرة التشغيل | ✅ 34–37 حزمة كلها MIT/BSD/Apache/PSF؛ `certifi` بـ **MPL-2.0** مقبولة بوعي (ترخيص ملفّي ضعيف الـcopyleft، لا يمسّ النواة) | `scripts/check_licenses.py` |
 | تحديد معدل الطلبات | ⚠️ داخل العملية (نافذة منزلقة، محدود الذاكرة `max_keys=10_000` بطرد الأقدم) — لا يتشارك بين النسخ؛ Redis بند مؤجَّل #7 | `src/modules/auth/infrastructure/rate_limit.py` |
-| `POST /debug_token` بلا `method=GET` | ⚠️ ملاحظة بروتوكولية من المالك ثبتت بنيوياً؛ خلل التكوين يُبتلع في `_inspect_token` — **تُغلق في SPRINT-05 A-0** | `sprints/SPRINT-04.1_REVIEW.md` §4 |
+| `POST /debug_token` | ✅ جسم `{input_token, method=GET}` + Bearer للـapp token (SPRINT-05 A-0)؛ كود 100 أو خطأ غير مصنَّف ⇒ `ERROR` + عدّاد `meta_debug_token_failures` (لا ابتلاع صامت) | `src/modules/social_connect/meta_client.py`, `src/core/metrics.py` |
+| القراءات التشغيلية (`/posts`, `/media`, `resync`) | ✅ الصفحات **المختارة** فقط (غير المختارة ⇒ 404 موحَّد لكل الأدوار)؛ توكن الصفحة يُفكّ لحظة الاستخدام ويُحذف؛ Bearer + `appsecret_proof` فقط؛ `paging.next` لا يُعاد ولا يُتبع (مؤشر `after` فقط)؛ `resync` لمالك الاتصال وحده — **مُثبَت بالتقاط الطلبات الفعلية** | `sprints/SPRINT-05_REVIEW.md` §1 |
+| تمييز «فارغ مؤكَّد» عن «مجهول» في النطاقات | ⚠️ `granted_scopes=[]` من `debug_token` يُعامَل كمجهول في `resync` — **يُغلق في SPRINT-06 A-1** | `sprints/SPRINT-05_REVIEW.md` §4 O3 |
