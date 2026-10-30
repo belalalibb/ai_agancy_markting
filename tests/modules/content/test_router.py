@@ -18,7 +18,12 @@ from src.modules.social_connect.domain.models import (
 from src.modules.tenancy.domain.models import GrantRole
 
 from tests.conftest import AGENCY_ID, BRAND2_ID, BRAND_ID, OWNER_ID, STRANGER_ID, grant
-from tests.fakes import FakeConnectedAccountRepository, FakeContentRepository, FakeStore
+from tests.fakes import (
+    FakeConnectedAccountRepository,
+    FakeContentRepository,
+    FakeRateLimiter,
+    FakeStore,
+)
 
 Headers = Callable[[UUID], dict[str, str]]
 API = "/api/v1"
@@ -456,8 +461,205 @@ def test_openapi_lists_exactly_the_content_routes(client: TestClient) -> None:
                 "schedule",
                 "unschedule",
                 "archive",
+                "generate",
             )
         ),
     }
     assert set(paths[f"{b}/items"]) == {"get", "post"}
     assert set(paths[f"{b}/items/{{item_id}}/body"]) == {"put"}
+
+
+# ================================================================ SPRINT-06 Part B-2 (B5)
+BRIEF = "عرض خصم على القهوة المختصة هذا الأسبوع في فرع المعادي"
+FAKE_AI_KEY = "".join(("sk-", "abcdefghijkl"))  # assembled: no secret-shaped literal
+
+
+def _generate(client: TestClient, headers: dict[str, str], item_id: str, **json: object):
+    payload = {"brief": BRIEF, **json}
+    return client.post(f"{BASE}/items/{item_id}/generate", json=payload, headers=headers)
+
+
+# B5-U1 — happy path with the Fake provider: new revision, item stays draft, usage counted.
+def test_b5_u1_generate_with_fake_provider_creates_ai_revision(
+    client: TestClient, store: FakeStore, as_: Headers, content_repo: FakeContentRepository
+) -> None:
+    from src.core.metrics import counters
+
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    before = counters.get("ai_completions")
+    item_id = _create(client, as_(OWNER_ID))["id"]
+    res = _generate(client, as_(AGENCY_ID), item_id, tone="friendly", language="en")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "draft"
+    assert body["current_body"].startswith("[fake:content_draft:")
+    assert BRIEF in body["current_body"]
+    revs = content_repo.revisions[UUID(item_id)]
+    assert [r.revision_no for r in revs] == [1, 2]
+    assert revs[1].created_by_tenant_id == AGENCY_ID
+    assert counters.get("ai_completions") == before + 1
+    viewer = _generate(client, as_(STRANGER_ID), item_id)
+    assert viewer.status_code == 403 and viewer.json()["detail"]["error"] == "insufficient_role"
+    # body validation
+    assert _generate(client, as_(OWNER_ID), item_id, brief="short").status_code == 422
+    assert _generate(client, as_(OWNER_ID), item_id, tone="angry").status_code == 422
+    assert _generate(client, as_(OWNER_ID), item_id, language="fr").status_code == 422
+
+
+# B5-U2 — wrong state ⇒ 409 invalid_transition; rejected ⇒ back to draft.
+def test_b5_u2_generate_only_from_draft_or_rejected(client: TestClient, as_: Headers) -> None:
+    owner = as_(OWNER_ID)
+    pending = _to_pending(client, owner)
+    res = _generate(client, owner, pending)
+    assert res.status_code == 409
+    assert res.json()["detail"] == {
+        **res.json()["detail"],
+        "error": "invalid_transition",
+        "from": "pending_approval",
+        "action": "generate",
+    }
+    approved = _to_approved(client, owner)
+    assert _generate(client, owner, approved).json()["detail"]["from"] == "approved"
+    rejected = _to_pending(client, owner)
+    assert _act(client, owner, rejected, "reject", note="claims").status_code == 200
+    res = _generate(client, owner, rejected)
+    assert res.status_code == 200 and res.json()["status"] == "draft"
+    detail = client.get(f"{BASE}/items/{rejected}", headers=owner).json()
+    assert [r["revision_no"] for r in detail["revisions"]] == [2, 1]
+    assert detail["revisions"][0]["provenance"]["kind"] == "ai_generated"
+    archived = _create(client, owner)["id"]
+    _act(client, owner, archived, "archive")
+    assert _generate(client, owner, archived).status_code == 409
+
+
+# B5-U3 — 20 generations / hour / brand through the existing RateLimiter ⇒ 429 + Retry-After.
+def test_b5_u3_generation_rate_limit_per_brand(
+    client: TestClient, as_: Headers, limiter: FakeRateLimiter
+) -> None:
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner)["id"]
+    limiter.reject_after = 2
+    assert _generate(client, owner, item_id).status_code == 200
+    assert _generate(client, owner, item_id).status_code == 200
+    res = _generate(client, owner, item_id)
+    assert res.status_code == 429, res.text
+    assert res.json()["detail"]["error"] == "generation_rate_limited"
+    assert res.headers["Retry-After"] == "3600"
+    assert limiter.hits == [("ai_generate_brand", str(BRAND_ID))] * 3
+    # The limit is scoped to the brand, not the item: another brand's key is different.
+    from src.modules.content.service import GENERATION_LIMIT_PER_HOUR
+
+    assert GENERATION_LIMIT_PER_HOUR == 20
+
+
+# B5-U4 — provenance evidence: provider, model, prompt_hash = sha256(system+user)[:16],
+# generated_at; plus the usage log never contains the prompt or the output text.
+def test_b5_u4_provenance_and_usage_log(
+    client: TestClient,
+    as_: Headers,
+    content_repo: FakeContentRepository,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from src.modules.content.domain.models import Channel
+    from src.modules.content.prompts import prompt_hash, system_prompt, user_prompt
+
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner, channel="instagram")["id"]
+    caplog.set_level(logging.INFO, logger="src.modules.content")
+    res = _generate(client, owner, item_id, tone="promotional", language="ar")
+    assert res.status_code == 200, res.text
+    revision = content_repo.revisions[UUID(item_id)][-1]
+    expected_hash = prompt_hash(
+        system_prompt(Channel.INSTAGRAM, tone="promotional", language="ar"), user_prompt(BRIEF)
+    )
+    assert revision.provenance == {
+        **revision.provenance,
+        "kind": "ai_generated",
+        "provider": "fake",
+        "model": "fake-1",
+        "prompt_hash": expected_hash,
+    }
+    assert len(revision.provenance["prompt_hash"]) == 16
+    datetime.fromisoformat(revision.provenance["generated_at"])  # parseable, tz-aware
+    assert revision.provenance["generated_at"].endswith("+00:00")
+    assert isinstance(revision.provenance["prompt_tokens"], int)
+    usage = [r for r in caplog.records if r.getMessage().startswith("ai completion:")]
+    assert len(usage) == 1
+    line = usage[0].getMessage()
+    assert f"brand={BRAND_ID}" in line and "provider=fake" in line and "model=fake-1" in line
+    assert BRIEF not in caplog.text and revision.body not in caplog.text
+    # generation_log is visible to the owner with the token counts.
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert detail["generation_log"][0]["prompt_hash"] == expected_hash
+    assert detail["generation_log"][0]["revision_no"] == 2
+    # The system prompt pins channel + limit + D-055 rule.
+    system = system_prompt(Channel.INSTAGRAM, tone="promotional", language="ar")
+    assert "Instagram" in system and "2200" in system and "D-055" in system
+    fb = system_prompt(Channel.FACEBOOK_PAGE, tone="professional", language="en")
+    assert "Facebook Page" in fb and "5000" in fb and "English" in fb
+
+
+def test_b5_gateway_errors_map_to_429_502_503(
+    client: TestClient,
+    as_: Headers,
+    app,
+    monkeypatch: pytest.MonkeyPatch,  # noqa: ANN001
+) -> None:
+    from pydantic import SecretStr
+    from src.core.config import get_settings
+    from src.modules.ai_gateway.dependencies import get_ai_gateway
+    from src.modules.ai_gateway.exceptions import AIRateLimitedError, AIUpstreamError
+
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner)["id"]
+
+    class Boom:
+        def __init__(self, exc: Exception) -> None:
+            self.exc = exc
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            raise self.exc
+
+    app.dependency_overrides[get_ai_gateway] = lambda: Boom(AIRateLimitedError(42))
+    res = _generate(client, owner, item_id)
+    assert res.status_code == 429 and res.json()["detail"]["error"] == "ai_rate_limited"
+    assert res.headers["Retry-After"] == "42"
+    app.dependency_overrides[get_ai_gateway] = lambda: Boom(AIUpstreamError())
+    res = _generate(client, owner, item_id)
+    assert res.status_code == 502 and res.json()["detail"] == {"error": "ai_upstream_unavailable"}
+    app.dependency_overrides.pop(get_ai_gateway)
+    # 503 when openai_compatible is selected without a key (real dependency path).
+    base = app.dependency_overrides.get(get_settings)
+    current = base() if base else get_settings()
+    app.dependency_overrides[get_settings] = lambda: current.model_copy(
+        update={"ai_provider": "openai_compatible", "ai_provider_api_key": None}
+    )
+    try:
+        res = _generate(client, owner, item_id)
+        assert res.status_code == 503, res.text
+        assert res.json()["detail"]["error"] == "ai_provider_not_configured"
+        # and with a key the real HTTP provider is built (respx-free smoke: 502 on no network)
+        app.dependency_overrides[get_settings] = lambda: current.model_copy(
+            update={
+                "ai_provider": "openai_compatible",
+                "ai_provider_api_key": SecretStr(FAKE_AI_KEY),
+                "ai_provider_base_url": "http://127.0.0.1:9/v1",
+                "ai_http_timeout_seconds": 0.2,
+            }
+        )
+        res = _generate(client, owner, item_id)
+        assert res.status_code == 502 and res.json()["detail"] == {
+            "error": "ai_upstream_unavailable"
+        }
+        assert FAKE_AI_KEY not in res.text
+    finally:
+        if base:
+            app.dependency_overrides[get_settings] = base
+        else:
+            app.dependency_overrides.pop(get_settings, None)
+    # No content was written by any of the failures.
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert [r["revision_no"] for r in detail["revisions"]] == [1]

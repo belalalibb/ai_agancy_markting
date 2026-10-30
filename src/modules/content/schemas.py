@@ -59,6 +59,16 @@ class ScheduleRequest(BaseModel):
     target_page_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class GenerateRequest(BaseModel):
+    """B5: ``POST /items/{id}/generate`` body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    brief: str = Field(min_length=10, max_length=2000)
+    tone: Literal["professional", "friendly", "promotional"] = "professional"
+    language: Literal["ar", "en"] = "ar"
+
+
 class ContentRevisionPublic(BaseModel):
     id: UUID
     revision_no: int

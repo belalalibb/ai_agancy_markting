@@ -12,6 +12,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from src.core.metrics import counters
+from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
+from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import (
     EDIT_RESETS_TO_DRAFT,
     Action,
@@ -31,11 +34,20 @@ from src.modules.content.exceptions import (
     ApprovalRequiresOwnerError,
     ContentInsufficientRoleError,
     ContentNotFoundError,
+    GenerationRateLimitedError,
     InstagramNotLinkedError,
     InvalidTransitionError,
     RejectNoteRequiredError,
     ScheduleTooSoonError,
     TargetPageNotSelectedError,
+)
+from src.modules.content.prompts import (
+    CHANNEL_LIMITS,
+    Language,
+    Tone,
+    prompt_hash,
+    system_prompt,
+    user_prompt,
 )
 from src.modules.social_connect.domain.models import AccountStatus
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
@@ -46,6 +58,11 @@ logger = logging.getLogger(__name__)
 SCHEDULE_MIN_LEAD = timedelta(minutes=5)
 REJECT_NOTE_MIN_CHARS = 3
 REVISIONS_IN_DETAIL = 20
+# B5: generations per brand per hour (existing ``RateLimiter`` bucket; 429 when exceeded).
+GENERATION_BUCKET = "ai_generate_brand"
+GENERATION_LIMIT_PER_HOUR = 20
+GENERATION_WINDOW_SECONDS = 3600
+GENERATION_STATES = frozenset({ContentStatus.DRAFT, ContentStatus.REJECTED})
 
 _EVENT_FOR_ACTION: dict[Action, ApprovalAction] = {
     Action.SUBMIT: ApprovalAction.SUBMITTED,
@@ -267,6 +284,95 @@ class ContentService:
             result.status.value,
             actor_role.value,
         )
+        return await self.get_item(brand_id, item_id)
+
+    # ---------------------------------------------------------- B5 generate ---
+    async def generate(
+        self,
+        brand_id: UUID,
+        item_id: UUID,
+        *,
+        gateway: AIGateway,
+        limiter: RateLimiter,
+        brief: str,
+        tone: Tone,
+        language: Language,
+        actor_tenant_id: UUID,
+    ) -> ContentItem:
+        """Ask the gateway for a draft and store it as a **new revision** with
+        ``provenance={"kind": "ai_generated", ...}`` (D-055 evidence). State must be ``draft``
+        or ``rejected`` (else 409 ``invalid_transition``); the item is ``draft`` afterwards.
+        20 generations / hour / brand (429 ``generation_rate_limited``). Usage is logged as a
+        structured INFO line (ids + token counts only, never the text) and counted in
+        ``counters["ai_completions"]`` / ``["ai_failures"]``."""
+        item = await self.get_item(brand_id, item_id)
+        if item.status not in GENERATION_STATES:
+            raise InvalidTransitionError(item.status, "generate")
+        retry_after = limiter.hit(
+            GENERATION_BUCKET, str(brand_id), GENERATION_LIMIT_PER_HOUR, GENERATION_WINDOW_SECONDS
+        )
+        if retry_after is not None:
+            raise GenerationRateLimitedError(retry_after)
+        system = system_prompt(item.channel, tone=tone, language=language)
+        user = user_prompt(brief)
+        request = CompletionRequest(
+            purpose="content_draft",
+            system=system,
+            user=user,
+            max_tokens=min(2000, CHANNEL_LIMITS[item.channel] // 2),
+            temperature=0.7,
+            brand_id=brand_id,
+            tenant_id=actor_tenant_id,
+        )
+        try:
+            result = await gateway.complete(request)
+        except Exception:
+            counters.increment("ai_failures")
+            raise
+        counters.increment("ai_completions")
+        logger.info(
+            "ai completion: brand=%s tenant=%s item=%s provider=%s model=%s prompt_tokens=%s "
+            "completion_tokens=%s latency_ms=%d",
+            brand_id,
+            actor_tenant_id,
+            item.id,
+            result.provider,
+            result.model,
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.latency_ms,
+        )
+        now = datetime.now(tz=UTC)
+        body = result.text.strip()[: CHANNEL_LIMITS[item.channel]] or "…"
+        provenance: dict[str, Any] = {
+            "kind": "ai_generated",
+            "provider": result.provider,
+            "model": result.model,
+            "prompt_hash": prompt_hash(system, user),
+            "generated_at": now.isoformat(),
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "latency_ms": result.latency_ms,
+        }
+        revision = ContentRevision(
+            item_id=item.id,
+            revision_no=await self._repo.next_revision_no(item.id),
+            body=body,
+            provenance=provenance,
+            created_by_tenant_id=actor_tenant_id,
+            created_at=now,
+        )
+        if item.status is ContentStatus.REJECTED:
+            moved = await self._repo.compare_and_set_status(
+                item.id,
+                expected=item.status,
+                new=ContentStatus.DRAFT,
+                scheduled_for=None,
+                updated_at=now,
+            )
+            if not moved:
+                raise InvalidTransitionError(item.status, "generate", "item changed concurrently")
+        await self._repo.add_revision(revision)
         return await self.get_item(brand_id, item_id)
 
     async def _validate_schedule(

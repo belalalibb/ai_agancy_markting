@@ -30,11 +30,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db_session
-from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh
+from src.modules.ai_gateway.dependencies import Gateway
+from src.modules.ai_gateway.exceptions import AIRateLimitedError, AIUpstreamError
+from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
+from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import Action
 from src.modules.content.domain.models import Channel, ContentItem, ContentStatus
 from src.modules.content.domain.repository import ContentRepository
-from src.modules.content.exceptions import ContentError, InvalidTransitionError
+from src.modules.content.exceptions import (
+    ContentError,
+    GenerationRateLimitedError,
+    InvalidTransitionError,
+)
 from src.modules.content.infrastructure.postgres_repository import PostgresContentRepository
 from src.modules.content.schemas import (
     ApprovalEventPublic,
@@ -45,6 +52,7 @@ from src.modules.content.schemas import (
     ContentItemPage,
     ContentItemPublic,
     ContentRevisionPublic,
+    GenerateRequest,
     RejectRequest,
     ScheduleRequest,
     StatusLiteral,
@@ -110,7 +118,15 @@ def to_http(exc: ContentError) -> HTTPException:
     if isinstance(exc, InvalidTransitionError):
         detail["from"] = exc.from_status.value
         detail["action"] = exc.action
-    return HTTPException(exc.http_status, detail=detail)
+    headers = (
+        {"Retry-After": str(exc.retry_after_seconds)}
+        if isinstance(exc, GenerationRateLimitedError)
+        else None
+    )
+    return HTTPException(exc.http_status, detail=detail, headers=headers)
+
+
+Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
 
 
 # ------------------------------------------------------------------ cursor --
@@ -487,3 +503,62 @@ async def archive_item(
     return await _act(
         service, resolver, brand_id, item_id, Action.ARCHIVE, actor.tenant_id, actor.user_id
     )
+
+
+@router.post(
+    f"{BRAND_PREFIX}/items/{{item_id}}/generate",
+    response_model=ContentItemPublic,
+    summary="Generate a draft body with the AI gateway (new revision, provenance=ai_generated)",
+    responses={
+        403: {"description": "insufficient_role"},
+        404: {"description": "content_not_found"},
+        409: {"description": "invalid_transition — only draft/rejected items can be generated"},
+        429: {"description": "generation_rate_limited (20/h per brand) / ai_rate_limited"},
+        502: {"description": "ai_upstream_unavailable (fixed body)"},
+        503: {"description": "ai_provider_not_configured"},
+    },
+)
+async def generate_item(
+    brand_id: UUID,
+    item_id: UUID,
+    payload: GenerateRequest,
+    actor: CurrentUserFresh,
+    service: Service,
+    resolver: Resolver,
+    gateway: Gateway,
+    limiter: Limiter,
+) -> ContentItemPublic:
+    """Roles: OWNER, MANAGER (VIEWER ⇒ 403). State: ``draft`` or ``rejected`` ⇒ afterwards
+    ``draft`` with a new revision whose ``provenance`` is
+    ``{"kind": "ai_generated", "provider", "model", "prompt_hash", "generated_at", ...}``
+    (D-055 evidence). The system prompt is fixed (``prompts.py``) and forbids numeric
+    claims absent from the brief. Nothing is published; approval stays with the owner."""
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        item = await service.generate(
+            brand_id,
+            item_id,
+            gateway=gateway,
+            limiter=limiter,
+            brief=payload.brief,
+            tone=payload.tone,
+            language=payload.language,
+            actor_tenant_id=actor.tenant_id,
+        )
+    except ContentError as exc:
+        raise to_http(exc) from exc
+    except AIRateLimitedError as exc:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": exc.error, "message": exc.message},
+            headers=(
+                {"Retry-After": str(exc.retry_after_seconds)}
+                if exc.retry_after_seconds is not None
+                else None
+            ),
+        ) from exc
+    except AIUpstreamError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, detail={"error": "ai_upstream_unavailable"}
+        ) from exc
+    return await _public(service, item)

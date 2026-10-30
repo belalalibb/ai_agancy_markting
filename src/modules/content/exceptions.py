@@ -75,3 +75,14 @@ class InstagramNotLinkedError(ContentError):
 
     error = "instagram_not_linked"
     http_status = 422
+
+
+class GenerationRateLimitedError(ContentError):
+    """Too many AI generations for this brand — try again later."""
+
+    error = "generation_rate_limited"
+    http_status = 429
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__()

@@ -24,6 +24,8 @@ _QUERY_SECRET = re.compile(
 )
 _BEARER = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=|-]+")
 _META_TOKEN = re.compile(r"EAA[A-Za-z0-9]{20,}")
+# SPRINT-06 B6: OpenAI-style provider keys (``sk-...``) — never meant to reach a log line.
+_AI_KEY = re.compile(r"sk-[A-Za-z0-9]{8,}")
 
 REDACTED = "***"
 
@@ -32,7 +34,8 @@ def redact(text: str) -> str:
     """Return ``text`` with every known secret shape replaced by ``***``."""
     text = _QUERY_SECRET.sub(rf"\1={REDACTED}", text)
     text = _BEARER.sub(f"Bearer {REDACTED}", text)
-    return _META_TOKEN.sub(f"EAA{REDACTED}", text)
+    text = _META_TOKEN.sub(f"EAA{REDACTED}", text)
+    return _AI_KEY.sub(f"sk-{REDACTED}", text)
 
 
 class SecretRedactingFilter(logging.Filter):

@@ -98,6 +98,18 @@ class Settings(BaseSettings):
     meta_http_timeout_seconds: float = 15.0
     meta_http_max_retries: int = 3
 
+    # --- AI gateway (SPRINT-06 Part B-2, D-056) --------------------------------------
+    # ``fake`` is the default everywhere until the owner picks a real provider (directive §7);
+    # ``openai_compatible`` talks to ``{base_url}/chat/completions`` with a Bearer key that
+    # travels **only** in the Authorization header (never in URLs or logs).
+    ai_provider: Literal["fake", "openai_compatible"] = "fake"
+    ai_provider_base_url: str = "https://api.openai.com/v1"
+    ai_provider_api_key: SecretStr | None = Field(
+        default=None, description="Bearer key for the OpenAI-compatible endpoint (header only)."
+    )
+    ai_default_model: str = "gpt-4o-mini"
+    ai_http_timeout_seconds: float = 30.0
+
     @field_validator("meta_graph_api_version")
     @classmethod
     def _validate_version(cls, value: str) -> str:

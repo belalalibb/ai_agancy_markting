@@ -2141,3 +2141,42 @@ def test_b3_list_keyset_and_body_edit_on_pg(integration_app: FastAPI) -> None:
         )
         == 2
     )
+
+
+def test_b5_i1_generate_persists_ai_revision_with_provenance_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B5-I1 — ``/generate`` (Fake provider, ``AI_PROVIDER=fake`` default) writes revision 2
+    with ``provenance.kind = ai_generated`` into ``content_revisions`` (JSONB), repoints
+    ``current_revision_id``, and the item stays ``draft``; a VIEWER's detail view carries
+    the evidence but not ``generation_log``."""
+    _seed_fresh()
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    agency = integration_headers(settings, AGENCY_ID)
+    with TestClient(integration_app) as client:
+        _grant_agency(client, owner, role="viewer")
+        item_id = _content_create(client, owner, channel="instagram")["id"]
+        res = client.post(
+            f"{CONTENT}/items/{item_id}/generate",
+            json={"brief": "افتتاح فرع جديد لمقهى النيل في الزمالك", "tone": "friendly"},
+            headers=owner,
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "draft"
+        owner_view = client.get(f"{CONTENT}/items/{item_id}", headers=owner).json()
+        assert owner_view["generation_log"][0]["provider"] == "fake"
+        viewer_view = client.get(f"{CONTENT}/items/{item_id}", headers=agency).json()
+        assert "generation_log" not in viewer_view
+        assert viewer_view["revisions"][0]["provenance"]["kind"] == "ai_generated"
+    rows = _rows(
+        "SELECT r.revision_no, r.provenance->>'kind', r.provenance->>'provider', "
+        "length(r.provenance->>'prompt_hash'), i.status, i.current_revision_id = r.id "
+        "FROM content_revisions r JOIN content_items i ON i.id = r.item_id "
+        "WHERE r.item_id = :id ORDER BY r.revision_no",
+        {"id": UUID(item_id)},
+    )
+    assert rows == [
+        (1, "human", None, None, "draft", False),
+        (2, "ai_generated", "fake", 16, "draft", True),
+    ]
