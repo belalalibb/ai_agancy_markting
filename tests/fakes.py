@@ -344,6 +344,28 @@ class FakeConnectedAccountRepository:
         del self.rows[account_id]
         return True
 
+    async def update_token_metadata(
+        self,
+        brand_id: UUID,
+        account_id: UUID,
+        *,
+        token_expires_at: datetime | None,
+        granted_scopes: list[str] | None,
+        last_synced_at: datetime,
+    ) -> bool:
+        row = await self.get(brand_id, account_id)
+        if row is None:
+            return False
+        update: dict[str, object] = {
+            "token_expires_at": token_expires_at,
+            "last_synced_at": last_synced_at,
+            "updated_at": datetime.now(tz=UTC),
+        }
+        if granted_scopes is not None:
+            update["granted_scopes"] = list(granted_scopes)
+        self.rows[account_id] = row.model_copy(update=update)
+        return True
+
 
 class FakeStatusMarker:
     """H3: records out-of-band status writes and applies them to the shared store."""

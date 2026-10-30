@@ -4,21 +4,31 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
-from src.modules.social_connect.domain.models import ConnectedAccount, InstagramAsset, PageAsset
+from src.modules.social_connect.domain.models import (
+    AccountStatus,
+    ConnectedAccount,
+    InstagramAsset,
+    PageAsset,
+)
 from src.modules.social_connect.schemas import (
     ConnectedAccountPublic,
     ConnectionStartRequest,
     InstagramAssetPublic,
+    InstagramMediaPage,
     MetaAuthRequest,
     MetaDebugTokenInfo,
     MetaPageInfo,
     MetaTokenResponse,
     MetaUserInfo,
     PageAssetPublic,
+    PagePostsPage,
     PageSelectionRequest,
+    ResyncResponse,
+    compute_token_health,
 )
 from src.modules.tenancy.schemas import BrandOut, BrandWithRoleOut, GrantOut, TenantOut
 
@@ -151,8 +161,11 @@ def _sample_account() -> ConnectedAccount:
     )
 
 
-# The single sanctioned exception: a derived boolean flag (SPRINT-02.1 F4) — not a token.
+# Sanctioned exceptions: a derived boolean flag (SPRINT-02.1 F4) and the derived health
+# *label* ``token_health`` (SPRINT-05 B1, a closed ``Literal``) — neither carries a token.
 _ALLOWED_FLAG_FIELDS = frozenset({"has_page_token"})
+_ALLOWED_LABEL_FIELDS = frozenset({"token_health"})
+_TOKEN_HEALTH_VALUES = {"valid", "expiring_soon", "expired", "unknown", "reauth_required"}
 
 
 _PUBLIC_MODELS = (
@@ -173,6 +186,11 @@ def test_public_schemas_have_no_token_fields() -> None:
             if name in _ALLOWED_FLAG_FIELDS:
                 assert info.annotation is bool, f"{model.__name__}.{name} must be a bool flag"
                 continue
+            if name in _ALLOWED_LABEL_FIELDS:
+                assert set(get_args(info.annotation)) == _TOKEN_HEALTH_VALUES, (
+                    f"{model.__name__}.{name} must be the closed TokenHealth Literal"
+                )
+                continue
             assert "token" not in name.lower(), f"{model.__name__}.{name}"
             assert "encrypted" not in name.lower(), f"{model.__name__}.{name}"
 
@@ -184,7 +202,8 @@ def test_connected_account_public_from_domain_drops_secrets() -> None:
     )
     dumped = public.model_dump_json()
     assert "gAAAAA" not in dumped
-    assert "token" not in dumped.lower().replace("has_page_token", "")
+    scrubbed = dumped.lower().replace("has_page_token", "").replace("token_health", "")
+    assert "token" not in scrubbed
     assert "expires_at" in dumped
     assert str(BRAND_ID) in dumped
     assert str(OWNER_ID) in dumped
@@ -268,3 +287,62 @@ def test_meta_user_info_and_debug_error_code_schema() -> None:
     info = MetaDebugTokenInfo(app_id="a", is_valid=False, error_code=190)
     assert info.error_code == 190
     assert MetaDebugTokenInfo(app_id="a", is_valid=True).error_code is None
+
+
+# ------------------------------------------------------------ SPRINT-05 B1-U1
+_NOW = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("status", "expires_at", "expected"),
+    [
+        (AccountStatus.REAUTH_REQUIRED, _NOW + timedelta(days=60), "reauth_required"),
+        (AccountStatus.ACTIVE, None, "unknown"),
+        (AccountStatus.ACTIVE, _NOW - timedelta(seconds=1), "expired"),
+        (AccountStatus.ACTIVE, _NOW + timedelta(days=7), "expiring_soon"),
+        (AccountStatus.ACTIVE, _NOW + timedelta(days=7, seconds=1), "valid"),
+    ],
+)
+def test_b1_u1_token_health_five_cases_with_injected_now(
+    status: AccountStatus, expires_at: datetime | None, expected: str
+) -> None:
+    """B1-U1 — ``token_health`` from ``status`` + ``expires_at`` at an injected ``now``;
+    ``reauth_required`` wins even over a far-future expiry; exactly 7 days is still
+    ``expiring_soon``; ``last_synced_at`` is exposed."""
+    synced = _NOW - timedelta(hours=1)
+    account = _sample_account().model_copy(
+        update={"status": status, "token_expires_at": expires_at, "last_synced_at": synced}
+    )
+    public = ConnectedAccountPublic.from_domain(account, viewer_tenant_id=OWNER_ID, now=_NOW)
+    assert public.token_health == expected
+    assert public.last_synced_at == synced
+    assert compute_token_health(account, now=_NOW) == expected
+
+
+def test_b1_u1_token_health_defaults_to_wall_clock() -> None:
+    far = _sample_account().model_copy(
+        update={"token_expires_at": datetime(2099, 1, 1, tzinfo=UTC)}
+    )
+    assert (
+        ConnectedAccountPublic.from_domain(far, viewer_tenant_id=OWNER_ID).token_health == "valid"
+    )
+    assert public_schema_has_no_paging_next()
+
+
+def public_schema_has_no_paging_next() -> bool:
+    """§2-0(a): the cursor containers only know ``next_cursor`` / ``has_more`` / ``items``."""
+    for model in (PagePostsPage, InstagramMediaPage):
+        assert set(model.model_fields) == {"next_cursor", "has_more", "items"}
+    return True
+
+
+def test_b2_resync_response_carries_removed_ids_and_nothing_secret() -> None:
+    account = _sample_account()
+    res = ResyncResponse.from_resync(
+        account, viewer_tenant_id=OWNER_ID, removed_selected_page_ids=["1003"], now=_NOW
+    )
+    dumped = res.model_dump_json()
+    assert res.removed_selected_page_ids == ["1003"]
+    assert res.token_health == "unknown"
+    assert "gAAAAA" not in dumped
+    assert "removed_selected_page_ids" not in ConnectedAccountPublic.model_fields

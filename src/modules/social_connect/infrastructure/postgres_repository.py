@@ -134,6 +134,33 @@ class PostgresConnectedAccountRepository:
         )
         return (result.rowcount or 0) > 0
 
+    async def update_token_metadata(
+        self,
+        brand_id: UUID,
+        account_id: UUID,
+        *,
+        token_expires_at: datetime | None,
+        granted_scopes: list[str] | None,
+        last_synced_at: datetime,
+    ) -> bool:
+        """SPRINT-05 B2: expiry / scopes / ``last_synced_at`` only — token and status untouched."""
+        values: dict[str, object] = {
+            "token_expires_at": token_expires_at,
+            "last_synced_at": last_synced_at,
+            "updated_at": datetime.now(tz=UTC),
+        }
+        if granted_scopes is not None:
+            values["granted_scopes"] = list(granted_scopes)
+        result = await self._session.execute(
+            update(SocialConnectionRow)
+            .where(
+                SocialConnectionRow.brand_id == brand_id,
+                SocialConnectionRow.id == account_id,
+            )
+            .values(**values)
+        )
+        return (result.rowcount or 0) > 0
+
     # ------------------------------------------------------------- reads ---
     async def get(self, brand_id: UUID, account_id: UUID) -> ConnectedAccount | None:
         row = (

@@ -41,8 +41,10 @@ only transiently here and are never logged or returned. B7: ``provider_user_name
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from src.core.config import Settings
@@ -59,6 +61,8 @@ from src.modules.social_connect.domain.models import (
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
 from src.modules.social_connect.domain.status_marker import StatusMarker
 from src.modules.social_connect.exceptions import (
+    ConnectionRevokedError,
+    InstagramNotLinkedError,
     MetaGraphError,
     MetaNetworkError,
     MetaRateLimitError,
@@ -68,13 +72,19 @@ from src.modules.social_connect.exceptions import (
     MetaTransientError,
     NotConnectionOwnerError,
     PageNotSelectableError,
+    PageNotSelectedError,
+    ReauthRequiredError,
     UnknownPageIdsError,
 )
 from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.social_connect.schemas import (
+    InstagramMediaPage,
+    InstagramMediaPublic,
     MetaAuthorizeUrlResponse,
     MetaDebugTokenInfo,
     MetaPageInfo,
+    PagePostPublic,
+    PagePostsPage,
 )
 from src.modules.tenancy.domain.access import BrandRole
 
@@ -83,6 +93,14 @@ logger = logging.getLogger(__name__)
 
 class SelectionInvariantError(RuntimeError):
     """Defensive guard: an unselected Page would have been stored with a token."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResyncResult:
+    """B2: refreshed aggregate + the selected Page ids Meta no longer returned."""
+
+    account: ConnectedAccount
+    removed_selected_page_ids: list[str]
 
 
 class MetaConnectService:
@@ -293,6 +311,175 @@ class MetaConnectService:
         """Helper for downstream modules that need the raw token transiently."""
         return self._encryption.decrypt_token(encrypted_token)
 
+    # ------------------------------------------------- SPRINT-05 B2: resync ---
+    async def resync(
+        self, brand_id: UUID, account_id: UUID, *, actor_tenant_id: UUID
+    ) -> ResyncResult | None:
+        """B2: re-validate the stored user token and refresh the Page set from Meta.
+
+        Order (no Graph call before the ownership check):
+        1. ``None`` when the connection is not in this brand (caller ⇒ 404);
+        2. actor ≠ ``connected_by_tenant_id`` ⇒ ``NotConnectionOwnerError`` (403);
+        3. ``REVOKED`` ⇒ ``ConnectionRevokedError`` (409) — never resurrected;
+        4. ``/debug_token`` (graceful) ⇒ ``token_expires_at`` / ``granted_scopes`` (``None``
+           keeps the stored scopes); ``is_valid == False`` ⇒ ``reauth_required`` out of band
+           + ``MetaTokenExpiredError`` (401 ``reconnect``) — same for a 190 anywhere;
+        5. ``/me/accounts`` ⇒ **merge policy**: a Page that was selected *and* is still
+           returned with a token stays selected with the **new** token; a selected Page Meta
+           no longer returns is dropped and reported in ``removed_selected_page_ids``;
+           unselected Pages keep metadata only; a single Page is auto-selected (B6).
+        ``status`` is left as is (``ACTIVE`` stays ``ACTIVE``; ``REAUTH_REQUIRED`` is only
+        cleared by a fresh OAuth). The user token plaintext lives only inside this method.
+        """
+        account = await self._repository.get(brand_id, account_id)
+        if account is None:
+            return None
+        if account.connected_by_tenant_id != actor_tenant_id:
+            raise NotConnectionOwnerError()
+        if account.status is AccountStatus.REVOKED:
+            raise ConnectionRevokedError()
+
+        user_token = self._encryption.decrypt_token(account.encrypted_user_token)
+        try:
+            try:
+                debug = await self._inspect_token(user_token)
+                if debug is not None and not debug.is_valid:
+                    raise MetaTokenExpiredError(
+                        "debug_token reports the stored access token as invalid",
+                        code=debug.error_code or 190,
+                        error_type="OAuthException",
+                        http_status=200,
+                    )
+                fresh = await self._client.get_user_pages(user_token)
+            except MetaTokenExpiredError:
+                await self._mark_reauth_required(brand_id, account_id)
+                raise
+        finally:
+            del user_token
+
+        previously_selected = {p.page_id for p in account.pages if p.is_selected}
+        new_pages = self._apply_selection_policy(fresh, previously_selected)
+        _assert_invariant(new_pages)
+        still_selected = {p.page_id for p in new_pages if p.is_selected}
+        removed = sorted(previously_selected - still_selected)
+        if removed:
+            logger.warning(
+                "meta resync dropped selected pages no longer returned by Meta: "
+                "brand=%s connection=%s page_ids=%s",
+                brand_id,
+                account_id,
+                removed,
+            )
+
+        now = datetime.now(tz=UTC)
+        await self._repository.update_token_metadata(
+            brand_id,
+            account_id,
+            token_expires_at=_expiry_from_debug(debug) if debug else account.token_expires_at,
+            granted_scopes=list(debug.scopes) if debug and debug.scopes else None,
+            last_synced_at=now,
+        )
+        await self._repository.replace_pages(brand_id, account_id, new_pages)
+        updated = await self._repository.get(brand_id, account_id)
+        if updated is None:  # pragma: no cover - row existed a moment ago in this transaction
+            return None
+        logger.info(
+            "meta connection resynced: brand=%s connection=%s pages=%d selected=%d removed=%d",
+            brand_id,
+            account_id,
+            len(new_pages),
+            len(still_selected),
+            len(removed),
+        )
+        return ResyncResult(account=updated, removed_selected_page_ids=removed)
+
+    # ------------------------------------- SPRINT-05 B3/B4: operational reads ---
+    async def get_page_posts(
+        self,
+        brand_id: UUID,
+        account_id: UUID,
+        page_id: str,
+        *,
+        limit: int,
+        after: str | None,
+    ) -> PagePostsPage | None:
+        """B3: one page of posts of a **selected** Page (read-through, never cached).
+
+        ``None`` ⇒ connection not in brand (404). ``PageNotSelectedError`` (404) for any
+        Page that is not selected-with-token — identical for every role. ``REAUTH_REQUIRED``
+        ⇒ ``ReauthRequiredError`` (409) and ``REVOKED`` ⇒ ``ConnectionRevokedError`` (409)
+        *before* any Graph call. A 190 during the read marks ``reauth_required`` out of band.
+        """
+        account = await self._repository.get(brand_id, account_id)
+        if account is None:
+            return None
+        page = _selected_page(account, page_id)
+        payload = await self._read_with_page_token(
+            account,
+            page,
+            lambda token: self._client.get_page_posts(token, page_id, limit=limit, after=after),
+        )
+        return PagePostsPage(
+            items=[PagePostPublic.model_validate(n) for n in _nodes(payload)],
+            **_cursor(payload),
+        )
+
+    async def get_instagram_media(
+        self,
+        brand_id: UUID,
+        account_id: UUID,
+        page_id: str,
+        *,
+        limit: int,
+        after: str | None,
+    ) -> InstagramMediaPage | None:
+        """B4: one page of media of the Instagram account linked to a **selected** Page.
+
+        Same guards as :meth:`get_page_posts`; a selected Page without a linked Instagram
+        Business account ⇒ ``InstagramNotLinkedError`` (404 ``instagram_not_linked``).
+        """
+        account = await self._repository.get(brand_id, account_id)
+        if account is None:
+            return None
+        page = _selected_page(account, page_id)
+        if page.instagram is None:
+            raise InstagramNotLinkedError(page_id)
+        ig_user_id = page.instagram.ig_user_id
+        payload = await self._read_with_page_token(
+            account,
+            page,
+            lambda token: self._client.get_instagram_media(
+                token, ig_user_id, limit=limit, after=after
+            ),
+        )
+        return InstagramMediaPage(
+            items=[InstagramMediaPublic.model_validate(n) for n in _nodes(payload)],
+            **_cursor(payload),
+        )
+
+    async def _read_with_page_token(
+        self,
+        account: ConnectedAccount,
+        page: PageAsset,
+        call: Callable[[str], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """B5: decrypt the Page token at the point of use, never keep it beyond the call;
+        status guards run *before* decryption so no Graph request happens for a dead
+        connection (B3-U5). A 190 ⇒ ``reauth_required`` persisted out of band (H3)."""
+        if account.status is AccountStatus.REAUTH_REQUIRED:
+            raise ReauthRequiredError()
+        if account.status is AccountStatus.REVOKED:
+            raise ConnectionRevokedError()
+        assert page.encrypted_page_token is not None  # noqa: S101 - guaranteed by _selected_page
+        page_token = self._encryption.decrypt_token(page.encrypted_page_token)
+        try:
+            return await call(page_token)
+        except MetaTokenExpiredError:
+            await self._mark_reauth_required(account.brand_id, account.id)
+            raise
+        finally:
+            del page_token
+
     # ----------------------------------------------------------- helpers ---
     async def _mark_reauth_required(self, brand_id: UUID, account_id: UUID) -> None:
         """H3: persist ``reauth_required`` so it survives the request's rollback."""
@@ -380,6 +567,34 @@ class MetaConnectService:
             is_selected=is_selected,
             instagram=instagram,
         )
+
+
+def _selected_page(account: ConnectedAccount, page_id: str) -> PageAsset:
+    """§2-0(b): only a *selected* Page with a stored token is a brand resource; anything else
+    (unknown id, unselected, token-less) is the same 404 for every role."""
+    for page in account.pages:
+        if page.page_id == page_id and page.is_selected and page.encrypted_page_token:
+            return page
+    raise PageNotSelectedError(page_id)
+
+
+def _nodes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data")
+    return [n for n in data if isinstance(n, dict)] if isinstance(data, list) else []
+
+
+def _cursor(payload: dict[str, Any]) -> dict[str, Any]:
+    """Opaque pagination only: ``paging.cursors.after`` when (and only when) Meta says there
+    is a next page. The ``paging.next`` URL (carrying ``access_token``) is dropped here and
+    never logged, followed or returned (§2-0(a))."""
+    paging = payload.get("paging")
+    if not isinstance(paging, dict) or not paging.get("next"):
+        return {"next_cursor": None, "has_more": False}
+    cursors = paging.get("cursors")
+    after = cursors.get("after") if isinstance(cursors, dict) else None
+    if not isinstance(after, str) or not after:
+        return {"next_cursor": None, "has_more": False}
+    return {"next_cursor": after, "has_more": True}
 
 
 def _assert_invariant(pages: list[PageAsset]) -> None:

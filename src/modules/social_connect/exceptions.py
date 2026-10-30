@@ -164,3 +164,52 @@ class PageNotSelectableError(ValueError):
     def __init__(self, page_ids: list[str]) -> None:
         super().__init__(f"pages without a page token: {', '.join(page_ids)}")
         self.page_ids = list(page_ids)
+
+
+# --- SPRINT-05 operational reads (B2/B3/B4) ----------------------------------
+class PageNotSelectedError(LookupError):
+    """SPRINT-05 B3/B4: the Page is not a *selected* Page (with a stored token) of this
+    connection — or does not belong to it at all. Mapped to **404** ``page_not_selected`` for
+    *every* role (even the connection owner): unselected Pages are not brand resources.
+    """
+
+    error = "page_not_selected"
+
+    def __init__(self, page_id: str) -> None:
+        self.page_id = page_id
+        self.message = "this Page is not selected for the brand"
+        super().__init__(self.message)
+
+
+class InstagramNotLinkedError(LookupError):
+    """SPRINT-05 B4: the selected Page has no linked Instagram Business account.
+    Mapped to **404** ``instagram_not_linked``."""
+
+    error = "instagram_not_linked"
+
+    def __init__(self, page_id: str) -> None:
+        self.page_id = page_id
+        self.message = "this Page has no linked Instagram Business account"
+        super().__init__(self.message)
+
+
+class ConnectionRevokedError(RuntimeError):
+    """SPRINT-05 B2/B3/B4: the connection is ``revoked`` — nothing may be read or resynced
+    through it; reconnect instead. Mapped to **409** ``connection_revoked``."""
+
+    error = "connection_revoked"
+
+    def __init__(self) -> None:
+        self.message = "this connection was revoked; reconnect the Meta account"
+        super().__init__(self.message)
+
+
+class ReauthRequiredError(RuntimeError):
+    """SPRINT-05 B3/B4: the connection is already ``reauth_required`` — no Graph call is made.
+    Mapped to **409** ``reauth_required`` with ``required_action: reconnect``."""
+
+    error = "reauth_required"
+
+    def __init__(self) -> None:
+        self.message = "the Meta token needs re-authorisation; reconnect the account"
+        super().__init__(self.message)

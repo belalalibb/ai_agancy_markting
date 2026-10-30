@@ -272,6 +272,73 @@ class MetaGraphClient:
                 break
         return pages
 
+    # ------------------------------------------- SPRINT-05 operational reads ----
+    async def get_page_posts(
+        self,
+        page_access_token: str,
+        page_id: str,
+        *,
+        limit: int = DEFAULT_READ_LIMIT,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """``GET /{page_id}/posts`` — one page of the Page's published posts (SPRINT-05 B3).
+
+        * Method: ``GET``; auth: ``Authorization: Bearer <page token>`` + ``appsecret_proof``
+          (HMAC-SHA256 of that Page token) — the token never enters the URL.
+        * ``fields``: :data:`POST_FIELDS`; ``limit`` default 25, max 100 (clamped here as a
+          second line of defence — the router validates ``Query(ge=1, le=100)``);
+          ``after`` is the opaque ``paging.cursors.after`` cursor, passed through as-is.
+        * Required scope: ``pages_read_engagement`` (+ ``pages_show_list``); the Page token
+          must come from a *selected* Page.
+        * ``paging.next`` in the raw answer carries ``access_token`` — callers must only
+          extract ``paging.cursors.after`` and never follow or expose that URL.
+        """
+        params: dict[str, Any] = {
+            "fields": POST_FIELDS,
+            "limit": max(1, min(int(limit), MAX_READ_LIMIT)),
+            "appsecret_proof": self.appsecret_proof(page_access_token),
+        }
+        if after:
+            params["after"] = after
+        return await self._request(
+            "GET",
+            f"/{page_id}/posts",
+            params=params,
+            headers=_bearer(page_access_token),
+        )
+
+    async def get_instagram_media(
+        self,
+        page_access_token: str,
+        ig_user_id: str,
+        *,
+        limit: int = DEFAULT_READ_LIMIT,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """``GET /{ig_user_id}/media`` — one page of an IG Business account's media (B4).
+
+        * Method: ``GET``; auth: Bearer **Page** token of the Page linked to ``ig_user_id`` +
+          ``appsecret_proof`` of that token; nothing secret in the URL.
+        * ``fields``: :data:`IG_MEDIA_FIELDS`; ``limit`` default 25, max 100; ``after`` is
+          the opaque ``paging.cursors.after`` cursor.
+        * Required scopes: ``instagram_basic`` + ``pages_read_engagement``.
+        * ``paging.next`` carries ``access_token`` — never returned to clients nor followed
+          automatically; only ``paging.cursors.after`` is surfaced.
+        """
+        params: dict[str, Any] = {
+            "fields": IG_MEDIA_FIELDS,
+            "limit": max(1, min(int(limit), MAX_READ_LIMIT)),
+            "appsecret_proof": self.appsecret_proof(page_access_token),
+        }
+        if after:
+            params["after"] = after
+        return await self._request(
+            "GET",
+            f"/{ig_user_id}/media",
+            params=params,
+            headers=_bearer(page_access_token),
+        )
+
     def _trusted_pagination_url(self, next_url: str, appsecret_proof: str) -> str:
         """H4 (SSRF) + H2: only ``https`` on the configured Graph host, secrets stripped.
 
