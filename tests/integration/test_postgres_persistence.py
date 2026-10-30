@@ -1501,3 +1501,134 @@ def test_h7_i1_concurrent_refresh_with_same_cookie_exactly_one_wins(
         {"s": old_sid},
     )
     assert rows == [(True, True)]
+
+
+# ========================================================= SPRINT-05 Part A (A-1)
+def _mock_identity(graph_mock: respx.MockRouter, user_id: str) -> None:
+    """Re-arm ``/me`` + ``/debug_token`` for another Meta identity (same route objects)."""
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload(user_id=user_id))
+    )
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload(user_id=user_id))
+    )
+
+
+def _page_rows(cid: str) -> dict[str, tuple[bool, bool]]:
+    """``page_id -> (is_selected, has_token)`` straight from PostgreSQL."""
+    return {
+        r[0]: (r[1], r[2])
+        for r in _rows(
+            "SELECT page_id, is_selected, encrypted_page_token IS NOT NULL "
+            "FROM social_connection_pages WHERE connection_id = :cid ORDER BY page_id",
+            {"cid": UUID(cid)},
+        )
+    }
+
+
+def test_a1_i1_new_meta_identity_on_same_brand_creates_second_connection(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """A1-I1 — brand has a connection for Meta user ``u1`` (1001 selected). A new OAuth on the
+    same brand whose ``/me`` says ``u2`` (same two Pages) ⇒ a **second** row for ``u2`` with
+    no selection; ``u1``'s row and selection are untouched."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2, user_id="u1")
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+
+    with TestClient(integration_app) as client:
+        first = _connect(client, owner)
+        c1 = first["id"]
+        assert first["provider_user_id"] == "u1"
+        sel = client.put(
+            f"{brand_base()}/connections/{c1}/pages/selection",
+            json={"page_ids": ["1001"]},
+            headers=owner,
+        )
+        assert sel.status_code == 200, sel.text
+        before = _page_rows(c1)
+        assert before == {"1001": (True, True), "1002": (False, False)}
+
+        _mock_identity(graph_mock, "u2")
+        second = _connect(client, owner)
+        c2 = second["id"]
+        assert c2 != c1
+        assert second["provider_user_id"] == "u2"
+        assert all(not p["is_selected"] and not p["has_page_token"] for p in second["pages"])
+        assert len(second["pages"]) == 2
+
+        listed = client.get(f"{brand_base()}/connections", headers=owner).json()
+        assert sorted(c["provider_user_id"] for c in listed) == ["u1", "u2"]
+
+    assert (
+        _run(
+            "SELECT count(*) FROM social_connections WHERE brand_id = :b",
+            {"b": BRAND_ID},
+            scalar=True,
+        )
+        == 2
+    )
+    assert _page_rows(c1) == before  # u1 untouched: selection + token kept
+    assert _page_rows(c2) == {"1001": (False, False), "1002": (False, False)}
+
+
+def test_a1_i2_reoauth_as_same_identity_from_other_tenant_transfers_ownership_keeps_selection(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """A1-I2 — the agency (MANAGER grant) re-runs OAuth as the *same* Meta user ``u1`` ⇒ the
+    row is reused, ``connected_by_tenant_id`` transfers to the agency, the selection (1001)
+    survives with a fresh Page token and the unselected Page stays token-less."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2, user_id="u1")
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    agency = integration_headers(settings, AGENCY_ID)
+
+    with TestClient(integration_app) as client:
+        first = _connect(client, owner)
+        c1 = first["id"]
+        assert first["connected_by_tenant_id"] == str(OWNER_ID)
+        sel = client.put(
+            f"{brand_base()}/connections/{c1}/pages/selection",
+            json={"page_ids": ["1001"]},
+            headers=owner,
+        )
+        assert sel.status_code == 200, sel.text
+        old_cipher = _run(
+            "SELECT encrypted_page_token FROM social_connection_pages "
+            "WHERE connection_id = :cid AND page_id = '1001'",
+            {"cid": UUID(c1)},
+            scalar=True,
+        )
+
+        _grant_agency(client, owner, role="manager")
+        again = _connect(client, agency)
+        assert again["id"] == c1  # same (brand, provider, provider_user_id) ⇒ same row
+        assert again["connected_by_tenant_id"] == str(AGENCY_ID)
+        assert again["is_connection_owner"] is True
+        by_id = {p["page_id"]: p for p in again["pages"]}
+        assert by_id["1001"]["is_selected"] is True and by_id["1001"]["has_page_token"] is True
+        assert by_id["1002"]["is_selected"] is False and by_id["1002"]["has_page_token"] is False
+
+        # The previous owner is now a plain viewer of the selected Page only (H1).
+        seen = client.get(f"{brand_base()}/connections/{c1}", headers=owner).json()
+        assert seen["is_connection_owner"] is False
+        assert [p["page_id"] for p in seen["pages"]] == ["1001"]
+
+    assert _page_rows(c1) == {"1001": (True, True), "1002": (False, False)}
+    new_cipher = _run(
+        "SELECT encrypted_page_token FROM social_connection_pages "
+        "WHERE connection_id = :cid AND page_id = '1001'",
+        {"cid": UUID(c1)},
+        scalar=True,
+    )
+    assert new_cipher != old_cipher  # token re-encrypted from the fresh OAuth
+    assert (
+        _run(
+            "SELECT connected_by_tenant_id FROM social_connections WHERE id = :cid",
+            {"cid": UUID(c1)},
+            scalar=True,
+        )
+        == AGENCY_ID
+    )

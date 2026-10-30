@@ -54,7 +54,18 @@ PAGE_FIELDS = (
 MAX_PAGINATION_REQUESTS: int = 50
 
 # H2: query parameters that must never be sent (Meta echoes them in ``paging.next``).
-_URL_SECRET_PARAMS: frozenset[str] = frozenset({"access_token", "appsecret_proof"})
+# SPRINT-05 A-0/B5: ``input_token`` / ``method`` belong to the ``/debug_token`` form body only.
+_URL_SECRET_PARAMS: frozenset[str] = frozenset(
+    {"access_token", "appsecret_proof", "input_token", "method"}
+)
+
+# SPRINT-05 B3/B4: operational reads of a selected Page / its Instagram account.
+POST_FIELDS = "id,message,created_time,permalink_url,status_type,full_picture,is_published"
+IG_MEDIA_FIELDS = (
+    "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count"
+)
+DEFAULT_READ_LIMIT: int = 25
+MAX_READ_LIMIT: int = 100
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -178,6 +189,15 @@ class MetaGraphClient:
         )
 
     async def debug_token(self, input_token: str) -> MetaDebugTokenInfo:
+        """``/debug_token`` — validity, ``app_id``, ``user_id``, scopes and expiry of a token.
+
+        Transport: HTTP ``POST`` with ``Authorization: Bearer {app_id}|{app_secret}`` and the
+        form body ``input_token=…&method=GET``. ``/debug_token`` is a *read* endpoint, so the
+        Graph method override ``method=GET`` (SPRINT-05 A-0) tells Meta to treat the POST as a
+        GET — without it Meta answers code 100 / ``GraphMethodException``. Neither the app
+        secret nor the inspected token ever appears in the request line (H2). No scope
+        required beyond a valid app token; no pagination.
+        """
         app_secret = self._settings.meta_app_secret.get_secret_value()
         app_token = f"{self._settings.meta_app_id}|{app_secret}"
         # H2: the app token (contains the app secret) travels as Bearer, the inspected
@@ -185,7 +205,7 @@ class MetaGraphClient:
         payload = await self._request(
             "POST",
             "/debug_token",
-            data={"input_token": input_token},
+            data={"input_token": input_token, "method": "GET"},
             headers=_bearer(app_token),
         )
         data = payload.get("data") or {}

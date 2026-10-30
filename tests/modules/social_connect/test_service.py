@@ -191,7 +191,8 @@ async def test_complete_connection_debug_token_failure_keeps_identity_from_me(
     assert account.token_expires_at is None
     assert account.provider_user_id == "10001"  # trusted identity from /me
     assert account.provider_user_name == "Nile Owner"
-    assert any("debug_token failed" in rec.message for rec in caplog.records)
+    # SPRINT-05 A-0: code 100 is a *misconfiguration* ⇒ ERROR (still degrades gracefully).
+    assert any("debug_token misconfiguration" in rec.message for rec in caplog.records)
     assert "LONG_LIVED" not in caplog.text  # the token is never logged
 
 
@@ -451,3 +452,104 @@ def test_decrypt_stored_token_roundtrip(
     service: MetaConnectService, encryption: TokenEncryptionService
 ) -> None:
     assert service.decrypt_stored_token(encryption.encrypt_token("abc")) == "abc"
+
+
+# ------------------------------------------------------------ SPRINT-05 A-0
+async def test_a0_u2_debug_token_code_100_is_error_and_counted(
+    service: MetaConnectService,
+    graph_mock: respx.MockRouter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A0-U2 — code 100 (``GraphMethodException``) ⇒ ERROR + ``meta_debug_token_failures``.
+
+    Degradation still happens (unknown scopes/expiry), but the misconfiguration is visible.
+    """
+    from src.core.metrics import counters
+
+    counters.reset()
+    _stub_oauth(graph_mock)
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "error": {"message": "Unsupported", "code": 100, "type": "GraphMethodException"}
+            },
+        )
+    )
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload()))
+
+    with caplog.at_level(logging.INFO):
+        account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
+
+    assert account.granted_scopes == []
+    assert account.token_expires_at is None
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "debug_token misconfiguration" in errors[0].getMessage()
+    assert "graph code 100" in errors[0].getMessage()
+    assert "LONG_LIVED" not in caplog.text
+    assert counters["meta_debug_token_failures"] == 1
+
+
+async def test_a0_u2_debug_token_transient_is_warning_and_not_counted(
+    service: MetaConnectService,
+    graph_mock: respx.MockRouter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A0-U2 (b) — ``MetaTransientError`` keeps the graceful WARNING, counter untouched."""
+    from src.core.metrics import counters
+
+    counters.reset()
+    _stub_oauth(graph_mock)
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(
+            500, json={"error": {"message": "Temporary", "code": 2, "type": "ApiException"}}
+        )
+    )
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload()))
+
+    with caplog.at_level(logging.INFO):
+        account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
+
+    assert account.provider_user_id == "10001"
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("debug_token failed" in r.getMessage() for r in warnings)
+    assert counters["meta_debug_token_failures"] == 0
+
+
+async def test_a0_u2_debug_token_generic_unclassified_error_is_counted(
+    service: MetaConnectService, graph_mock: respx.MockRouter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A0-U2 (c) — an unclassified ``MetaGraphError`` (no code) is treated as misconfiguration."""
+    from src.core.metrics import counters
+
+    counters.reset()
+    _stub_oauth(graph_mock)
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "weird", "type": "Other"}})
+    )
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload()))
+    with caplog.at_level(logging.ERROR):
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
+    assert counters["meta_debug_token_failures"] == 1
+    assert "debug_token misconfiguration" in caplog.text
+
+
+async def test_a0_u3_mark_reauth_required_without_marker_uses_repository(
+    service: MetaConnectService,
+    graph_mock: respx.MockRouter,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    """A0-U3 — bare service (no ``StatusMarker``): the 190 path falls back to
+    ``repository.set_status`` (service.py fallback branch)."""
+    _stub_happy_path(graph_mock)
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
+    assert account.status is AccountStatus.ACTIVE
+
+    graph_mock.get("/me/accounts").mock(
+        return_value=httpx.Response(400, json=oauth_error_payload("expired", code=190))
+    )
+    with pytest.raises(MetaTokenExpiredError):
+        await service.select_pages(BRAND_ID, account.id, ["1001"], actor_tenant_id=OWNER_ID)
+    assert fake_repo.rows[account.id].status is AccountStatus.REAUTH_REQUIRED

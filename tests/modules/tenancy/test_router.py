@@ -283,3 +283,28 @@ def test_revoke_grant_purges_only_grantee_connections_in_this_brand(
     # And the agency lost access to brand 1 but keeps brand 2.
     assert client.get(f"{API}/brands/{BRAND_ID}", headers=as_(AGENCY_ID)).status_code == 404
     assert client.get(f"{API}/brands/{BRAND2_ID}", headers=as_(AGENCY_ID)).status_code == 200
+
+
+# ------------------------------------------------------------ SPRINT-05 A0-U4
+async def test_a0_u4_get_own_tenant_missing_row_is_tenant_not_found(store: FakeStore) -> None:
+    """A0-U4 — a JWT whose ``tid`` matches the path but has no tenant row ⇒ ``TenantNotFoundError``
+    (``tenancy/service.py`` branch after the ownership check)."""
+    from src.modules.tenancy.exceptions import TenantNotFoundError
+    from src.modules.tenancy.service import TenancyService
+
+    from tests.fakes import (
+        FakeBrandAccessGrantRepository,
+        FakeBrandAccessResolver,
+        FakeBrandRepository,
+        FakeTenantRepository,
+    )
+
+    service = TenancyService(
+        FakeTenantRepository(store),
+        FakeBrandRepository(store),
+        FakeBrandAccessGrantRepository(store),
+        FakeBrandAccessResolver(store),
+    )
+    ghost = uuid4()
+    with pytest.raises(TenantNotFoundError):
+        await service.get_own_tenant(ghost, ghost)

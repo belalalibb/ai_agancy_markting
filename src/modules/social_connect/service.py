@@ -46,6 +46,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from src.core.config import Settings
+from src.core.metrics import counters
 from src.core.oauth_state import OAuthStateSigner
 from src.core.security import TokenEncryptionService
 from src.modules.social_connect.domain.models import (
@@ -59,9 +60,12 @@ from src.modules.social_connect.domain.repository import ConnectedAccountReposit
 from src.modules.social_connect.domain.status_marker import StatusMarker
 from src.modules.social_connect.exceptions import (
     MetaGraphError,
+    MetaNetworkError,
+    MetaRateLimitError,
     MetaTokenExpiredError,
     MetaTokenForeignAppError,
     MetaTokenInvalidError,
+    MetaTransientError,
     NotConnectionOwnerError,
     PageNotSelectableError,
     UnknownPageIdsError,
@@ -305,15 +309,32 @@ class MetaConnectService:
         A 190 (invalid/expired token) is fatal — the token we just received is unusable.
         Any other Graph failure is logged (without the token) and treated as *unknown*
         scopes/expiry; identity is unaffected because it comes from ``/me``.
+
+        SPRINT-05 A-0: *operational* failures (network, transient, rate limit) stay a
+        WARNING — they heal by themselves. Code 100 (``GraphMethodException`` — wrong HTTP
+        method / unsupported call) or any unclassified ``MetaGraphError`` means **our**
+        request is wrong: ERROR log + ``counters["meta_debug_token_failures"]`` so a
+        misconfiguration is visible instead of silently degrading every onboarding.
         """
         try:
             return await self._client.debug_token(long_lived)
         except MetaTokenExpiredError:
             raise
-        except MetaGraphError as exc:
+        except (MetaNetworkError, MetaTransientError, MetaRateLimitError) as exc:
             logger.warning(
                 "debug_token failed; continuing with unknown identity/expiry: %s "
                 "(code=%s, http=%s)",
+                type(exc).__name__,
+                exc.code,
+                exc.http_status,
+            )
+            return None
+        except MetaGraphError as exc:
+            counters.increment("meta_debug_token_failures")
+            logger.error(
+                # ``graph code`` (not ``code=``) so the SecretRedactingFilter leaves it readable.
+                "debug_token misconfiguration: %s (graph code %s, http %s) — continuing with "
+                "unknown scopes/expiry; check the /debug_token transport (method=GET override)",
                 type(exc).__name__,
                 exc.code,
                 exc.http_status,
