@@ -9,9 +9,9 @@
 ## 1. ملخص الحالة العامة للمشروع (Project Snapshot)
 
 - **اسم المشروع:** AI Marketing Platform (AI Growth OS / BrandMind AI / QEVION)
-- **الحالة الإجمالية:** `SPRINT_03_DELIVERED_AWAITING_REVIEW`
-- **آخر تحديث للمؤشر:** 2026-10-30 — المنفذ سلّم **SPRINT-03** على `work/implementation` في كوميتين فوق `main` (Part A `a985d55` بوابات CI، Part B `b712df0` Tenancy + هجرة 0003 + اتصالات Meta بنطاق العلامة + اختيار الصفحات) ⇒ PR #7 مفتوح وCI خضراء بالفحوص الخمسة. 298 وحدة + 17 تكامل = **315 ناجحاً، 0 فشل، تغطية 99.68%** على PostgreSQL 17.11. ملاحظات المالك الثلاث مطبَّقة. §7 من `CURRENT_DIRECTIVE.md` مملوء. **في انتظار مراجعة المخطط.**
-- **المرحلة الحالية:** Phase 1 — من «موصل Meta دائم» إلى «منصة متعددة المستأجرين بعلامات ومنح + بوابات CI» (SPRINT-03)
+- **الحالة الإجمالية:** `SPRINT_03_ACCEPTED_MERGED__SPRINT_04_ISSUED`
+- **آخر تحديث للمؤشر:** 2026-10-30 — المخطط راجع **SPRINT-03** مستقلاً في بيئة طازجة (PG 17.11؛ 315 اختباراً، 99.68%؛ CI خضراء بالفحوص الخمسة؛ هجرة 0003 مُختبَرة بحالات حدية) ⇒ **مقبول** ⇒ PR #7 دُمج في `main` @ `c88a721`. أُصدر توجيه **SPRINT-04** (وحدة المصادقة + هوية فاعل مُتحقَّق منها — إغلاق N1).
+- **المرحلة الحالية:** Phase 1 — من «منصة متعددة المستأجرين بهوية مُدَّعاة» إلى «هوية مُصادَقة (JWT + Refresh دوّار)» (SPRINT-04)
 - **الفرع المعتمد المستقر:** `main`
 - **فرع التطوير المستمر:** `work/implementation`
 - **المرجع المعرفي المعتمد:** مجلد `AI_Marketing_Platform_Hub/` (57 وثيقة تخصصية)
@@ -23,41 +23,42 @@
 
 > ⚠️ **تصحيح:** الأصول القديمة (`ult_agent_agent/…`, `first_lunch/…`, `whatsapp_ai_v2/…`) **ليست في هذا المستودع** وتبقى مرجعاً تصميمياً فقط. خط الأساس الحقيقي الآن هو كود SPRINT-01 أدناه.
 
-| المكون | المسار | الحالة (تحقق المخطط 2026-10-29) |
+| المكون | المسار | الحالة (تحقق المخطط 2026-10-30، `main` @ `c88a721`) |
 |---|---|---|
-| نواة FastAPI + إعدادات + تشفير MultiFernet (D-058) + `state` موقَّع | `src/core/` | ✅ جزء من 215 اختباراً، تغطية 99% (main @ `df01260`) |
-| وحدة ربط Meta (OAuth v26.0، هوية من `/me`، `/debug_token` مُتحقَّق، تخزين PostgreSQL، صفحات + IG) | `src/modules/social_connect/` | ✅ 11 اختبار تكامل على PG حقيقية؛ `tenant_id` نص حر ⇒ يُستبدل بـ `brand_id` في SPRINT-03 |
-| محرك SQLAlchemy async كسول + `dispose()` عند الإغلاق + `/health/ready` | `src/core/database.py`, `src/main.py` | ✅؛ الجاهزية تنتقل إلى `engine.connect()` في SPRINT-03 A6 |
-| هجرات Alembic async | `alembic/versions/0001`, `0002` | ✅ صعود/نزول مُتحقَّق على PG 17.11 |
-| سكربت نسخ احتياطي | `scripts/backup_progress.sh` | ✅ مقبول |
+| نواة FastAPI + إعدادات + MultiFernet (D-058) + `state` موقَّع `{t,b,n,iat}` + `/health/ready` عبر `engine.connect()` | `src/core/`, `src/main.py` | ✅ 315 اختباراً، تغطية 99.68% |
+| وحدة Tenancy: `tenants` / `brands` / `brand_access_grants`، `BrandAccessResolver` (404/403)، سحب المنحة يمسح اتصالات الوكالة | `src/modules/tenancy/` | ✅ جديد في SPRINT-03؛ **الفاعل `?tenant_id=` مُدَّعى ذاتياً ⇒ يُستبدل بـ JWT في SPRINT-04** |
+| وحدة ربط Meta بنطاق العلامة (`/brands/{brand_id}/social/meta/…`)، اختيار الصفحات صراحةً، حارس `provider_user_name` | `src/modules/social_connect/` | ✅ 17 اختبار تكامل على PG حقيقية |
+| هجرات Alembic async | `alembic/versions/0001`–`0003` | ✅ 0003 مُختبَرة بـ backfill على بيانات قديمة حدية (تصادم slug، عربي، قصير) صعوداً ونزولاً |
+| CI: `lint` / `unit` / `integration` (pgvector:pg16) / `secrets` (gitleaks) / `licenses` (D-054) | `.github/workflows/ci.yml`, `scripts/check_licenses.py` | ✅ خمسة فحوص منفصلة خضراء على `main` |
+| سكربت نسخ احتياطي | `scripts/backup_progress.sh` | ✅ |
 
-**مراجع المراجعات:** [`SPRINT-01`](./sprints/SPRINT-01_REVIEW.md) · [`SPRINT-02`](./sprints/SPRINT-02_REVIEW.md) · [`SPRINT-02.1`](./sprints/SPRINT-02.1_REVIEW.md)
+**مراجع المراجعات:** [`SPRINT-01`](./sprints/SPRINT-01_REVIEW.md) · [`SPRINT-02`](./sprints/SPRINT-02_REVIEW.md) · [`SPRINT-02.1`](./sprints/SPRINT-02.1_REVIEW.md) · [`SPRINT-03`](./sprints/SPRINT-03_REVIEW.md)
 
 ---
 
 ## 3. المهمة النشطة الحالية (Active Task)
 
-- **معرف المهمة:** `SPRINT-03-CI-GATES-AND-TENANCY`
+- **معرف المهمة:** `SPRINT-04-AUTH-AND-ACTOR-IDENTITY`
 - **وثيقة التوجيه المعتمدة (المصدر الوحيد):** [`CURRENT_DIRECTIVE.md`](./CURRENT_DIRECTIVE.md)
-- **حالة المهمة:** `DELIVERED_AWAITING_REVIEW` — مُنفَّذة بالكامل على `work/implementation` (`a985d55` + `b712df0`) ⇒ **PR #7** https://github.com/belalalibb/ai_agancy_markting/pull/7 — CI خضراء (push https://github.com/belalalibb/ai_agancy_markting/actions/runs/40979056739 · PR https://github.com/belalalibb/ai_agancy_markting/actions/runs/40979061696). تقرير المنفذ الكامل (الأرقام، I-B1، الانحرافات الثمانية، الأسئلة) في **§7 من `CURRENT_DIRECTIVE.md`**.
-- **الهدف:** (Part A) بوابات CI خمس منفصلة على GitHub Actions — ruff، وحدة، تكامل على `pgvector/pgvector:pg16`، gitleaks، بوابة تراخيص D-054 — + `/health/ready` عبر `engine.connect()`. (Part B) جداول `tenants` / `brands` / `brand_access_grants`، هجرة `0003` آمنة تنقل `social_connections` إلى `brand_id` مع backfill، مسارات Meta تحت `/brands/{brand_id}/…`، **اختيار الصفحات صراحةً** لمنع خلط صفحات عملاء الوكالة، حارس `provider_user_name` (لا يُسجَّل / يُحذف عند disconnect وعند سحب المنحة).
-- **خارج النطاق:** مصادقة/JWT، تغيير التشفير، LiteLLM/Temporal/WhatsApp، واجهات أمامية.
-- **السبرنت السابق:** `SPRINT-02.1-HOTFIX` — **مقبول ودُمج** (PR #5 ⇒ `df01260`) — مراجعته في [`sprints/SPRINT-02.1_REVIEW.md`](./sprints/SPRINT-02.1_REVIEW.md).
-- **قرارات المالك المطبَّقة في PR #6:** Tenant/Brand الخيار ج المبسّط؛ D-048/049 ⇒ **D-056**، D-051 ⇒ **D-057**؛ هوامش الربح ⇒ فرضيات غير مُتحقَّق منها؛ حذف `AI_Marketing_Platform_Hub/imaster_planner.md`؛ MultiFernet مُسجَّل كاستثناء مرحلي **D-058**.
+- **حالة المهمة:** `READY_FOR_EXECUTION` — تبدأ من `main` **بعد دمج PR #8**؛ المنفذ على `work/implementation` يفتح **PR #9**.
+- **الهدف:** (Part A) وحدة `auth`: جدولا `users` + `refresh_sessions`، Argon2id، JWT وصول HS256 قصير (15 دقيقة)، Refresh دوّار في كوكي HttpOnly/SameSite=Strict مع كشف إعادة الاستخدام (يُبطل كل الجلسات)، CSRF، تحديد معدل أدنى، `CurrentUser`/`CurrentUserFresh`. (Part B) `ActorTenantId` يُشتق من JWT؛ حذف `tenant_id` من كل المعاملات والأجسام؛ التسجيل ينشئ المستأجر؛ `POST /tenants` يُحذف؛ اختبار بارامتري «بلا Bearer ⇒ 401» على كل مسار محمي؛ هجرة `0004`.
+- **خارج النطاق:** OAuth اجتماعي للدخول، MFA، استعادة كلمة المرور، عضوية متعددة داخل المستأجر، أي ميزة منتج.
+- **السبرنت السابق:** `SPRINT-03-CI-GATES-AND-TENANCY` — **مقبول ودُمج** (PR #7 ⇒ `c88a721`) — مراجعته في [`sprints/SPRINT-03_REVIEW.md`](./sprints/SPRINT-03_REVIEW.md).
+- **ردود المخطط على أسئلة المنفذ (SPRINT-03):** اختبارات Stub للمستودعات تُدمج (طبقة مكمّلة للتكامل)؛ تفويض `MANAGER ⇒ VIEWER` مرفوض حتى `tenant_members`؛ تدوير التوكن مرفوع للمالك.
 
 ---
 
 ## 4. معايير القبول للمهمة الحالية (Acceptance Criteria)
 
 الكاملة في **§4 من `CURRENT_DIRECTIVE.md`**. ملخصها:
-- [x] CI خضراء على PR #7 بخمسة فحوص منفصلة: `lint`, `unit`, `integration`, `secrets`, `licenses`.
-- [x] 0 فشل (وحدة + تكامل)، تغطية ≥ 95%، ruff نظيف على `src tests alembic scripts`.
-- [x] `grep "Depends(get_db_session)" src/main.py` فارغ؛ `grep "tenant_id: str" src` فارغ.
-- [x] هجرة `0003` تصعد على بيانات قديمة وتنزل وتصعد مجدداً (I-B1).
-- [x] لا مسار `/social/meta/connections` خارج `/brands/{brand_id}/`؛ لا حقل `*token*` في OpenAPI إلا `has_page_token`.
-- [x] اختبارا حارس `provider_user_name` (B-U11, I-B5) موجودان وناجحان.
-- [x] `scripts/check_licenses.py` في venv نظيف ⇒ exit 0 (37 حزمة).
-- [x] كوميتان (Part A, Part B) على `work/implementation` + كوميت توثيق؛ لا ملف محظور مُسّ.
+- [ ] CI خضراء على PR #9؛ بوابة التراخيص تقبل `pyjwt` / `argon2-cffi` / `email-validator`؛ لا `python-jose` ولا `passlib`.
+- [ ] 0 فشل، تغطية ≥ 95%، ruff نظيف.
+- [ ] `grep 'alias="tenant_id"' src` و`grep TEMPORARY src` فارغان.
+- [ ] اختبار بارامتري يغطي **كل** مسار محمي: بلا Bearer ⇒ 401 + `WWW-Authenticate`.
+- [ ] OpenAPI: `bearerAuth` مُعلَن ومطبَّق؛ لا `password|hash|secret|token` في الاستجابات إلا `access_token` و`has_page_token`.
+- [ ] I-A2 على PG: دوران Refresh + كشف إعادة الاستخدام يُبطل كل الجلسات.
+- [ ] هجرة `0004` صعود/نزول/صعود؛ `uq_users_email_lower` يعمل.
+- [ ] كوميتان (Part A, Part B) فوق `main`؛ لا ملف محظور مُسّ.
 
 ---
 
@@ -65,14 +66,13 @@
 
 | الترتيب | الدور | الخطوة |
 |---|---|---|
-| 1 | ~~المالك~~ | ~~دمج PR #6~~ ✅ تم (`aae3600`). |
-| 2 | ~~المنفذ~~ | ~~Part A ⇒ Part B ⇒ §7 ⇒ هذا الملف~~ ✅ تم: `a985d55` + `b712df0` + كوميت التوثيق ⇒ PR #7 خضراء. |
-| 3 | **المالك** | بعد أول تشغيل أخضر (تم): تفعيل حماية `main` بالفحوص الخمسة `lint`, `unit`, `integration`, `secrets`, `licenses` (توجيه §8/1). |
-| 4 | **المخطط** | عند *«راجع شغل المنفذ»*: مراجعة SPRINT-03 على PG حقيقية (`pytest -m integration` مع `TEST_DATABASE_URL`) + التحقق من CI + قراءة §7 (الانحرافات 1–8 والأسئلة 1–3) ⇒ اعتماد/تعديلات على PR #7 ⇒ نقل `provider_user_name`/D-058/نموذج Tenancy إلى Hub docs ⇒ توجيه SPRINT-04. |
-| 5 | **المالك** | دمج PR #7 بعد اعتماد المخطط (المنفذ لا يدمج PR الخاص به). ثم **حذف/تدوير توكن GitHub** المستخدم للدفع. |
-| 6 | **المنفذ** | ينتظر «تابع» أو تعليقات المراجعة على PR #7. |
+| 1 | **المالك** | دمج **PR #8** (`genspark_ai_developer` → `main`): مراجعة SPRINT-03 + توجيه SPRINT-04 + هذا الملف. |
+| 2 | **المالك** | 🔑 **تدوير توكن GitHub** (ظهر في الدردشة مراراً) وإرسال الجديد مع «تابع». 🛡️ تفعيل حماية `main` بالفحوص الخمسة. |
+| 3 | **المالك** | يأمر المنفذ: *«نفذ التوجيه الموجود في الريبو»*. |
+| 4 | **المنفذ** | `merge --ff-only origin/main` ⇒ Part A (auth) كوميت + دفع + PR #9 ⇒ Part B (الهوية) كوميت + دفع ⇒ §7 ⇒ هذا الملف. |
+| 5 | **المخطط** | عند *«راجع شغل المنفذ»*: مراجعة SPRINT-04 على PG حقيقية (مع تركيز على A5/A6: JWT، الدوران، كشف إعادة الاستخدام، CSRF) ⇒ اعتماد PR #9 ⇒ نقل القرارات المتراكمة إلى Hub docs ⇒ SPRINT-05. |
 
-> **قاعدتان:** (1) لا يبدأ المنفذ قبل دمج توجيه المخطط في `main`. (2) المخطط يفرّع `genspark_ai_developer` من `main` **فقط**، لا من `work/implementation`.
+> **قاعدتان:** (1) لا يبدأ المنفذ قبل دمج توجيه المخطط في `main`. (2) المخطط يفرّع `genspark_ai_developer` من `main` **فقط**.
 
 ---
 
@@ -82,6 +82,7 @@
 
 | التاريخ | الوكيل | الفرع | الكوميت | ما تم تأكيده | الخطوة التالية |
 |---|---|---|---|---|---|
+| 2026-10-30 | المخطط | `genspark_ai_developer` (من `main` @ `c88a721`) → PR #8 | *(يُحدَّث بعد الدفع)* | مراجعة مستقلة لـ SPRINT-03 @ `2b1e1fe` في بيئة طازجة (PG 17.11 أُعيد تثبيتها): 298 وحدة + 17 تكامل = **315 ناجحاً، 99.68%**؛ CI الفحوص الخمسة `success` (Checks API)؛ هجرة 0003 مُجرَّبة بحالات حدية (تصادم slug `Acme Co`/`acme-co`، `ab`، `عميل`، نفس حساب Meta في مستأجرين) صعوداً/نزولاً/صعوداً؛ OpenAPI 13 مساراً كلها بنطاق العلامة، `has_page_token` الحقل الوحيد بـ token؛ بوابة التراخيص exit 0 (34 حزمة) ⇒ **مقبول** ⇒ PR #7 دُمج `c88a721`. أُصدر توجيه **SPRINT-04** (auth: Argon2id + HS256 JWT 15m + Refresh دوّار HttpOnly + كشف إعادة الاستخدام + CSRF + rate limit؛ استبدال `ActorTenantId`). | المالك يدمج PR #8 ⇒ يدوّر التوكن ⇒ يطلق المنفذ ⇒ PR #9. |
 | 2026-10-30 | المنفذ | `work/implementation` → PR [#7](https://github.com/belalalibb/ai_agancy_markting/pull/7) | `a985d55` (Part A) / `b712df0` (Part B) / كوميت التوثيق فوقهما | SPRINT-03 مُسلَّم. **Part A:** `.github/workflows/ci.yml` بخمس وظائف منفصلة (lint / unit cov≥95 / integration على `pgvector/pgvector:pg16` / secrets gitleaks مع `GITHUB_TOKEN` + `pull-requests: read` / licenses D-054 عبر `scripts/check_licenses.py` في venv نظيف)، `/health/ready` عبر `engine.connect()`، `alembic.ini path_separator=os`. **Part B:** وحدة `src/modules/tenancy/` (tenants / brands / brand_access_grants، `BrandAccessResolver`، أدوار owner/manager/viewer، 8 مسارات)، هجرة `0003` بـbackfill خام + تنظيف التكرارات عند النزول (ملاحظة المالك 3)، `OAuthStateSigner` بزوج UUID (tenant, brand)، مسارات Meta تحت `/brands/{brand_id}/social/meta/…`، اختيار الصفحات الصريح (B6 + ملاحظة المالك 2: إعادة الربط تحفظ المختار وتحدّث توكنه) + CHECK في DB، حارس B7 (لا تسجيل للاسم/المعرف؛ حذف عند disconnect وسحب المنحة B8). **الأرقام:** 298 وحدة + 17 تكامل = 315 ناجحاً، 0 فشل، تغطية 99.68%، ruff نظيف، تراخيص 37/0 مرفوضة، PG 17.11 محلياً. CI خضراء على `b712df0` (push + PR). إعادة تهيئة الساندبوكس ×7؛ الدفع بعد كل نقطة أنقذ العمل مجدداً؛ كوميتات WIP سُحقت في `b712df0`. تفاصيل الانحرافات (8) والأسئلة (3) في §7. | مراجعة المخطط لـ PR #7 ⇒ المالك يفعّل حماية `main` ويدمج ⇒ تدوير التوكن ⇒ SPRINT-04. |
 | 2026-10-29 | المخطط | `genspark_ai_developer` (من `main` @ `df01260`) → PR #6 | `c2175a3` (+ كوميت تسجيل SHA) → PR [#6](https://github.com/belalalibb/ai_agancy_markting/pull/6) | مراجعة مستقلة لـ SPRINT-02.1 @ `4480309` في بيئة طازجة (PG 17.11 أُعيد تثبيتها): 204 وحدة + 11 تكامل = **215 ناجحاً، 99%**، F1 0/50 فشل، هجرة 0002 صعود/نزول على PG، `/health/ready` حيّاً 200/503/503 بلا تسريب، تراخيص شجرة التشغيل نظيفة (36 حزمة) ⇒ **مقبول** ⇒ فُتح PR #5 ودُمج في `main` @ `df01260` بتفويض المالك. طُبّقت قرارات المالك: `ARCHITECTURE_LOCK` (D-056/D-057 ترقيم، D-058 استثناء Fernet، الهوامش ⇒ فرضيات)، حُذف `Hub/imaster_planner.md`. أُصدر توجيه **SPRINT-03** (CI Gates + Tenancy + اختيار الصفحات + هجرة 0003). | المالك يدمج PR #6 ⇒ يطلق المنفذ ⇒ PR #7. |
 | 2026-10-29 | المنفذ | `work/implementation` | `7cf29df` | SPRINT-02.1-HOTFIX مُسلَّم في كوميت واحد: الهوية من `GET /me` (إلزامي) + فحص `is_valid`/`app_id`/`user_id` من `/debug_token` (`MetaTokenInvalidError`/`MetaTokenForeignAppError` ⇒ 401 reconnect) + حذف `_fallback_identity` واختباريه + `encrypted_page_token` NULLable (هجرة 0002 صعوداً/نزولاً مع صفوف NULL) + `has_page_token` + `engine.dispose()` مشروط + `/health/ready` (200/503 حيّاً بلا تسريب DSN) + سقف ترقيم 50 + إصلاح F1 (50/50). 204 معزولاً + 11 تكامل = 215، تغطية 99%، ruff نظيف، PostgreSQL 17.11 محلية. انقطاع الجلسة ×3؛ الدفع بعد كل نقطة أنقذ العمل مجدداً. ⚠️ PR #3 كان مغلقاً (merged عبر PR #4) فلم يتحدث؛ لم يُفتح PR جديد. | مراجعة المخطط لـ `7cf29df`؛ قرار PR جديد؛ رد المالك على §6 من مراجعة SPRINT-02. |
