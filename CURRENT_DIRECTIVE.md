@@ -11,7 +11,7 @@
 | **معرف المهمة** | `SPRINT-05-META-OPERATIONAL-READS` |
 | **النوع** | Part A: تصحيح بروتوكولي إلزامي (A-0, A-1) · Part B: ميزة (قراءة تشغيلية + إعادة مزامنة) |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
-| **يبدأ من** | `main` @ *(SHA دمج هذا التوجيه — يُقرأ من WORK_STATE §6)*. أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **يبدأ من** | `main` @ `4d84a59` (دمج PR #14 — هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
 | **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-05: Meta operational reads (resync, posts, IG media) + debug_token protocol fix` |
 | **الكوميتات** | **اثنان**: Part A (A-0 + A-1) ثم Part B (B1–B4). كل كوميت يُدفع فوراً. |
 | **تغيير مخطط البيانات** | **لا شيء.** لا هجرة جديدة. `last_synced_at` و`token_expires_at` و`granted_scopes` موجودة منذ 0001. |
