@@ -367,18 +367,33 @@ git diff --name-only origin/main...HEAD | grep -E "^(ARCHITECTURE_LOCK|SESSION_R
 
 ## 7. تقرير المنفذ (يملؤه المنفذ)
 
-- **حالة التنفيذ:** `[ ] مكتمل` / `[ ] جزئي — السبب:`
-- **Commit SHA Part A:** `…` — **Part B:** `…` — **docs:** `…`
-- **PR #7:** رابط — **رابط تشغيل CI الأخضر:** …
-- **`pytest -m "not integration"` / `-m integration` / الكل:** … / … / …
-- **التغطية:** …%
-- **ruff:** …
-- **`check_licenses.py` في venv نظيف:** exit … / عدد الحزم … / أي حزمة خارج القائمة البيضاء: …
-- **I-B1 (هجرة بصفوف قديمة):** ناجح/فاشل — ملاحظات: …
-- **إصدار PostgreSQL محلياً:** …
-- **اختبارات حُذفت/أُعيدت تسميتها (بالاسم والسبب):** …
-- **انحرافات عن التوجيه (بالسطر والسبب):** …
-- **أسئلة:** …
+- **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي — السبب:` —
+- **Commit SHA Part A:** `a985d55` — **Part B:** `b712df0` — **docs:** (كوميت `docs(executor): SPRINT-03 handoff` فوق `b712df0`؛ SHA في `WORK_STATE.md` §6)
+- **PR #7:** https://github.com/belalalibb/ai_agancy_markting/pull/7 — **رابط تشغيل CI الأخضر (Part B `b712df0`):** push https://github.com/belalalibb/ai_agancy_markting/actions/runs/40979056739 · pull_request https://github.com/belalalibb/ai_agancy_markting/actions/runs/40979061696 — الفحوص الخمسة `lint` / `unit` / `integration` / `secrets` / `licenses` ظاهرة منفصلة وخضراء. (Part A `a985d55` كان أخضر أيضاً: runs/40973042472 و runs/40973047744.)
+- **`pytest -m "not integration"` / `-m integration` / الكل:** **298 ناجحاً** (1 skipped = حزمة التكامل بلا `TEST_DATABASE_URL`) / **17 ناجحاً** على PG 17.11 حقيقية / **315 ناجحاً، 0 فشل**.
+- **التغطية:** **99.68%** (`--cov-fail-under=95`؛ الملفان دون 100%: `social_connect/exceptions.py` 98%، `tenancy/service.py` 98%).
+- **ruff:** `ruff check src tests alembic scripts` ⇒ All checks passed · `ruff format --check` ⇒ 63 ملفاً مهيأة.
+- **`check_licenses.py` في venv نظيف:** exit **0** / **37 حزمة** / خارج القائمة البيضاء: **لا شيء** (`scripts/license_allowlist.txt` فارغ). ملاحظة: في بيئة الساندبوكس المشتركة (غير النظيفة) يرفض السكربت حزماً غير تابعة للمشروع — سلوك صحيح، لذلك البوابة تعمل في CI على venv نظيف فقط.
+- **I-B1 (هجرة بصفوف قديمة):** **ناجح** — `tests/integration/test_postgres_persistence.py::test_alembic_0003_migrates_legacy_rows_and_roundtrips`: صفّان قديمان (`'Tenant A!'`, `'tenant-b'`) + صفحة بتوكن وصفحة NULL ⇒ `upgrade 0003` ⇒ مستأجران بـslug `tenant-a` (slugified من `Tenant A!`، الاسم الأصلي محفوظ كـ`name`) و`tenant-b`، علامة `default` لكل منهما، `connected_by_tenant_id = owner`، `tenant_id` مُزال، `is_selected = {p-tok: true, p-null: false}` ⇒ إدراج علامة ثانية لنفس المالك بنفس حساب Meta (أحدث `updated_at`) ⇒ `downgrade 0002` ⇒ `tenant_id` عاد بقيمة slug، **التكرار حُذف مع إبقاء الأحدث (`gAAAAA-newest`) — ملاحظة المالك 3**، `uq_social_connections_identity` أُعيد، جداول Tenancy اختفت ⇒ `upgrade head` ينجح مجدداً (مستأجران).
+- **إصدار PostgreSQL محلياً:** PostgreSQL **17.11** (Debian) + pgvector، مثبّتة عبر apt في الساندبوكس (لا Docker). CI تستخدم `pgvector/pgvector:pg16` كما في التوجيه.
+- **ملاحظات المالك الثلاث (مطبَّقة):**
+  1. **ci.yml `secrets`:** gitleaks يحصل على `env: GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` والوظيفة تحمل `permissions: contents: read, pull-requests: read` (`.github/workflows/ci.yml`).
+  2. **B6 إعادة الربط:** `MetaConnectService.complete_connection` يبحث عن اتصال قائم بنفس `(brand_id, provider, provider_user_id)` عبر `find_by_identity`؛ إن وُجد ⇒ `keep_selected` = صفحاته المختارة سابقاً ⇒ `_apply_selection_policy`: صفحة واحدة ⇒ مختارة بتوكن؛ ≥2 ⇒ المختارة سابقاً تبقى مختارة **ويُحدَّث توكنها المشفَّر** من Graph، وغير المختارة ⇒ `is_selected=false` و`encrypted_page_token=NULL`. اختبارات: `test_reconnect_preserves_selection_and_refreshes_tokens` (router)، `test_single_page_is_auto_selected_with_token` (service)، وI-B8 على PG. الثابت `NOT(is_selected=false AND token NOT NULL)` مفروض في الدومين (`violates_selection_invariant`) وفي DB (`ck_social_connection_pages_selected_has_token`، I-B7).
+  3. **downgrade 0003:** قبل إعادة `uq_social_connections_identity` يُنفَّذ `DELETE … USING (row_number() OVER (PARTITION BY tenant_id, provider, provider_user_id ORDER BY updated_at DESC, connected_at DESC, id DESC)) WHERE rn > 1` — مُختبَر في I-B1.
+- **اختبارات حُذفت/أُعيدت تسميتها (بالاسم والسبب):**
+  - `tests/integration/test_postgres_persistence.py`: `test_repo_upsert_same_provider_user_updates_not_duplicates` ⇒ **`test_repo_upsert_same_user_same_brand_updates_two_brands_two_rows`** (أصبح I-B2)؛ `test_repo_tenant_isolation` ⇒ **`test_repo_brand_isolation`**؛ `test_repo_set_status` ⇒ **`test_repo_set_status_and_replace_pages`** (يغطي `replace_pages` الجديدة)؛ `test_alembic_0002_upgrade_downgrade_roundtrip_with_null_rows` **حُذف** — كان يُدرج صفوفاً بـ`tenant_id` النصي ويفترض `0002` رأساً؛ تغطيته (NULL ⇒ `''` عند النزول إلى 0001) ما زالت مضمونة ضمن `test_alembic_upgrade_head_and_downgrade_base` (نزول إلى base) وبصفوف حقيقية في I-B1 (صفحة NULL تمر بـ0003 صعوداً ونزولاً).
+  - `tests/modules/social_connect/test_router.py` أُعيدت كتابته بالكامل لنطاق العلامة؛ أسماء اختبارات SPRINT-02 المحفوظة (خرائط الأخطاء/الأسرار) بقيت، وأُضيفت B-U6…B-U13 بأسمائها (`test_identity_and_secrets_never_logged` = B-U11، `test_openapi_has_no_token_named_fields_except_has_page_token` = B-U13).
+  - `tests/modules/social_connect/test_schemas.py::test_connection_start_request_validation` عُدّل: `tenant_id` UUID (B4) بدل نص حر.
+- **انحرافات عن التوجيه (بالسطر والسبب):**
+  1. **Part A — `scripts/verify_hub.py` أُعيد تنسيقه بـ`ruff format` فقط** (لا تغيير منطقي): التوجيه يفرض `ruff format --check … scripts` فكان لا بد من تهيئته ليمرّ الفحص.
+  2. **Part A — `tests/modules/social_connect/test_router.py` SECRET_PATTERNS:** النمط `EAA` أصبح `(?-i:EAA)` لأن `IGNORECASE` كان يطابق `eaa` داخل UUIDs عشوائياً (اختبار متذبذب في CI).
+  3. **سير الكوميتات:** بسبب إعادة تهيئة الساندبوكس المتكررة (×7 خلال السبرنت) دُفعت كوميتات WIP مؤقتة موسومة `[squash]` إلى `work/implementation` ثم **سُحقت كلها** في كوميت Part B الوحيد `b712df0` بالرسالة المفروضة (`git reset --soft a985d55` + `push -f`). النتيجة النهائية: كوميتان فوق `main` كما يطلب §6.
+  4. **`connected_at` عند إعادة الربط:** يُحفظ تاريخ الربط الأول (ON CONFLICT لا يحدّث `connected_at`) — التوجيه لم يحدده؛ اخترت الأقل فقداناً للمعلومة.
+  5. **`PostgresBrandAccessGrantRepository.delete_connections_of_grantee` يستخدم SQL خام** (`DELETE FROM social_connections WHERE brand_id=… AND connected_by_tenant_id=…`) بدل ORM، احتراماً لاتجاه الاستيراد الوحيد المسموح (`social_connect ⇒ tenancy.domain`؛ لا استيراد عكسي).
+  6. **إضافات واجهة غير مذكورة نصاً:** `ConnectedAccountRepository.replace_pages(brand_id, account_id, pages)` و`find_by_identity(...)` (لازمتان لـB6 وملاحظة 2)؛ `MetaConnectService.verify_state(state)` مكشوفة كي يتحقق الـrouter من الحالة **قبل** التفويض وقبل أي نداء Graph؛ `UnknownPageIdsError` ⇒ 422 `{"error":"unknown_page_ids","page_ids":[…]}`؛ router `social_connect` يعيد استخدام `tenancy.router.to_http` لتوحيد شكل أخطاء 403/404.
+  7. **اختبارات وحدة للمستودعات Postgres بجلسة Stub** (`tests/fakes.py::StubSession`، `test_postgres_repository.py` في الوحدتين): أُضيفت لأن وحدة `tenancy` رفعت الكود غير المغطى في `-m "not integration"` إلى 93% (<95). تختبر تركيب العبارات والتحويل صف⇄دومين، بينما التكامل يختبر السلوك الفعلي على PG.
+  8. **`tests/conftest.py` و`tests/integration/conftest.py`:** عالم Tenancy ثابت (`OWNER_ID/AGENCY_ID/STRANGER_ID/BRAND_ID/BRAND2_ID`) + `seed_tenancy()` خام لاختبارات التكامل؛ `TABLES` أصبحت الجداول الخمسة.
+- **أسئلة:** (1) هل تُدمَج اختبارات الـStub (انحراف 7) في المراجعة أم يُفضَّل رفع `cov-fail-under` بالاعتماد على التكامل فقط؟ (2) قرار SPRINT-04 عن تفويض `MANAGER ⇒ VIEWER` (§8/3) — التنفيذ الحالي يرفض (GRANT_ROLES = owner فقط). (3) بعد المراجعة: حذف/تدوير التوكن المستخدم للدفع.
 
 ---
 
