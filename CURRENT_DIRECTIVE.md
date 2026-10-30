@@ -245,18 +245,39 @@ git diff --name-only origin/main...HEAD | grep -E "^(ARCHITECTURE_LOCK|SESSION_R
 
 ## 7. تقرير المنفذ (يملؤه المنفذ)
 
-- **حالة التنفيذ:** `[ ] مكتمل` / `[ ] جزئي — السبب:`
-- **Commit SHA Part A:** `…` — **Part B:** `…` — **docs:** `…`
-- **PR #9:** رابط — **رابط تشغيل CI الأخضر:** …
-- **`pytest -m "not integration"` / `-m integration` / الكل:** … / … / …
-- **التغطية:** …%
-- **ruff:** …
-- **`check_licenses.py`:** exit … / الحزم الجديدة وتراخيصها: …
-- **B-U1 البارامتري:** عدد المسارات المحمية المغطاة = …
-- **I-A2 (الدوران + كشف إعادة الاستخدام) على PG:** …
-- **اختبارات حُذفت/أُعيدت تسميتها (بالاسم والسبب):** …
-- **انحرافات عن التوجيه (بالسطر والسبب):** …
-- **أسئلة:** …
+- **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي — السبب:` —
+- **Commit SHA Part A:** `b2bd3ad` — **Part B:** `b0a4ccf` — **docs:** الكوميت الذي يحمل هذا التقرير (فوق `b0a4ccf`).
+- **PR #11** (لا #9 — الرقمان #9/#10 استُهلكا بـ PRs المخطط): https://github.com/belalalibb/ai_agancy_markting/pull/11 — **رابط تشغيل CI الأخضر:** PR run https://github.com/belalalibb/ai_agancy_markting/actions/runs/41003801090 · push run https://github.com/belalalibb/ai_agancy_markting/actions/runs/41003796062 (الفحوص الخمسة `success` على `b0a4ccf`).
+- **`pytest -m "not integration"` / `-m integration` / الكل:** **413** / **21** / **434** ناجحاً، 0 فشل (محلياً على PostgreSQL 17 + pgvector؛ CI على `pgvector/pgvector:pg16`).
+- **التغطية:** **99%** (2054 عبارة، 2 غير مغطاة؛ الحد 95).
+- **ruff:** `ruff check src tests alembic scripts` ⇒ All checks passed؛ `ruff format --check` ⇒ 87 ملفاً مُنسَّقاً.
+- **`check_licenses.py`:** exit **0** في venv نظيف (`pip install .` فقط) — 39 حزمة، 0 مرفوضة. الحزم الجديدة: `pyjwt 2.15.1` (MIT)، `argon2-cffi 25.1.0` (MIT) + `argon2-cffi-bindings` (MIT)، `email-validator 2.3.0` (Unlicense) + `dnspython` (ISC). لا `python-jose` ولا `passlib`.
+- **B-U1 البارامتري:** عدد المسارات المحمية المغطاة = **15** (auth: `me`, `logout`, `logout-all` ×3 + tenancy ×7 + social ×5)، يُطبع في `tests/test_auth_guard.py::test_protected_route_count_is_reported`؛ كل مسار ⇒ 401 + `WWW-Authenticate: Bearer` بلا Bearer، و401 `token_invalid` مع Bearer تالف، و`security: [{bearerAuth: []}]` في OpenAPI. المسارات العامة الوحيدة: `register/login/refresh`، `/social/meta/callback`، `/health*`.
+- **I-A2 (الدوران + كشف إعادة الاستخدام) على PG:** ناجح — register ⇒ me ⇒ refresh (الجلسة القديمة `revoked_at IS NOT NULL` و`replaced_by` = الجديدة) ⇒ إعادة استخدام الكوكي القديمة ⇒ 401 `refresh_reuse_detected` و**0** جلسات حية للمستخدم في DB ⇒ login ×2 (بريد بحالة أحرف مختلفة) ⇒ logout-all ⇒ 4/4 جلسات `revoked_at IS NOT NULL`، `last_login_at` مضبوط. أيضاً I-A1 (0004 صعود/نزول/صعود + `uq_users_email_lower` يرفض `A@x.com` بعد `a@x.com` + `uq_users_tenant_id` يرفض مستخدماً ثانياً)، I-A3 (داخل I-B1: slug مكرر ⇒ 409 وعدد `users` ثابت)، I-A4 (`$argon2id$`، `token_hash` ≠ سر الكوكي، لا عمود/قيمة تحمل السر الخام)، I-B1 (التدفق الكامل بـ JWT حقيقي من `/auth/register`، الكولباك بلا Bearer، الوكالة تفقد كل الاتصالات بعد سحب المنحة)، I-B2 (`CurrentUserFresh` بعد logout: GET 200 / DELETE وPUT selection ⇒ 401 `session_revoked`، لا حذف).
+- **اختبارات حُذفت/أُعيدت تسميتها (بالاسم والسبب):**
+  - حُذفت `test_create_tenant_201` / `test_create_tenant_rejects_bad_slug` / `test_create_tenant_accepts_edge_slugs` / `test_create_tenant_duplicate_slug_409` (tenancy/test_router) — المسار `POST /tenants` حُذف (B4)؛ تغطيتها انتقلت إلى `tests/modules/auth/test_router.py` (A-U1/A-U2) و`test_post_tenants_is_gone_tenants_come_from_register` (B-U6).
+  - أُعيدت تسمية `test_tenant_id_is_required_and_uuid_on_read_routes` ⇒ `test_bearer_is_required_on_read_routes_and_query_tenant_id_is_ignored` (social/test_router) — الدلالة تغيّرت من 422 (غياب `?tenant_id`) إلى 401 (غياب Bearer) + B-U5.
+  - أُعيدت تسمية `test_full_tenancy_flow_via_api` (I-B8) ⇒ `test_full_tenancy_flow_via_api_with_jwt` (I-B1) — نفس التدفق بهوية JWT من `/auth/register`.
+  - `test_start_connection_validates_body` أُعيدت كتابتها: الجسم اختياري وفارغ؛ `tenant_id` في الجسم ⇒ 422.
+  - توقع `test_alembic_0003_migrates_legacy_rows_and_roundtrips`: `head == "0004"` بدل `"0003"`.
+- **انحرافات عن التوجيه (بالسطر والسبب):**
+  1. **رقم الـPR:** التوجيه يقول «PR #9»؛ #9 و#10 استُهلكا بـ PRs المخطط فالـPR الفعلي **#11** (نفس العنوان المطلوب).
+  2. **`POST /auth/refresh` عند الخطأ يُعيد `JSONResponse` بدل `raise HTTPException`** (router.py): رفع الاستثناء يجعل `get_db_session` يُرجع المعاملة فيضيع `revoke_all_for_user` الخاص بكشف إعادة الاستخدام (ثبت ذلك في I-A2 على PG). الاستجابة 401 نفسها + مسح الكوكي + `WWW-Authenticate`.
+  3. **`ip` في `refresh_sessions` يُخزَّن فقط إن كان IPv4/IPv6 حرفياً** (`_inet_or_none`) — العمود `INET` ويرفض نحو `testclient`/unix sockets؛ وإلا `NULL`. اختبار يؤكد تخزين IP حقيقي.
+  4. **`POST /auth/logout` يقبل الكوكي و/أو Bearer** (`OptionalCurrentUser`): مع كوكي ⇒ CSRF إلزامي؛ Bearer وحده ⇒ يُبطل `sid` الرمز؛ لا شيء ⇒ 401 `refresh_missing`. التوجيه لم يحدد مصدر الهوية لـ logout فاعتمدتُ الأوسع أماناً.
+  5. **CSRF (A6) مع الحالة «ترويسة موجودة + Origin خارجي»:** رُفضت (403) حتى مع الترويسة المخصصة — التوجيه ينص «قائمة فارغة ⇒ رفض أي Origin خارجي»، فطبّقتُه حرفياً حتى لو حضرت الترويسة. «لا Origin + ترويسة» ⇒ OK كما هو مطلوب.
+  6. **`AUTH_JWT_SECRET` < 32 بايت ⇒ فشل الإقلاع** في كل البيئات (ليس فقط غيابه) — تشديد يتسق مع «≥32 بايت».
+  7. **`OAuthStateSigner.decode_payload()`** أُضيفت (إلى جانب `verify`) لكشف claim `u` للتدقيق/الاختبارات؛ `verify` لم يتغير توقيعه. `u` اختياري عند التحقق (states قديمة تبقى صالحة).
+  8. **`ConnectionStartRequest` أصبح جسماً فارغاً اختيارياً** (`payload: ... | None = None`) بدل حذفه: يحافظ على `extra="forbid"` فيُرفض `tenant_id` بـ 422 (B-U2) ويسمح بطلب بلا جسم.
+  9. **حارس Zero-Secret الموسَّع** يتبع إغلاق `$ref` من `responses` فقط (لا يمسح `RegisterRequest`/`LoginRequest` التي تحمل `password` شرعاً)، ويسمح بـ `access_token` و`token_type` (ثابت `"bearer"` الذي يفرضه A7) و`has_page_token`.
+  10. **اختبارات التكامل:** `integration_app` يبدّل `get_rate_limiter` بـ `FakeRateLimiter` (المحدِّد الفعلي process-wide وكان سيتراكم عبر الاختبارات على نفس «IP»)، كما يقضي A8 «معطّل في الاختبارات عبر fake».
+  11. **ملفات اختبار إضافية غير مطلوبة بالاسم:** `tests/modules/auth/test_infrastructure.py` (hasher/limiter/repos على StubSession)، `test_dependencies.py`، `test_jwt_and_config.py`، `tests/test_auth_guard.py` — لرفع التغطية فوق 95 وإثبات العقود.
+  12. **بيئة المنفذ:** ساندبوكس أُعيد تشغيله **≥ 15 مرة** خلال السبرنت؛ الدفع بعد كل نقطة تفتيش أنقذ العمل كل مرة؛ كوميتات WIP سُحقت نهائياً في الكوميتين المطلوبين. gitleaks رصد الكلمة الوهمية `wrong-pass-123` في Part A (ثلاثة مواضع) فأُعيد بناء Part A بثابت `WRONG_PASSWORD` مع `# gitleaks:allow` ثم أُعيد cherry-pick لـ Part B — لذا تغيّر SHA الجزء A بعد فتح الـPR (`f9d61a7` ⇒ `b2bd3ad`).
+- **أسئلة:**
+  1. هل يُعتمد «الجسم الاختياري الفارغ» لـ `start` أم يُفضَّل حذف نموذج الطلب كلياً (عندها لا يمكن رفض `tenant_id` بـ 422 — سيُتجاهل بصمت)؟
+  2. `CurrentUser` يقبل رمزاً صالحاً حتى `exp` (≤15 دقيقة) بعد logout على مسارات القراءة — موثَّق ومختبَر (A-U8/I-B2). هل يُطلب لاحقاً نقل مسارات قراءة بعينها (مثل `GET /auth/me`) إلى `CurrentUserFresh`؟
+  3. المحدِّد in-memory process-local؛ عند التوسع الأفقي يلزم Redis خلف نفس `RateLimiter` Protocol — هل يُسجَّل كقرار مؤجل في Hub؟
+  4. 🔑 تذكير: توكن GitHub المستخدم في هذه الجلسات ظهر في الدردشة مراراً — يُرجى حذفه/تدويره بعد اعتماد الـPR.
 
 ---
 
