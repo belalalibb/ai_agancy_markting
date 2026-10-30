@@ -20,6 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.core import database
 from src.core.config import Settings, get_settings
+from src.modules.auth import router as auth_router
 from src.modules.social_connect import router as social_connect_router
 from src.modules.tenancy import router as tenancy_router
 
@@ -55,7 +56,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=(
             "AI Marketing Platform backend — Modular Monolith. "
             "Module 1: Social Connect (Meta Graph API for Facebook & Instagram, "
-            "persisted in PostgreSQL). Module 2: Tenancy (tenants, brands, access grants)."
+            "persisted in PostgreSQL). Module 2: Tenancy (tenants, brands, access grants). "
+            "Module 3: Auth (Argon2id passwords, HS256 access JWT, rotating HttpOnly "
+            "refresh cookie). All non-auth routes require `Authorization: Bearer <JWT>`."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -65,6 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     api_v1 = APIRouter(prefix=settings.api_v1_prefix)
+    api_v1.include_router(auth_router)
     api_v1.include_router(tenancy_router)
     api_v1.include_router(social_connect_router)
     app.include_router(api_v1)

@@ -115,12 +115,12 @@ class MetaAuthorizeUrlResponse(BaseModel):
 
 
 class ConnectionStartRequest(BaseModel):
-    """Body of ``POST /brands/{brand_id}/social/meta/connections/start``."""
+    """Body of ``POST /brands/{brand_id}/social/meta/connections/start`` — intentionally empty.
+
+    The acting tenant/user come from the Bearer JWT (SPRINT-04 B2); any body key ⇒ 422.
+    """
 
     model_config = ConfigDict(extra="forbid")
-
-    # TEMPORARY until auth module (B4): the acting tenant is an explicit body value.
-    tenant_id: UUID
 
 
 class PageSelectionRequest(BaseModel):
@@ -128,8 +128,6 @@ class PageSelectionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # TEMPORARY until auth module (B4).
-    tenant_id: UUID
     page_ids: list[str] = Field(..., min_length=1, max_length=50)
 
     @field_validator("page_ids")

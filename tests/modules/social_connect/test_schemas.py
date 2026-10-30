@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -214,31 +213,32 @@ def test_page_info_from_graph_extracts_full_instagram_asset() -> None:
 
 
 def test_connection_start_request_validation() -> None:
-    req = ConnectionStartRequest(tenant_id=str(OWNER_ID))
-    assert isinstance(req.tenant_id, UUID)
-    assert req.tenant_id == OWNER_ID
+    """SPRINT-04 B2 — the body is empty; identity comes from the JWT, so ``tenant_id`` is
+    an *unknown* field and rejected (``extra="forbid"``)."""
+    req = ConnectionStartRequest()
+    assert req.model_dump() == {}
+    assert "tenant_id" not in ConnectionStartRequest.model_fields
     with pytest.raises(ValidationError):
-        ConnectionStartRequest(tenant_id="")
+        ConnectionStartRequest(tenant_id=str(OWNER_ID))  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
-        ConnectionStartRequest(tenant_id="demo")  # legacy free-form slugs are rejected
-    with pytest.raises(ValidationError):
-        ConnectionStartRequest(tenant_id=str(OWNER_ID), extra="no")  # type: ignore[call-arg]
+        ConnectionStartRequest(extra="no")  # type: ignore[call-arg]
 
 
 def test_page_selection_request_validation() -> None:
-    """B6 — page ids: 1..50, non-empty, unique; tenant_id is a UUID."""
-    req = PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=["1001", "1002"])
+    """B6 — page ids: 1..50, non-empty, unique; SPRINT-04 B2: no ``tenant_id`` in the body."""
+    req = PageSelectionRequest(page_ids=["1001", "1002"])
     assert req.page_ids == ["1001", "1002"]
+    assert "tenant_id" not in PageSelectionRequest.model_fields
     with pytest.raises(ValidationError):
-        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=[])
+        PageSelectionRequest(page_ids=[])
     with pytest.raises(ValidationError):
-        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=["1001", "1001"])
+        PageSelectionRequest(page_ids=["1001", "1001"])
     with pytest.raises(ValidationError):
-        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=[" "])
+        PageSelectionRequest(page_ids=[" "])
     with pytest.raises(ValidationError):
-        PageSelectionRequest(tenant_id="not-a-uuid", page_ids=["1001"])
+        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=["1001"])  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
-        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=[str(i) for i in range(51)])
+        PageSelectionRequest(page_ids=[str(i) for i in range(51)])
 
 
 def test_page_asset_public_has_page_token_flag() -> None:

@@ -1,17 +1,22 @@
 """HTTP routes for the Meta connector — brand-scoped (SPRINT-03 B9).
 
-| Method | Path                                                        | Role           |
-|--------|-------------------------------------------------------------|----------------|
-| POST   | /brands/{brand_id}/social/meta/connections/start            | OWNER/MANAGER  |
-| GET    | /social/meta/callback?code&state                            | from ``state`` |
-| GET    | /brands/{brand_id}/social/meta/connections?tenant_id=       | any role       |
-| GET    | /brands/{brand_id}/social/meta/connections/{id}?tenant_id=  | any role       |
-| PUT    | /brands/{brand_id}/social/meta/connections/{id}/pages/selection | OWNER/MANAGER |
-| DELETE | /brands/{brand_id}/social/meta/connections/{id}?tenant_id=  | OWNER/MANAGER  |
+Every brand-scoped route requires ``Authorization: Bearer <access JWT>``; the acting tenant
+is the token's ``tid`` claim (SPRINT-04 B1/B2). Destructive routes (selection, disconnect)
+use ``CurrentUserFresh`` — a logged-out session is refused immediately.
 
-The callback is *not* brand-bound in its path (Meta's registered redirect URI is fixed);
-``(tenant_id, brand_id)`` come from the signed ``state`` and are authorised **before any
-Graph call** — a revoked grant yields 404/403 with no Graph request and no row (B-U7).
+| Method | Path (under /brands/{brand_id}/social/meta)   | Identity              |
+|--------|-----------------------------------------------|-----------------------|
+| POST   | …/connections/start                           | Bearer, OWNER/MANAGER |
+| GET    | /social/meta/callback?code&state (top-level)  | signed ``state`` only |
+| GET    | …/connections                                 | Bearer, any role      |
+| GET    | …/connections/{id}                            | Bearer, any role      |
+| PUT    | …/connections/{id}/pages/selection            | fresh, OWNER/MANAGER  |
+| DELETE | …/connections/{id}                            | fresh, OWNER/MANAGER  |
+
+The callback is **unauthenticated by design** (B3): Meta redirects the browser there without
+our Bearer token, so ``(tenant_id, brand_id)`` come from the HMAC-signed ``state`` issued to
+an authenticated user (``u`` claim = who started the flow, audit only) and are authorised
+**before any Graph call** — a revoked grant yields 404/403 with no Graph request and no row.
 
 No response ever carries a token — raw, encrypted or masked (Zero-Secret).
 """
@@ -38,6 +43,7 @@ from src.core.security import (
     TokenEncryptionService,
     get_token_encryption_service,
 )
+from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
 from src.modules.social_connect.exceptions import (
     MetaGraphError,
@@ -159,12 +165,15 @@ async def _authorise(
 )
 async def start_connection(
     brand_id: UUID,
-    payload: ConnectionStartRequest,
+    actor: CurrentUser,
     service: Service,
     resolver: Resolver,
+    payload: ConnectionStartRequest | None = None,
 ) -> MetaAuthorizeUrlResponse:
-    await _authorise(resolver, payload.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
-    return service.start_connection(payload.tenant_id, brand_id)
+    """Body is optional and must be empty (``extra="forbid"``); identity is the JWT."""
+    del payload  # validated for shape only
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    return service.start_connection(actor.tenant_id, brand_id, actor.user_id)
 
 
 @router.get(
@@ -257,10 +266,11 @@ async def select_pages(
     brand_id: UUID,
     connection_id: UUID,
     payload: PageSelectionRequest,
+    actor: CurrentUserFresh,
     service: Service,
     resolver: Resolver,
 ) -> ConnectedAccountPublic:
-    await _authorise(resolver, payload.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     try:
         account = await service.select_pages(brand_id, connection_id, payload.page_ids)
     except UnknownPageIdsError as exc:
@@ -283,11 +293,11 @@ async def select_pages(
 async def disconnect(
     brand_id: UUID,
     connection_id: UUID,
-    tenant_id: ActorTenantId,
+    actor: CurrentUserFresh,
     service: Service,
     resolver: Resolver,
 ) -> Response:
-    await _authorise(resolver, tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     deleted = await service.disconnect(brand_id, connection_id)
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Connection not found.")

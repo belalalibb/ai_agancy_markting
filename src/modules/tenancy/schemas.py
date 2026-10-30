@@ -11,13 +11,6 @@ from src.modules.tenancy.domain.access import BrandRole
 from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole, Slug, Tenant
 
 
-class TenantCreate(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-
-    slug: Slug
-    name: str = Field(..., min_length=1, max_length=255)
-
-
 class TenantOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="ignore")
 
@@ -33,10 +26,10 @@ class TenantOut(BaseModel):
 
 
 class BrandCreate(BaseModel):
+    """The owner is the authenticated actor's tenant (JWT ``tid``) — never a body field."""
+
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    # TEMPORARY until auth module (B4): the acting tenant becomes the brand owner.
-    tenant_id: UUID
     slug: Slug
     name: str = Field(..., min_length=1, max_length=255)
 
@@ -65,10 +58,10 @@ class BrandWithRoleOut(BrandOut):
 
 
 class GrantCreate(BaseModel):
+    """The granting actor is the JWT ``tid`` (brand owner); only the grantee is sent."""
+
     model_config = ConfigDict(extra="forbid")
 
-    # TEMPORARY until auth module (B4): the acting tenant (must be the brand owner).
-    tenant_id: UUID
     grantee_tenant_id: UUID
     role: GrantRole
 
