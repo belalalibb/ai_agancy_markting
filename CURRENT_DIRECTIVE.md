@@ -11,7 +11,7 @@
 | **معرف المهمة** | `SPRINT-06-CONTENT-CORE-AND-APPROVAL` |
 | **النوع** | Part A: تصحيحات إلزامية (A-1..A-3) · Part B: ميزة (وحدة `content` + بوابة `ai_gateway`) · **هجرة واحدة** `0005_content` |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
-| **يبدأ من** | `main` @ *(SHA دمج هذا التوجيه — يُقرأ من WORK_STATE §6)*. أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **يبدأ من** | `main` @ `34bb948` (دمج PR #17 — هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
 | **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-06: content core + human approval + AI gateway (D-055/D-056) + SPRINT-05 review fixes` |
 | **الكوميتات** | **ثلاثة**: Part A ⇒ Part B-1 (هجرة + وحدة `content`) ⇒ Part B-2 (`ai_gateway` + التوليد). كل كوميت يُدفع فوراً، **وكل ملف يُدفع فور اكتماله** (`wip:` مسموح ثم يُسحق) |
 | **تبعيات جديدة** | **لا شيء.** LiteLLM Proxy **لا يُثبَّت** في هذا السبرنت — تُبنى واجهته فقط (`AIGateway` Protocol) بمزوّد `FakeProvider` و`HttpOpenAICompatibleProvider` عبر `httpx` القائم؛ تشغيل Proxy حقيقي في SPRINT-07 |
