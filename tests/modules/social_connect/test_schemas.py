@@ -178,7 +178,10 @@ def test_public_schemas_have_no_token_fields() -> None:
 
 
 def test_connected_account_public_from_domain_drops_secrets() -> None:
-    public = ConnectedAccountPublic.from_domain(_sample_account())
+    account = _sample_account()
+    public = ConnectedAccountPublic.from_domain(
+        account, viewer_tenant_id=account.connected_by_tenant_id
+    )
     dumped = public.model_dump_json()
     assert "gAAAAA" not in dumped
     assert "token" not in dumped.lower().replace("has_page_token", "")

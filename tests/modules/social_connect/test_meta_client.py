@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from urllib.parse import parse_qs, urlparse
+import logging
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import httpx
 import pytest
@@ -39,6 +40,12 @@ from tests.conftest import (
 )
 
 pytestmark = pytest.mark.contract
+
+
+def _form(request: httpx.Request) -> dict[str, str]:
+    """Decode an ``application/x-www-form-urlencoded`` request body."""
+    assert request.headers["Content-Type"].startswith("application/x-www-form-urlencoded")
+    return dict(parse_qsl(request.content.decode("utf-8")))
 
 
 # ------------------------------------------------------------ authorize URL
@@ -78,11 +85,11 @@ def test_appsecret_proof_is_hmac_sha256(meta_client: MetaGraphClient) -> None:
 async def test_exchange_code_for_long_lived_token(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    short_route = graph_mock.get("/oauth/access_token", params={"code": "AUTH_CODE"}).mock(
-        return_value=httpx.Response(200, json=token_payload("SHORT", expires_in=5000))
-    )
-    long_route = graph_mock.get(
-        "/oauth/access_token", params={"grant_type": "fb_exchange_token"}
+    short_route = graph_mock.post(
+        "/oauth/access_token", data__contains={"code": "AUTH_CODE"}
+    ).mock(return_value=httpx.Response(200, json=token_payload("SHORT", expires_in=5000)))
+    long_route = graph_mock.post(
+        "/oauth/access_token", data__contains={"grant_type": "fb_exchange_token"}
     ).mock(return_value=httpx.Response(200, json=token_payload("LONG", expires_in=5183944)))
 
     token = await meta_client.exchange_code_for_token("AUTH_CODE", "https://app.example.com/cb")
@@ -94,18 +101,22 @@ async def test_exchange_code_for_long_lived_token(
     assert token.expires_in == 5183944
     assert token.expires_at is not None
 
-    short_qs = dict(short_route.calls[0].request.url.params)
-    assert short_qs["client_id"] == FAKE_APP_ID
-    assert short_qs["client_secret"] == FAKE_APP_SECRET
-    assert short_qs["redirect_uri"] == "https://app.example.com/cb"
-    long_qs = dict(long_route.calls[0].request.url.params)
-    assert long_qs["fb_exchange_token"] == "SHORT"
+    # H2: credentials travel in the form body — the request line carries no query at all.
+    short_req = short_route.calls[0].request
+    assert short_req.url.query == b""
+    short_form = _form(short_req)
+    assert short_form["client_id"] == FAKE_APP_ID
+    assert short_form["client_secret"] == FAKE_APP_SECRET
+    assert short_form["redirect_uri"] == "https://app.example.com/cb"
+    long_req = long_route.calls[0].request
+    assert long_req.url.query == b""
+    assert _form(long_req)["fb_exchange_token"] == "SHORT"
 
 
 async def test_exchange_long_lived_defaults_when_fields_missing(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(200, json={"access_token": "LONG"})
     )
     token = await meta_client.exchange_for_long_lived_token("SHORT")
@@ -117,7 +128,7 @@ async def test_exchange_long_lived_defaults_when_fields_missing(
 async def test_malformed_token_response_raises(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(return_value=httpx.Response(200, json={"foo": 1}))
+    graph_mock.post("/oauth/access_token").mock(return_value=httpx.Response(200, json={"foo": 1}))
     with pytest.raises(MetaGraphError, match="missing 'access_token'"):
         await meta_client.exchange_code_for_token("X", "https://a.b/c")
 
@@ -125,7 +136,7 @@ async def test_malformed_token_response_raises(
 async def test_invalid_code_raises_oauth_error(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(
             400,
             json=oauth_error_payload(
@@ -154,8 +165,10 @@ async def test_get_user_pages_returns_pages_and_instagram(
     assert pages[1].instagram_business_account_id is None
     assert pages[0].page_access_token is not None
 
-    qs = dict(route.calls[0].request.url.params)
-    assert qs["access_token"] == "USER_TOKEN"
+    req = route.calls[0].request
+    qs = dict(req.url.params)
+    assert "access_token" not in qs  # H2
+    assert req.headers["Authorization"] == "Bearer USER_TOKEN"
     assert qs["fields"] == PAGE_FIELDS
     assert qs["appsecret_proof"] == meta_client.appsecret_proof("USER_TOKEN")
 
@@ -167,13 +180,18 @@ async def test_get_user_pages_follows_pagination(
     page1["paging"]["next"] = f"{GRAPH_BASE}/me/accounts?after=b&access_token=USER_TOKEN"
     page2 = {"data": [{"id": "1003", "name": "Third", "tasks": []}], "paging": {}}
 
-    graph_mock.get("/me/accounts", params={"after": "b"}).mock(
+    second = graph_mock.get("/me/accounts", params__contains={"after": "b"}).mock(
         return_value=httpx.Response(200, json=page2)
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=page1))
 
     pages = await meta_client.get_user_pages("USER_TOKEN")
     assert [p.page_id for p in pages] == ["1001", "1002", "1003"]
+    # H2: the token Meta echoed in ``paging.next`` is stripped and re-sent as Bearer.
+    follow = second.calls[0].request
+    assert "access_token" not in dict(follow.url.params)
+    assert follow.headers["Authorization"] == "Bearer USER_TOKEN"
+    assert dict(follow.url.params)["appsecret_proof"] == meta_client.appsecret_proof("USER_TOKEN")
 
 
 async def test_get_user_pages_empty(
@@ -413,7 +431,7 @@ async def test_injected_client_is_not_closed(settings: Settings) -> None:
 async def test_debug_token_parses_payload(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    route = graph_mock.get("/debug_token").mock(
+    route = graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -432,14 +450,16 @@ async def test_debug_token_parses_payload(
     assert info.user_id == "42"
     assert info.scopes == ["pages_show_list"]
     assert info.expires_at == 1_800_000_000
-    qs = dict(route.calls[0].request.url.params)
-    assert qs["access_token"] == f"{FAKE_APP_ID}|{FAKE_APP_SECRET}"
+    req = route.calls[0].request
+    assert req.url.query == b""  # H2: nothing secret in the request line
+    assert req.headers["Authorization"] == f"Bearer {FAKE_APP_ID}|{FAKE_APP_SECRET}"
+    assert _form(req) == {"input_token": "TOKEN"}
 
 
 async def test_debug_token_handles_sparse_payload(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    graph_mock.get("/debug_token").mock(return_value=httpx.Response(200, json={"data": {}}))
+    graph_mock.post("/debug_token").mock(return_value=httpx.Response(200, json={"data": {}}))
     info = await meta_client.debug_token("TOKEN")
     assert info.is_valid is False
     assert info.user_id is None
@@ -450,18 +470,20 @@ async def test_debug_token_handles_sparse_payload(
 async def test_get_me_returns_identity_and_sends_appsecret_proof(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    """H2 — ``GET /me?fields=id,name`` carries the token + its ``appsecret_proof``."""
+    """SPRINT-02.1 H2 — ``GET /me?fields=id,name`` with Bearer token + ``appsecret_proof``."""
     route = graph_mock.get("/me").mock(
         return_value=httpx.Response(200, json={"id": "10001", "name": "Nile Owner"})
     )
     me = await meta_client.get_me("USER_TOKEN")
     assert me.id == "10001"
     assert me.name == "Nile Owner"
-    qs = dict(route.calls[0].request.url.params)
+    req = route.calls[0].request
+    qs = dict(req.url.params)
     assert qs["fields"] == "id,name"
-    assert qs["access_token"] == "USER_TOKEN"
+    assert "access_token" not in qs  # H2
+    assert req.headers["Authorization"] == "Bearer USER_TOKEN"
     assert qs["appsecret_proof"] == meta_client.appsecret_proof("USER_TOKEN")
-    assert route.calls[0].request.url.path.endswith(f"/{GRAPH_VERSION}/me")
+    assert req.url.path.endswith(f"/{GRAPH_VERSION}/me")
 
 
 async def test_get_me_without_name_and_numeric_id(
@@ -492,7 +514,7 @@ async def test_get_me_expired_token_raises_token_expired(
 async def test_debug_token_reads_error_code(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -512,13 +534,13 @@ async def test_debug_token_reads_error_code(
 async def test_debug_token_error_code_tolerates_garbage(
     meta_client: MetaGraphClient, graph_mock: respx.MockRouter
 ) -> None:
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(
             200, json={"data": {"is_valid": False, "error": {"code": "not-a-number"}}}
         )
     )
     assert (await meta_client.debug_token("TOKEN")).error_code is None
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json={"data": {"is_valid": False, "error": "weird"}})
     )
     assert (await meta_client.debug_token("TOKEN")).error_code is None
@@ -579,3 +601,94 @@ async def test_repeated_5xx_stops_after_max_retries_plus_one(
         assert route.call_count - before == max_retries + 1, max_retries
         assert len(sleeps) == max_retries
         sleeps.clear()
+
+
+# ------------------------------------------------------ SPRINT-04.1 H2 / H4
+_URL_SECRET_KEYS = ("access_token", "client_secret", "input_token", "fb_exchange_token")
+
+
+async def test_h2_u1_no_graph_request_carries_a_secret_in_the_url(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    """H2-U1 — every ``MetaGraphClient`` path: no secret key in ``request.url.query``."""
+    graph_mock.post(
+        "/oauth/access_token", data__contains={"grant_type": "fb_exchange_token"}
+    ).mock(return_value=httpx.Response(200, json=token_payload("LONG", expires_in=100)))
+    graph_mock.post("/oauth/access_token").mock(
+        return_value=httpx.Response(200, json=token_payload("SHORT", expires_in=10))
+    )
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json={"data": {"is_valid": True}})
+    )
+    graph_mock.get("/me").mock(return_value=httpx.Response(200, json={"id": "1"}))
+    page1 = pages_payload()
+    page1["paging"]["next"] = f"{GRAPH_BASE}/me/accounts?after=b&access_token=USER_TOKEN"
+    graph_mock.get("/me/accounts", params__contains={"after": "b"}).mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=page1))
+
+    await meta_client.exchange_code_for_token("AUTH_CODE", "https://app.example.com/cb")
+    await meta_client.exchange_for_long_lived_token("SHORT")
+    await meta_client.debug_token("LONG")
+    await meta_client.get_me("LONG")
+    await meta_client.get_user_pages("USER_TOKEN")
+
+    assert len(graph_mock.calls) == 7
+    for call in graph_mock.calls:
+        query = call.request.url.query.decode()
+        keys = {k for k, _ in parse_qsl(query, keep_blank_values=True)}
+        assert not keys.intersection(_URL_SECRET_KEYS), (call.request.method, query)
+        for raw in ("USER_TOKEN", "SHORT", "LONG", FAKE_APP_SECRET, "AUTH_CODE"):
+            assert raw not in query, (call.request.method, query)
+        assert "code=" not in query
+
+
+@pytest.mark.parametrize(
+    "next_url",
+    [
+        "http://evil.example/v26.0/me/accounts?after=b",
+        "https://evil.example/v26.0/me/accounts?after=b",
+        "https://graph.facebook.com.evil.example/v26.0/me/accounts?after=b",
+        "//evil.example/me/accounts",
+        "ftp://graph.facebook.com/me/accounts",
+    ],
+)
+async def test_h4_u1_untrusted_pagination_url_is_never_requested(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter, next_url: str
+) -> None:
+    """H4-U1 — ``paging.next`` off-host / non-https ⇒ ``MetaGraphError``, no request."""
+    page1 = pages_payload()
+    page1["paging"]["next"] = next_url
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=page1))
+    with respx.mock(assert_all_called=False) as other_hosts:
+        evil = other_hosts.route(host__regex=r".*evil.*").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+        with pytest.raises(MetaGraphError, match="untrusted pagination url"):
+            await meta_client.get_user_pages("USER_TOKEN")
+        assert evil.call_count == 0
+    assert len(graph_mock.calls) == 1
+
+
+async def test_h2_network_error_messages_do_not_embed_the_request(
+    meta_client: MetaGraphClient,
+    graph_mock: respx.MockRouter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """H2 (3) — ``MetaNetworkError`` never carries ``str(exc)``; the log names the type."""
+    graph_mock.get("/me/accounts").mock(
+        side_effect=httpx.ConnectError("boom https://x/?access_token=LEAK")
+    )
+    with caplog.at_level(logging.WARNING, logger="src.modules.social_connect.meta_client"):
+        with pytest.raises(MetaNetworkError) as info:
+            await meta_client.get_user_pages("LEAK")
+    assert str(info.value) == "Meta Graph API network error"
+    assert "LEAK" not in str(info.value)
+    assert "LEAK" not in caplog.text
+    assert "ConnectError" in caplog.text
+
+    graph_mock.get("/me/accounts").mock(side_effect=httpx.ReadTimeout("slow ?access_token=LEAK"))
+    with pytest.raises(MetaNetworkError) as info:
+        await meta_client.get_user_pages("LEAK")
+    assert str(info.value) == "Meta Graph API timeout"

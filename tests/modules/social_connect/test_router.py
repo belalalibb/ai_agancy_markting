@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from src.core.config import Settings, get_settings
 from src.core.oauth_state import OAuthStateSigner
 from src.main import app as module_level_app
+from src.modules.social_connect.domain.models import AccountStatus
 from src.modules.social_connect.exceptions import (
     MetaGraphError,
     MetaNetworkError,
@@ -48,7 +49,7 @@ from tests.conftest import (
     pages_payload,
     token_payload,
 )
-from tests.fakes import FakeConnectedAccountRepository, FakeStore
+from tests.fakes import FakeConnectedAccountRepository, FakeStatusMarker, FakeStore
 
 pytestmark = pytest.mark.contract
 
@@ -84,10 +85,10 @@ def as_(auth_headers: Headers) -> Headers:
 
 
 def _stub_oauth(graph_mock: respx.MockRouter) -> None:
-    graph_mock.get("/oauth/access_token", params={"grant_type": "fb_exchange_token"}).mock(
-        return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944))
-    )
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post(
+        "/oauth/access_token", data__contains={"grant_type": "fb_exchange_token"}
+    ).mock(return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944)))
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(200, json=token_payload("SHORT_LIVED", 5000))
     )
 
@@ -97,7 +98,7 @@ def _stub_happy_path(graph_mock: respx.MockRouter, pages: int = 2) -> respx.Rout
     me_route = graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
         return_value=httpx.Response(200, json=me_payload())
     )
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
     graph_mock.get("/me/accounts").mock(
@@ -317,7 +318,7 @@ def test_callback_expired_state_400(client: TestClient) -> None:
 def test_callback_invalid_code_returns_401(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(
             400, json=oauth_error_payload("Invalid verification code", 100, None)
         )
@@ -335,7 +336,7 @@ def test_callback_expired_token_returns_401(
     graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
         return_value=httpx.Response(200, json=me_payload())
     )
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(400, json=oauth_error_payload())
     )
     res = _callback(client, signer)
@@ -347,7 +348,7 @@ def test_callback_expired_token_returns_401(
 def test_callback_rate_limited_returns_429_with_retry_after(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(
             429,
             headers={"Retry-After": "7"},
@@ -369,7 +370,7 @@ def test_callback_rate_limited_returns_429_with_retry_after(
 def test_callback_rate_limited_without_retry_after(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(
             400,
             json={"error": {"message": "User request limit reached", "code": 17}},
@@ -404,7 +405,7 @@ def test_callback_permission_error_returns_403(
 def test_callback_upstream_failure_returns_502(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(return_value=httpx.Response(503, json={}))
+    graph_mock.post("/oauth/access_token").mock(return_value=httpx.Response(503, json={}))
     res = _callback(client, signer)
     assert res.status_code == 502
     assert res.json()["detail"]["error"] == "MetaTransientError"
@@ -413,7 +414,7 @@ def test_callback_upstream_failure_returns_502(
 def test_callback_network_failure_returns_502(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(side_effect=httpx.ConnectError("boom"))
+    graph_mock.post("/oauth/access_token").mock(side_effect=httpx.ConnectError("boom"))
     res = _callback(client, signer)
     assert res.status_code == 502
     assert res.json()["detail"]["error"] == "MetaNetworkError"
@@ -422,7 +423,7 @@ def test_callback_network_failure_returns_502(
 def test_callback_unknown_graph_error_returns_400(
     client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(
             400,
             json={"error": {"message": "Unsupported request", "type": "GraphMethodException"}},
@@ -450,7 +451,7 @@ def test_callback_with_revoked_grant_404_without_graph_call(
     store.grants[g.id] = g.model_copy(update={"revoked_at": g.granted_at})
 
     me_route = _stub_happy_path(graph_mock)
-    token_route = graph_mock.get("/oauth/access_token")
+    token_route = graph_mock.post("/oauth/access_token")
     res = client.get(CALLBACK, params={"code": "CODE", "state": state})
     assert res.status_code == 404
     assert res.json()["detail"]["error"] == "brand_not_found"
@@ -1015,3 +1016,222 @@ def test_required_action_in_error_detail(
     http_exc = _to_http(exc)
     assert http_exc.status_code == expected_status
     assert http_exc.detail["required_action"] == expected_action  # type: ignore[index]
+
+
+# ======================================================= SPRINT-04.1 H1 / H3
+def _agency_connection(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    role: GrantRole = GrantRole.MANAGER,
+    pages: int = 3,
+) -> str:
+    """Agency (grantee) connects its Meta account — 3 Pages of *different* clients."""
+    grant(store, BRAND_ID, AGENCY_ID, role)
+    _stub_happy_path(graph_mock, pages=pages)
+    res = _callback(client, signer, tenant=AGENCY_ID)
+    assert res.status_code == 201, res.text
+    assert res.json()["connected_by_tenant_id"] == str(AGENCY_ID)
+    return res.json()["id"]
+
+
+def _rearmed_pages_route(graph_mock: respx.MockRouter, pages: int = 3) -> respx.Route:
+    """``/me/accounts`` stub with a zeroed call counter (``Route.reset`` drops the mock)."""
+    route = graph_mock.get("/me/accounts")
+    route.reset()
+    return route.mock(return_value=httpx.Response(200, json=pages_payload(pages)))
+
+
+def test_h1_u1_brand_owner_sees_only_selected_pages_of_agency_connection(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
+) -> None:
+    cid = _agency_connection(client, graph_mock, signer, store)
+    owner = as_(OWNER_ID)
+
+    # Before any selection: the owner sees no Pages at all (they are the agency's data).
+    one = client.get(f"{BASE}/connections/{cid}", headers=owner)
+    assert one.status_code == 200
+    assert one.json()["pages"] == []
+    assert one.json()["is_connection_owner"] is False
+    listed = client.get(f"{BASE}/connections", headers=owner).json()
+    assert listed[0]["pages"] == [] and listed[0]["is_connection_owner"] is False
+
+    assert _select(client, as_, cid, ["1002"], tenant=AGENCY_ID).status_code == 200
+    one = client.get(f"{BASE}/connections/{cid}", headers=owner).json()
+    assert [p["page_id"] for p in one["pages"]] == ["1002"]
+    assert "Giza Gym" not in json.dumps(one) and "Nile Coffee Roasters" not in json.dumps(one)
+
+
+def test_h1_u2_agency_sees_all_pages_of_its_own_connection(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
+) -> None:
+    cid = _agency_connection(client, graph_mock, signer, store)
+    agency = as_(AGENCY_ID)
+    one = client.get(f"{BASE}/connections/{cid}", headers=agency).json()
+    assert len(one["pages"]) == 3
+    assert one["is_connection_owner"] is True
+    assert _select(client, as_, cid, ["1002"], tenant=AGENCY_ID).status_code == 200
+    one = client.get(f"{BASE}/connections/{cid}", headers=agency).json()
+    assert len(one["pages"]) == 3  # still all three for the owner of the connection
+    assert {p["page_id"]: p["is_selected"] for p in one["pages"]} == {
+        "1001": False,
+        "1002": True,
+        "1003": False,
+    }
+
+
+def test_h1_u3_brand_owner_cannot_select_on_agency_connection(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
+) -> None:
+    cid = _agency_connection(client, graph_mock, signer, store)
+    pages_route = _rearmed_pages_route(graph_mock)
+    snapshot = fake_repo.rows[UUID(cid)].model_copy(deep=True)
+
+    res = _select(client, as_, cid, ["1001"], tenant=OWNER_ID)
+    assert res.status_code == 403, res.text
+    assert res.json()["detail"]["error"] == "not_connection_owner"
+    assert pages_route.call_count == 0  # refused before any Graph call
+    assert fake_repo.rows[UUID(cid)] == snapshot
+    fake_repo.assert_selection_invariant()
+
+
+def test_h1_u4_agency_cannot_select_on_owner_connection(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
+) -> None:
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    _stub_happy_path(graph_mock, pages=3)
+    cid = _callback(client, signer, tenant=OWNER_ID).json()["id"]
+    pages_route = _rearmed_pages_route(graph_mock)
+    res = _select(client, as_, cid, ["1001"], tenant=AGENCY_ID)
+    assert res.status_code == 403
+    assert res.json()["detail"]["error"] == "not_connection_owner"
+    assert pages_route.call_count == 0
+    # The owner itself still can.
+    assert _select(client, as_, cid, ["1001"], tenant=OWNER_ID).status_code == 200
+
+
+def test_h1_u5_disconnect_policy_owner_may_evict_agency_manager_may_not_evict_owner(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
+) -> None:
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    _stub_happy_path(graph_mock, pages=3)
+    agency_cid = _callback(client, signer, tenant=AGENCY_ID).json()["id"]
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload(user_id="20002", name="Owner Self"))
+    )
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload(user_id="20002"))
+    )
+    owner_cid = _callback(client, signer, tenant=OWNER_ID).json()["id"]
+    assert agency_cid != owner_cid
+
+    # MANAGER (agency) tries to remove the brand owner's connection ⇒ 403, still there.
+    res = client.delete(f"{BASE}/connections/{owner_cid}", headers=as_(AGENCY_ID))
+    assert res.status_code == 403
+    assert res.json()["detail"]["error"] == "not_connection_owner"
+    assert client.get(f"{BASE}/connections/{owner_cid}", headers=as_(OWNER_ID)).status_code == 200
+
+    # MANAGER removes its *own* connection ⇒ 204 … but first the OWNER evicts it: 204.
+    res = client.delete(f"{BASE}/connections/{agency_cid}", headers=as_(OWNER_ID))
+    assert res.status_code == 204
+    assert client.get(f"{BASE}/connections/{agency_cid}", headers=as_(OWNER_ID)).status_code == 404
+
+    # A manager can still delete a connection it made itself.
+    agency_cid2 = _callback(client, signer, tenant=AGENCY_ID).json()["id"]
+    assert (
+        client.delete(f"{BASE}/connections/{agency_cid2}", headers=as_(AGENCY_ID)).status_code
+        == 204
+    )
+
+
+def test_h1_u6_reconnect_by_a_different_tenant_transfers_ownership(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    _stub_happy_path(graph_mock, pages=3)
+    cid = _callback(client, signer, tenant=AGENCY_ID).json()["id"]
+    assert _select(client, as_, cid, ["1001"], tenant=AGENCY_ID).status_code == 200
+
+    # The same Meta user (same provider_user_id) re-runs OAuth as the brand owner.
+    with caplog.at_level(logging.INFO, logger="src.modules.social_connect.service"):
+        res = _callback(client, signer, tenant=OWNER_ID)
+    assert res.status_code == 201
+    assert res.json()["id"] == cid
+    assert res.json()["connected_by_tenant_id"] == str(OWNER_ID)
+    assert res.json()["is_connection_owner"] is True
+    assert fake_repo.rows[UUID(cid)].connected_by_tenant_id == OWNER_ID
+    transfer = [r for r in caplog.records if "ownership transferred" in r.getMessage()]
+    assert len(transfer) == 1
+    assert str(AGENCY_ID) in transfer[0].getMessage() and str(OWNER_ID) in transfer[0].getMessage()
+    assert "Nile Owner" not in caplog.text and "10001" not in caplog.text  # ids only (B7)
+
+    # Ownership moved: the agency can no longer change the selection; the owner can.
+    assert _select(client, as_, cid, ["1002"], tenant=AGENCY_ID).status_code == 403
+    assert _select(client, as_, cid, ["1002"], tenant=OWNER_ID).status_code == 200
+
+
+def test_h3_u1_page_without_token_is_not_selectable_422_no_change(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
+) -> None:
+    _stub_happy_path(graph_mock, pages=3)
+    cid = _callback(client, signer).json()["id"]
+    assert _select(client, as_, cid, ["1001"]).status_code == 200
+    snapshot = fake_repo.rows[UUID(cid)].model_copy(deep=True)
+
+    payload = pages_payload(3)
+    del payload["data"][2]["access_token"]  # 1003: user has no Page role (F4)
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=payload))
+
+    res = _select(client, as_, cid, ["1002", "1003"])
+    assert res.status_code == 422, res.text
+    assert res.json()["detail"] == {"error": "page_not_selectable", "page_ids": ["1003"]}
+    assert fake_repo.rows[UUID(cid)] == snapshot  # untouched: 1001 still the only selection
+    fake_repo.assert_selection_invariant()
+
+
+def test_h3_expired_token_status_is_written_out_of_band(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    status_marker: FakeStatusMarker,
+    as_: Headers,
+) -> None:
+    _stub_happy_path(graph_mock, pages=3)
+    cid = _callback(client, signer).json()["id"]
+    graph_mock.get("/me/accounts").mock(
+        return_value=httpx.Response(400, json=oauth_error_payload())
+    )
+    assert _select(client, as_, cid, ["1001"]).status_code == 401
+    assert status_marker.calls == [(BRAND_ID, UUID(cid), AccountStatus.REAUTH_REQUIRED)]

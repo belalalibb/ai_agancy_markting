@@ -1,9 +1,10 @@
 """FastAPI dependencies for auth (A9) — the **only** place a request identity is read.
 
 ``CurrentUser``       — verifies the Bearer JWT (signature/exp/iss/aud); **no database**.
-``CurrentUserFresh``  — ``CurrentUser`` + one query (``refresh_sessions.revoked_at IS NULL``
-                        for ``sid``); used by destructive routes (grant revoke, disconnect,
-                        page selection) so a logout takes effect immediately there.
+``CurrentUserFresh``  — ``CurrentUser`` + one query (``refresh_sessions`` JOIN ``users``:
+                        not revoked, not expired, ``users.is_active``); used by destructive
+                        routes (grant revoke, disconnect, page selection) and ``GET /auth/me``
+                        so a logout or a disabled account takes effect immediately (H6).
 
 Import direction (D-013): this module imports nothing from ``tenancy``; ``tenancy.dependencies``
 imports :data:`CurrentUser` from here to build ``ActorTenantId``.
@@ -11,6 +12,7 @@ imports :data:`CurrentUser` from here to build ``ActorTenantId``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
 import jwt
@@ -136,8 +138,8 @@ async def get_current_user_fresh(
     actor: CurrentUser,
     sessions: Annotated[RefreshSessionRepository, Depends(get_refresh_session_repository)],
 ) -> AuthenticatedActor:
-    """``CurrentUser`` plus a revocation check against ``refresh_sessions`` (one query)."""
-    if not await sessions.is_active(actor.sid):
+    """``CurrentUser`` plus one query: session not revoked, not expired, user active (H6)."""
+    if not await sessions.is_active(actor.sid, datetime.now(tz=UTC)):
         raise to_http(SessionRevokedError("session has been revoked"))
     return actor
 

@@ -30,13 +30,20 @@ class RefreshSessionRepository(Protocol):
 
     async def get(self, session_id: UUID) -> RefreshSession | None: ...
 
-    async def is_active(self, session_id: UUID) -> bool:
-        """Single query used by ``CurrentUserFresh``: exists and ``revoked_at IS NULL``."""
+    async def is_active(self, session_id: UUID, now: datetime) -> bool:
+        """Single query (JOIN users) used by ``CurrentUserFresh`` (H6):
+        ``revoked_at IS NULL AND expires_at > now AND users.is_active``."""
         ...
 
-    async def revoke(
-        self, session_id: UUID, at: datetime, replaced_by: UUID | None = None
-    ) -> None: ...
+    async def revoke(self, session_id: UUID, at: datetime, replaced_by: UUID | None = None) -> int:
+        """Revoke if still active; returns the number of rows updated (0 or 1) — H7 relies
+        on exactly one winner when two refreshes race on the same session."""
+        ...
+
+    async def link_replacement(self, session_id: UUID, replaced_by: UUID) -> None:
+        """Audit link set *after* the atomic revoke (H7): the new session id is only known
+        once it has been issued."""
+        ...
 
     async def revoke_all_for_user(self, user_id: UUID, at: datetime) -> int:
         """Revoke every *active* session of the user; returns the number revoked."""

@@ -11,6 +11,7 @@ from src.modules.auth.domain.hashing import PasswordHasher
 from src.modules.auth.domain.models import RefreshSession, User
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.auth.domain.repository import RefreshSessionRepository, UserRepository
+from src.modules.auth.exceptions import EmailTakenError
 from src.modules.auth.infrastructure.argon2_hasher import DUMMY_HASH, Argon2PasswordHasher
 from src.modules.auth.infrastructure.orm import RefreshSessionRow, UserRow
 from src.modules.auth.infrastructure.postgres_repository import (
@@ -152,16 +153,28 @@ def test_protocol_conformance() -> None:
 
 
 async def test_user_repository_add_get_lookup_and_updates() -> None:
-    session = StubSession([StubResult(scalar=_user_row()), StubResult(scalar=None)])
-    _patch_add_defaults(session)
+    session = StubSession(
+        [
+            StubResult(scalar=OWNER_USER_ID),  # add ⇒ RETURNING id
+            StubResult(scalar=None),  # add (conflict on lower(email) / tenant_id)
+            StubResult(scalar=_user_row()),  # get_by_email
+            StubResult(scalar=None),  # get_by_email (missing)
+        ]
+    )
     repo = PostgresUserRepository(session)  # type: ignore[arg-type]
 
+    session.identity[(UserRow, OWNER_USER_ID)] = _user_row()
     stored = await repo.add(
         User(id=OWNER_USER_ID, tenant_id=OWNER_ID, email="x@y.z", password_hash="$argon2id$h")
     )
     assert stored.id == OWNER_USER_ID and stored.is_active is True
-    assert session.flush_count == 1 and len(session.refreshed) == 1
+    sql = compiled(session.executed[0][0])
+    assert sql.startswith("INSERT INTO users") and "ON CONFLICT DO NOTHING" in sql  # H4
+    assert session.flush_count == 0 and session.added == []
+    with pytest.raises(EmailTakenError):
+        await repo.add(User(tenant_id=OWNER_ID, email="X@y.z", password_hash="$argon2id$h"))
 
+    del session.identity[(UserRow, OWNER_USER_ID)]
     assert await repo.get(OWNER_USER_ID) is None
     session.identity[(UserRow, OWNER_USER_ID)] = _user_row()
     got = await repo.get(OWNER_USER_ID)
@@ -169,7 +182,7 @@ async def test_user_repository_add_get_lookup_and_updates() -> None:
 
     found = await repo.get_by_email("  NILE-owner@EXAMPLE.com ")
     assert found is not None and found.id == OWNER_USER_ID
-    sql = compiled(session.executed[0][0])
+    sql = compiled(session.executed[2][0])
     assert "lower(users.email)" in sql
     assert await repo.get_by_email("missing@example.com") is None
 
@@ -188,7 +201,9 @@ async def test_refresh_session_repository_statements_and_mapping() -> None:
         [
             StubResult(scalar=sid),  # is_active ⇒ True
             StubResult(scalar=None),  # is_active ⇒ False
-            StubResult(rowcount=0),  # revoke
+            StubResult(rowcount=1),  # revoke (won)
+            StubResult(rowcount=0),  # revoke (lost / already revoked)
+            StubResult(rowcount=1),  # link_replacement
             StubResult(rowcount=3),  # revoke_all_for_user
         ]
     )
@@ -210,18 +225,28 @@ async def test_refresh_session_repository_statements_and_mapping() -> None:
     got_no_ip = await repo.get(sid)
     assert got_no_ip is not None and got_no_ip.ip is None
 
-    assert await repo.is_active(sid) is True
-    assert "revoked_at IS NULL" in compiled(session.executed[0][0])
-    assert await repo.is_active(sid) is False
+    assert await repo.is_active(sid, NOW) is True
+    active_sql = compiled(session.executed[0][0])
+    # H6: one query, JOIN users, all three predicates.
+    assert "JOIN users" in active_sql
+    assert "revoked_at IS NULL" in active_sql
+    assert "refresh_sessions.expires_at >" in active_sql
+    assert "users.is_active IS true" in active_sql
+    assert await repo.is_active(sid, NOW) is False
 
     replacement = uuid4()
-    await repo.revoke(sid, NOW, replaced_by=replacement)
+    assert await repo.revoke(sid, NOW, replaced_by=replacement) == 1  # H7: rowcount
     revoke_sql = compiled(session.executed[2][0])
     assert "UPDATE refresh_sessions SET revoked_at" in revoke_sql
     assert "replaced_by" in revoke_sql and "revoked_at IS NULL" in revoke_sql
+    assert await repo.revoke(sid, NOW) == 0
+
+    await repo.link_replacement(sid, replacement)
+    link_sql = compiled(session.executed[4][0])
+    assert link_sql.startswith("UPDATE refresh_sessions SET replaced_by=")
 
     assert await repo.revoke_all_for_user(OWNER_USER_ID, NOW) == 3
-    all_sql = compiled(session.executed[3][0])
+    all_sql = compiled(session.executed[5][0])
     assert "refresh_sessions.user_id" in all_sql and "revoked_at IS NULL" in all_sql
 
 
@@ -238,3 +263,63 @@ def test_refresh_session_helpers() -> None:
     assert session.is_expired(NOW) is True
     assert session.is_expired(datetime(2025, 12, 31, tzinfo=UTC)) is False
     assert session.model_copy(update={"revoked_at": NOW}).is_revoked is True
+
+
+# ============================================================ SPRINT-04.1 H8
+def test_h8_u1_rate_limiter_is_bounded_by_max_keys() -> None:
+    now = [1000.0]
+    limiter = InMemoryRateLimiter(clock=lambda: now[0], max_keys=10_000)
+    for i in range(20_000):
+        limiter.hit("auth:ip", f"10.0.{i // 256}.{i % 256}", limit=10, window_seconds=60)
+        if i % 3 == 0:
+            limiter.record_failure("auth:login-failures", f"user{i}@example.com", 5, 300)
+    assert limiter.tracked_keys <= 10_000
+    # Least-recently-seen keys were evicted first; the newest is still tracked and still
+    # subject to its window (a second hit does not reset anything).
+    assert limiter.hit("auth:ip", "10.0.78.31", limit=1, window_seconds=60) is not None
+
+    small = InMemoryRateLimiter(clock=lambda: now[0], max_keys=2)
+    small.hit("b", "a", 10, 60)
+    small.hit("b", "b", 10, 60)
+    small.hit("b", "a", 10, 60)  # touch "a" ⇒ "b" is now the oldest
+    small.hit("b", "c", 10, 60)  # overflow ⇒ "b" evicted
+    assert small.tracked_keys == 2
+    assert small.hit("b", "b", limit=1, window_seconds=60) is None  # fresh again
+
+
+def test_h8_u2_idle_keys_are_swept_after_their_window_and_block_elapse() -> None:
+    now = [0.0]
+    limiter = InMemoryRateLimiter(clock=lambda: now[0])
+    limiter.hit("auth:ip", "1.1.1.1", limit=10, window_seconds=60)
+    limiter.record_failure("auth:login-failures", "x@example.com", limit=1, block_seconds=30)
+    assert limiter.blocked_for("auth:login-failures", "x@example.com") is not None
+    assert limiter.tracked_keys == 2
+
+    limiter.sweep_now()
+    assert limiter.tracked_keys == 2  # both still live
+
+    now[0] = 31.0
+    limiter.sweep_now()
+    assert limiter.tracked_keys == 1  # block elapsed ⇒ failure key gone; hit window still open
+    assert limiter.blocked_for("auth:login-failures", "x@example.com") is None
+
+    now[0] = 61.0
+    limiter.sweep_now()
+    assert limiter.tracked_keys == 0
+
+    # The lazy sweep also runs on its own every SWEEP_EVERY operations.
+    from src.modules.auth.infrastructure.rate_limit import SWEEP_EVERY
+
+    now[0] = 100.0
+    limiter.hit("auth:ip", "stale", limit=10, window_seconds=1)
+    now[0] = 200.0
+    for i in range(SWEEP_EVERY):
+        limiter.hit("auth:ip", f"fresh-{i}", limit=10, window_seconds=600)
+    assert ("auth:ip", "stale") not in limiter._entries  # noqa: SLF001 - white-box check
+    # A failure counter alone keeps the key alive (it is reset only on success or block).
+    limiter.record_failure("auth:login-failures", "y@example.com", limit=5, block_seconds=1)
+    limiter.sweep_now()
+    assert ("auth:login-failures", "y@example.com") in limiter._entries  # noqa: SLF001
+    limiter.reset_failures("auth:login-failures", "y@example.com")
+    limiter.sweep_now()
+    assert ("auth:login-failures", "y@example.com") not in limiter._entries  # noqa: SLF001

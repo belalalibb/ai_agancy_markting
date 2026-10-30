@@ -9,6 +9,11 @@ Design notes
     surfaced immediately — Meta extends the block if you keep calling),
   - mapping of Graph API error payloads to typed exceptions.
 * An ``httpx.AsyncClient`` may be injected (tests inject a mocked transport).
+
+Secrets never travel in the URL (SPRINT-04.1 H2): user/app tokens go in
+``Authorization: Bearer``; ``client_secret`` / ``input_token`` go in a form body (``POST``).
+Only the non-reusable ``appsecret_proof`` is allowed as a query parameter. ``paging.next``
+URLs are host-checked (H4) and stripped of any ``access_token`` before being followed.
 """
 
 from __future__ import annotations
@@ -16,11 +21,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import secrets
 from collections.abc import Awaitable, Callable
 from types import TracebackType
 from typing import Any, Self
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -47,7 +53,16 @@ PAGE_FIELDS = (
 # hop → 5 000 Pages). A ``paging.next`` that never ends must not loop forever.
 MAX_PAGINATION_REQUESTS: int = 50
 
+# H2: query parameters that must never be sent (Meta echoes them in ``paging.next``).
+_URL_SECRET_PARAMS: frozenset[str] = frozenset({"access_token", "appsecret_proof"})
+
 SleepFn = Callable[[float], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
 class MetaGraphClient:
@@ -121,11 +136,14 @@ class MetaGraphClient:
 
     # ------------------------------------------------------------- OAuth ----
     async def exchange_code_for_token(self, code: str, redirect_uri: str) -> MetaTokenResponse:
-        """Authorization code → short-lived token → long-lived token (~60 days)."""
+        """Authorization code → short-lived token → long-lived token (~60 days).
+
+        H2: ``POST`` with a form body — ``client_secret`` and ``code`` never hit the URL.
+        """
         short = await self._request(
-            "GET",
+            "POST",
             "/oauth/access_token",
-            params={
+            data={
                 "client_id": self._settings.meta_app_id,
                 "client_secret": self._settings.meta_app_secret.get_secret_value(),
                 "redirect_uri": redirect_uri,
@@ -143,9 +161,9 @@ class MetaGraphClient:
 
     async def exchange_for_long_lived_token(self, short_lived_token: str) -> MetaTokenResponse:
         payload = await self._request(
-            "GET",
+            "POST",
             "/oauth/access_token",
-            params={
+            data={
                 "grant_type": "fb_exchange_token",
                 "client_id": self._settings.meta_app_id,
                 "client_secret": self._settings.meta_app_secret.get_secret_value(),
@@ -162,10 +180,13 @@ class MetaGraphClient:
     async def debug_token(self, input_token: str) -> MetaDebugTokenInfo:
         app_secret = self._settings.meta_app_secret.get_secret_value()
         app_token = f"{self._settings.meta_app_id}|{app_secret}"
+        # H2: the app token (contains the app secret) travels as Bearer, the inspected
+        # token in the form body — neither appears in the request line.
         payload = await self._request(
-            "GET",
+            "POST",
             "/debug_token",
-            params={"input_token": input_token, "access_token": app_token},
+            data={"input_token": input_token},
+            headers=_bearer(app_token),
         )
         data = payload.get("data") or {}
         scopes = data.get("scopes") or []
@@ -186,9 +207,9 @@ class MetaGraphClient:
             "/me",
             params={
                 "fields": "id,name",
-                "access_token": user_access_token,
                 "appsecret_proof": self.appsecret_proof(user_access_token),
             },
+            headers=_bearer(user_access_token),
         )
         name = payload.get("name")
         return MetaUserInfo(
@@ -200,9 +221,10 @@ class MetaGraphClient:
     async def get_user_pages(self, user_access_token: str) -> list[MetaPageInfo]:
         """``GET /me/accounts`` — follows cursor pagination until exhausted."""
         pages: list[MetaPageInfo] = []
+        proof = self.appsecret_proof(user_access_token)
+        headers = _bearer(user_access_token)
         params: dict[str, Any] = {
-            "access_token": user_access_token,
-            "appsecret_proof": self.appsecret_proof(user_access_token),
+            "appsecret_proof": proof,
             "fields": PAGE_FIELDS,
             "limit": 100,
         }
@@ -215,9 +237,11 @@ class MetaGraphClient:
                     http_status=200,
                 )
             payload = (
-                await self._request("GET", "/me/accounts", params=params)
+                await self._request("GET", "/me/accounts", params=params, headers=headers)
                 if next_url is None
-                else await self._request_absolute("GET", next_url)
+                else await self._request_absolute(
+                    "GET", self._trusted_pagination_url(next_url, proof), headers=headers
+                )
             )
             requests_made += 1
             for node in payload.get("data") or []:
@@ -228,6 +252,26 @@ class MetaGraphClient:
                 break
         return pages
 
+    def _trusted_pagination_url(self, next_url: str, appsecret_proof: str) -> str:
+        """H4 (SSRF) + H2: only ``https`` on the configured Graph host, secrets stripped.
+
+        Meta echoes ``access_token`` (and ``appsecret_proof``) inside ``paging.next``; both
+        are removed here — the token is re-sent as ``Authorization: Bearer`` and the proof
+        re-appended explicitly (``httpx`` *replaces* a URL's query when ``params`` is given,
+        so the cursor must stay inside the URL).
+        """
+        parsed = urlparse(next_url)
+        expected_host = urlparse(self._settings.meta_graph_base_url).netloc
+        if parsed.scheme != "https" or not parsed.netloc or parsed.netloc != expected_host:
+            raise MetaGraphError("untrusted pagination url", http_status=200)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key not in _URL_SECRET_PARAMS
+        ]
+        query.append(("appsecret_proof", appsecret_proof))
+        return urlunparse(parsed._replace(query=urlencode(query)))
+
     # ---------------------------------------------------------- transport ---
     async def _request(
         self,
@@ -235,10 +279,11 @@ class MetaGraphClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
-        return await self._request_absolute(method, url, params=params, json=json)
+        return await self._request_absolute(method, url, params=params, data=data, headers=headers)
 
     async def _request_absolute(
         self,
@@ -246,20 +291,26 @@ class MetaGraphClient:
         url: str,
         *,
         params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         attempt = 0
         while True:
             try:
-                response = await self._http.request(method, url, params=params, json=json)
+                response = await self._http.request(
+                    method, url, params=params, data=data, headers=headers
+                )
             except httpx.TimeoutException as exc:
                 if attempt < self._max_retries:
                     await self._backoff(attempt)
                     attempt += 1
                     continue
-                raise MetaNetworkError(f"Meta Graph API timeout: {exc}") from exc
+                # H2: ``str(exc)`` may embed the request URL — never forward it.
+                logger.warning("Meta Graph API timeout: %s", type(exc).__name__)
+                raise MetaNetworkError("Meta Graph API timeout") from exc
             except httpx.HTTPError as exc:
-                raise MetaNetworkError(f"Meta Graph API network error: {exc}") from exc
+                logger.warning("Meta Graph API network error: %s", type(exc).__name__)
+                raise MetaNetworkError("Meta Graph API network error") from exc
 
             payload = _safe_json(response)
             if response.is_success and "error" not in payload:

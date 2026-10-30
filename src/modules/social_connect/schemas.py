@@ -228,12 +228,29 @@ class ConnectedAccountPublic(BaseModel):
     connected_at: datetime
     last_synced_at: datetime | None = None
     updated_at: datetime
+    # H1: ``True`` when the viewer is ``connected_by_tenant_id`` — only then may the client
+    # offer the selection UI (and only then does ``pages`` include unselected Pages).
+    is_connection_owner: bool = False
     pages: list[PageAssetPublic] = Field(default_factory=list)
 
     @classmethod
-    def from_domain(cls, account: ConnectedAccount) -> ConnectedAccountPublic:
+    def from_domain(
+        cls, account: ConnectedAccount, *, viewer_tenant_id: UUID
+    ) -> ConnectedAccountPublic:
+        """Public view **for a given viewer** (SPRINT-04.1 H1).
+
+        Unselected Pages are personal data of the Meta account that ran OAuth (an agency's
+        other clients, for instance). They are shown only to the connection owner; every
+        other role on the brand sees the selected Pages alone.
+        """
+        is_owner = account.connected_by_tenant_id == viewer_tenant_id
         data = account.model_dump(exclude={"pages", *_SENSITIVE_ACCOUNT_FIELDS})
-        data["pages"] = [PageAssetPublic.from_domain(page) for page in account.pages]
+        data["is_connection_owner"] = is_owner
+        data["pages"] = [
+            PageAssetPublic.from_domain(page)
+            for page in account.pages
+            if page.is_selected or is_owner
+        ]
         return cls.model_validate(data)
 
 

@@ -1,4 +1,9 @@
-"""PostgreSQL implementations of the auth repositories (never commit — session owns the tx)."""
+"""PostgreSQL implementations of the auth repositories (never commit — session owns the tx).
+
+SPRINT-04.1 H4: ``PostgresUserRepository.add`` is ``INSERT … ON CONFLICT DO NOTHING RETURNING
+id`` — a concurrent registration with the same e-mail (or tenant) raises ``EmailTakenError``
+(409) instead of an ``IntegrityError`` 500, and the transaction stays usable.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,11 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.modules.auth.domain.models import RefreshSession, User
+from src.modules.auth.exceptions import EmailTakenError
 from src.modules.auth.infrastructure.orm import RefreshSessionRow, UserRow
 
 
@@ -17,16 +24,24 @@ class PostgresUserRepository:
         self._session = session
 
     async def add(self, user: User) -> User:
-        row = UserRow(
-            id=user.id,
-            tenant_id=user.tenant_id,
-            email=user.email,
-            password_hash=user.password_hash,
-            is_active=user.is_active,
+        stmt = (
+            pg_insert(UserRow)
+            .values(
+                id=user.id,
+                tenant_id=user.tenant_id,
+                email=user.email,
+                password_hash=user.password_hash,
+                is_active=user.is_active,
+            )
+            .on_conflict_do_nothing()
+            .returning(UserRow.id)
         )
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+        inserted = (await self._session.execute(stmt)).scalar_one_or_none()
+        if inserted is None:
+            raise EmailTakenError("email is already registered")
+        row = await self._session.get(UserRow, inserted)
+        if row is None:  # pragma: no cover - the row was just inserted in this transaction
+            raise RuntimeError("inserted user vanished within the transaction")
         return _user(row)
 
     async def get(self, user_id: UUID) -> User | None:
@@ -76,21 +91,33 @@ class PostgresRefreshSessionRepository:
         row = await self._session.get(RefreshSessionRow, session_id)
         return _refresh(row) if row else None
 
-    async def is_active(self, session_id: UUID) -> bool:
+    async def is_active(self, session_id: UUID, now: datetime) -> bool:
+        # H6: one query — session live *and* not expired *and* its user still enabled.
         result = await self._session.execute(
-            select(RefreshSessionRow.id).where(
-                RefreshSessionRow.id == session_id, RefreshSessionRow.revoked_at.is_(None)
+            select(RefreshSessionRow.id)
+            .join(UserRow, UserRow.id == RefreshSessionRow.user_id)
+            .where(
+                RefreshSessionRow.id == session_id,
+                RefreshSessionRow.revoked_at.is_(None),
+                RefreshSessionRow.expires_at > now,
+                UserRow.is_active.is_(True),
             )
         )
         return result.scalar_one_or_none() is not None
 
-    async def revoke(
-        self, session_id: UUID, at: datetime, replaced_by: UUID | None = None
-    ) -> None:
-        await self._session.execute(
+    async def revoke(self, session_id: UUID, at: datetime, replaced_by: UUID | None = None) -> int:
+        result = await self._session.execute(
             update(RefreshSessionRow)
             .where(RefreshSessionRow.id == session_id, RefreshSessionRow.revoked_at.is_(None))
             .values(revoked_at=at, replaced_by=replaced_by)
+        )
+        return int(result.rowcount or 0)  # H7: the caller needs to know whether it won
+
+    async def link_replacement(self, session_id: UUID, replaced_by: UUID) -> None:
+        await self._session.execute(
+            update(RefreshSessionRow)
+            .where(RefreshSessionRow.id == session_id)
+            .values(replaced_by=replaced_by)
         )
 
     async def revoke_all_for_user(self, user_id: UUID, at: datetime) -> int:

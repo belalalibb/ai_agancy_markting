@@ -20,6 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.core import database
 from src.core.config import Settings, get_settings
+from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
 from src.modules.social_connect import router as social_connect_router
 from src.modules.tenancy import router as tenancy_router
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    configure_logging()  # H2: httpx/httpcore at WARNING + root secret-redaction filter
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,

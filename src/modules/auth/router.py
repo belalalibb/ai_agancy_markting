@@ -9,8 +9,9 @@
 | POST   | /auth/logout-all | Bearer                | —                            |
 | GET    | /auth/me         | Bearer                | —                            |
 
-Refresh cookie: ``__Host-refresh`` (``refresh`` in development), ``HttpOnly; SameSite=Strict;
+Refresh cookie: ``__Secure-refresh`` (``refresh`` in development), ``HttpOnly; SameSite=Strict;
 Secure`` (except development), ``Path=/api/v1/auth``, ``Max-Age=AUTH_REFRESH_TTL_SECONDS``.
+(H5: ``__Secure-`` not ``__Host-`` — the latter requires ``Path=/`` and is dropped by browsers.)
 CSRF (cookie routes): ``X-Requested-With: XMLHttpRequest`` **or** ``Origin`` in the allowlist.
 Error bodies: ``{"error": "<code>", "message": "..."}``.
 """
@@ -32,6 +33,7 @@ from src.modules.auth.dependencies import (
     LOGIN_BLOCK_SECONDS,
     LOGIN_FAILURE_LIMIT,
     CurrentUser,
+    CurrentUserFresh,
     OptionalCurrentUser,
     client_ip,
     get_access_token_codec,
@@ -300,7 +302,8 @@ async def logout_all(
 
 
 @router.get("/me", response_model=MeOut, summary="Current user + tenant")
-async def me(actor: CurrentUser, service: Service) -> MeOut:
+async def me(actor: CurrentUserFresh, service: Service) -> MeOut:
+    """H6 (review §3-2): ``CurrentUserFresh`` — a logout / disabled user is refused at once."""
     try:
         user, tenant = await service.me(actor)
     except AuthError as exc:

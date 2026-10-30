@@ -139,3 +139,28 @@ class UnknownPageIdsError(ValueError):
     def __init__(self, page_ids: list[str]) -> None:
         super().__init__(f"unknown page ids: {', '.join(page_ids)}")
         self.page_ids = list(page_ids)
+
+
+class NotConnectionOwnerError(PermissionError):
+    """SPRINT-04.1 H1: only the tenant that performed the OAuth flow may change the
+    selection of (or, unless brand OWNER, disconnect) a connection.
+
+    Mapped to **403** ``{"error": "not_connection_owner"}`` — the connection is visible to the
+    caller, so hiding it (404) would be wrong.
+    """
+
+    error = "not_connection_owner"
+
+    def __init__(self, message: str | None = None) -> None:
+        self.message = message or "only the tenant that connected this account may do this"
+        super().__init__(self.message)
+
+
+class PageNotSelectableError(ValueError):
+    """SPRINT-04.1 H3: a requested Page exists but Meta returned no ``access_token`` for it
+    (the user has no role on the Page). Mapped to **422** ``page_not_selectable``; no change.
+    """
+
+    def __init__(self, page_ids: list[str]) -> None:
+        super().__init__(f"pages without a page token: {', '.join(page_ids)}")
+        self.page_ids = list(page_ids)

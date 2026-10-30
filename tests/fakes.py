@@ -59,6 +59,7 @@ class FakeUserRepository:
 class FakeRefreshSessionRepository:
     def __init__(self, store: FakeStore) -> None:
         self._s = store
+        self.revoke_returns: int | None = None
 
     async def add(self, session: RefreshSession) -> RefreshSession:
         self._s.sessions[session.id] = session
@@ -67,18 +68,29 @@ class FakeRefreshSessionRepository:
     async def get(self, session_id: UUID) -> RefreshSession | None:
         return self._s.sessions.get(session_id)
 
-    async def is_active(self, session_id: UUID) -> bool:
+    async def is_active(self, session_id: UUID, now: datetime) -> bool:
         session = self._s.sessions.get(session_id)
-        return session is not None and session.revoked_at is None
+        if session is None or session.revoked_at is not None or session.is_expired(now):
+            return False
+        user = self._s.users.get(session.user_id)
+        # H6: unknown user (ad-hoc test actors) counts as active; a disabled one does not.
+        return user is None or user.is_active
 
-    async def revoke(
-        self, session_id: UUID, at: datetime, replaced_by: UUID | None = None
-    ) -> None:
+    async def revoke(self, session_id: UUID, at: datetime, replaced_by: UUID | None = None) -> int:
+        if self.revoke_returns is not None:  # H7-U1: simulate losing the UPDATE race
+            return self.revoke_returns
         session = self._s.sessions.get(session_id)
         if session is not None and session.revoked_at is None:
             self._s.sessions[session_id] = session.model_copy(
                 update={"revoked_at": at, "replaced_by": replaced_by}
             )
+            return 1
+        return 0
+
+    async def link_replacement(self, session_id: UUID, replaced_by: UUID) -> None:
+        session = self._s.sessions.get(session_id)
+        if session is not None:
+            self._s.sessions[session_id] = session.model_copy(update={"replaced_by": replaced_by})
 
     async def revoke_all_for_user(self, user_id: UUID, at: datetime) -> int:
         count = 0
@@ -331,6 +343,22 @@ class FakeConnectedAccountRepository:
             return False
         del self.rows[account_id]
         return True
+
+
+class FakeStatusMarker:
+    """H3: records out-of-band status writes and applies them to the shared store."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+        self.calls: list[tuple[UUID, UUID, AccountStatus]] = []
+
+    async def mark_out_of_band(
+        self, brand_id: UUID, account_id: UUID, status: AccountStatus
+    ) -> bool:
+        self.calls.append((brand_id, account_id, status))
+        return await FakeConnectedAccountRepository(self._s).set_status(
+            brand_id, account_id, status
+        )
 
 
 # ------------------------------------------------------------ stub session --

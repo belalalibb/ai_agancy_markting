@@ -231,13 +231,13 @@ def test_revoke_unknown_grant_or_wrong_brand_404(
 
 # ------------------------------------------------------------ B-U5 / B8 ---
 def _stub_graph(graph_mock: respx.MockRouter, user_id: str, name: str) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944))
     )
     graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
         return_value=httpx.Response(200, json=me_payload(user_id, name))
     )
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(user_id))
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(1)))

@@ -30,6 +30,7 @@ from src.modules.social_connect.exceptions import (
 )
 from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.social_connect.service import MetaConnectService
+from src.modules.tenancy.domain.access import BrandRole
 
 from tests.conftest import (
     BRAND2_ID,
@@ -70,10 +71,10 @@ def service(
 
 
 def _stub_oauth(graph_mock: respx.MockRouter, *, me_id: str = "10001") -> None:
-    graph_mock.get("/oauth/access_token", params={"grant_type": "fb_exchange_token"}).mock(
-        return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944))
-    )
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post(
+        "/oauth/access_token", data__contains={"grant_type": "fb_exchange_token"}
+    ).mock(return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944)))
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(200, json=token_payload("SHORT_LIVED", 5000))
     )
     graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
@@ -83,7 +84,7 @@ def _stub_oauth(graph_mock: respx.MockRouter, *, me_id: str = "10001") -> None:
 
 def _stub_happy_path(graph_mock: respx.MockRouter) -> None:
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload()))
@@ -136,7 +137,7 @@ async def test_complete_connection_uses_debug_token_for_scopes_and_expiry(
     service: MetaConnectService, signer: OAuthStateSigner, graph_mock: respx.MockRouter
 ) -> None:
     _stub_oauth(graph_mock, me_id="777")
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(
             200,
             json=debug_token_payload(
@@ -157,7 +158,7 @@ async def test_complete_connection_debug_token_zero_expiry_means_unknown(
     service: MetaConnectService, signer: OAuthStateSigner, graph_mock: respx.MockRouter
 ) -> None:
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(expires_at=0))
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json={"data": []}))
@@ -173,7 +174,7 @@ async def test_complete_connection_debug_token_failure_keeps_identity_from_me(
 ) -> None:
     """``/debug_token`` degradation only loses scopes/expiry — never the identity (F3)."""
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(
             400,
             json={
@@ -198,7 +199,7 @@ async def test_complete_connection_debug_token_190_is_fatal(
     service: MetaConnectService, signer: OAuthStateSigner, graph_mock: respx.MockRouter
 ) -> None:
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(401, json=oauth_error_payload(code=190, subcode=463))
     )
     with pytest.raises(MetaTokenExpiredError):
@@ -212,7 +213,7 @@ async def test_complete_connection_uses_me_for_identity_and_name(
     """H3 — ``provider_user_id``/``provider_user_name`` come from ``/me``, even when
     ``/debug_token`` omits ``user_id`` and there are no Pages at all."""
     _stub_oauth(graph_mock, me_id="424242")
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json={"data": {"is_valid": True}})
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json={"data": []}))
@@ -230,7 +231,7 @@ async def test_complete_connection_rejects_debug_is_valid_false(
 ) -> None:
     """H4 — ``is_valid: false`` is fatal and surfaces Meta's own error code."""
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(is_valid=False, error_code=190))
     )
     pages_route = graph_mock.get("/me/accounts").mock(
@@ -248,7 +249,7 @@ async def test_complete_connection_rejects_debug_is_valid_false_defaults_code_19
     service: MetaConnectService, signer: OAuthStateSigner, graph_mock: respx.MockRouter
 ) -> None:
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(is_valid=False))
     )
     with pytest.raises(MetaTokenInvalidError) as exc_info:
@@ -264,7 +265,7 @@ async def test_complete_connection_rejects_foreign_app_id(
 ) -> None:
     """H5 — a token issued to another Meta app is never persisted."""
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(app_id="999999999999999"))
     )
     with pytest.raises(MetaTokenForeignAppError, match="app_id"):
@@ -280,7 +281,7 @@ async def test_complete_connection_rejects_user_id_mismatch(
 ) -> None:
     """H6 — ``/debug_token.user_id`` must agree with ``/me.id``."""
     _stub_oauth(graph_mock, me_id="10001")
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(user_id="20002"))
     )
     with pytest.raises(MetaTokenForeignAppError, match="user_id does not match /me"):
@@ -295,10 +296,10 @@ async def test_complete_connection_get_me_failure_is_fatal(
     fake_repo: FakeConnectedAccountRepository,
 ) -> None:
     """H7 — without a trusted identity nothing is stored (no derived identity)."""
-    graph_mock.get("/oauth/access_token", params={"grant_type": "fb_exchange_token"}).mock(
-        return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944))
-    )
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post(
+        "/oauth/access_token", data__contains={"grant_type": "fb_exchange_token"}
+    ).mock(return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944)))
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(200, json=token_payload("SHORT_LIVED", 5000))
     )
     graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
@@ -309,7 +310,7 @@ async def test_complete_connection_get_me_failure_is_fatal(
             },
         )
     )
-    debug_route = graph_mock.get("/debug_token").mock(
+    debug_route = graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
     with pytest.raises(MetaGraphError):
@@ -329,7 +330,7 @@ def test_no_fallback_identity_symbol_exists() -> None:
 async def test_verify_state_rejects_garbage_before_any_graph_call(
     service: MetaConnectService, graph_mock: respx.MockRouter
 ) -> None:
-    route = graph_mock.get("/oauth/access_token").mock(return_value=httpx.Response(200, json={}))
+    route = graph_mock.post("/oauth/access_token").mock(return_value=httpx.Response(200, json={}))
     with pytest.raises(InvalidOAuthStateError):
         service.verify_state("garbage")
     assert route.call_count == 0
@@ -338,7 +339,7 @@ async def test_verify_state_rejects_garbage_before_any_graph_call(
 async def test_complete_connection_propagates_expired_token_error(
     service: MetaConnectService, signer: OAuthStateSigner, graph_mock: respx.MockRouter
 ) -> None:
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(400, json=oauth_error_payload())
     )
     with pytest.raises(MetaTokenExpiredError):
@@ -367,7 +368,7 @@ async def test_page_without_access_token_is_stored_as_none(
     service: MetaConnectService, signer: OAuthStateSigner, graph_mock: respx.MockRouter
 ) -> None:
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
     graph_mock.get("/me/accounts").mock(
@@ -390,9 +391,10 @@ async def test_list_get_disconnect_are_brand_scoped(
     assert await service.list_connections(BRAND2_ID) == []
     assert await service.get_connection(BRAND_ID, account.id) is not None
     assert await service.get_connection(BRAND2_ID, account.id) is None
-    assert await service.disconnect(BRAND2_ID, account.id) is False
-    assert await service.disconnect(BRAND_ID, account.id) is True
-    assert await service.disconnect(BRAND_ID, account.id) is False
+    as_owner = {"actor_tenant_id": OWNER_ID, "actor_role": BrandRole.OWNER}
+    assert await service.disconnect(BRAND2_ID, account.id, **as_owner) is False
+    assert await service.disconnect(BRAND_ID, account.id, **as_owner) is True
+    assert await service.disconnect(BRAND_ID, account.id, **as_owner) is False
     assert await service.get_connection(BRAND_ID, uuid4()) is None
 
 
@@ -404,7 +406,7 @@ async def test_single_page_is_auto_selected_with_token(
     fake_repo: FakeConnectedAccountRepository,
 ) -> None:
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(1)))
@@ -416,7 +418,9 @@ async def test_single_page_is_auto_selected_with_token(
 
 
 async def test_select_pages_unknown_connection_returns_none(service: MetaConnectService) -> None:
-    assert await service.select_pages(BRAND_ID, uuid4(), ["1001"]) is None
+    assert (
+        await service.select_pages(BRAND_ID, uuid4(), ["1001"], actor_tenant_id=OWNER_ID) is None
+    )
 
 
 async def test_select_pages_dedupes_requested_ids(
@@ -426,12 +430,14 @@ async def test_select_pages_dedupes_requested_ids(
     encryption: TokenEncryptionService,
 ) -> None:
     _stub_oauth(graph_mock)
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(3)))
     account = await service.complete_connection(OWNER_ID, BRAND_ID, code="C")
-    updated = await service.select_pages(BRAND_ID, account.id, ["1002", "1002"])
+    updated = await service.select_pages(
+        BRAND_ID, account.id, ["1002", "1002"], actor_tenant_id=OWNER_ID
+    )
     assert updated is not None
     by_id = {p.page_id: p for p in updated.pages}
     assert by_id["1002"].is_selected is True
