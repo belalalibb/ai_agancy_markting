@@ -268,4 +268,4 @@ git diff --name-only origin/main...HEAD | grep -E "^(ARCHITECTURE_LOCK|SESSION_R
 2. 🛡️ **حماية الفرع `main`**: الفحوص الخمسة Required + Require PR + up-to-date (الفحوص ظاهرة الآن بعد PR #7).
 3. **قرار مؤجل (لا يحجب 04):** العضوية المتعددة داخل المستأجر (`tenant_members` بأدوار) — التوصية: SPRINT-05 أو 06 حسب أولوية المحتوى.
 4. **قرار مؤجل:** تفويض `MANAGER ⇒ VIEWER` — مرفوض حالياً (مراجعة 03 §4-س2)؛ يُعاد فتحه مع `tenant_members`.
-5. بعد اعتماد SPRINT-04 ينقل المخطط إلى Hub: `DECISION_LOG` (D-056/057/058 + Tenancy + Auth)، `SECURITY_BASELINE` (Fernet exception، JWT/Refresh كما نُفّذ، certifi MPL-2.0)، `DATA_AND_INTEGRATIONS` (المخطط الحالي)، `DEFERRED_DECISIONS` (البندان 3 و4).
+5. ✅ **أُنجز مبكراً (PR #10):** Hub docs مُزامَنة — `DECISION_LOG` D-056…D-063، `SECURITY_BASELINE`، `DATA_AND_INTEGRATIONS`، `DEFERRED_DECISIONS`، `CHANGELOG`. بعد اعتماد SPRINT-04 يُضاف فقط سطر «Auth ✅» في جدول حالة التنفيذ.

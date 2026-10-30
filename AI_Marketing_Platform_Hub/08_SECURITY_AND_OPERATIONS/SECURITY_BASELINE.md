@@ -13,6 +13,24 @@
    - تفعيل كود التطهير المدمج في `libs/envelope` الذي يقوم بفحص النصوص آلياً وحذف أي نص يطابق نمط المفاتيح المشهورة (مثل `gsk_`, `sk-`, `hf_`, `Bearer `) قبل تسجيلها أو نقلها.
 3. **تشفير مفاتيح العملاء (BYOK Encryption at Rest):**
    - عندما يُدخل العميل مفتاحه الخاص (مثل مفتاح OpenAI أو ElevenLabs)، يُشفر المفتاح في قاعدة البيانات باستخدام خوارزمية **AES-256-GCM** مع مفتاح تشفير رئيسي مخزن في خادم إدارة الأسرار.
+   - **استثناء مرحلي موثَّق (D-058، قرار المالك 2026-10-29):** التنفيذ الحالي لتوكنات Meta في `src/core/security.py` يستخدم `MultiFernet` (AES-128-CBC + HMAC-SHA256، تشفير مُوثَّق مع تدوير مفاتيح)، محصوراً خلف واجهة `TokenEncryptionService`. الانتقال إلى AES-256-GCM يتم بتبديل التنفيذ خلف الواجهة + هجرة إعادة تشفير، دون تغيير أي مستهلك.
 4. **المصادقة والتحكم بالصلاحيات (RBAC & JWT):**
    - استخدام رموز JWT قصيرة الأجل (15 دقيقة) مع Refresh Tokens مشفرة في ملفات تعريف ارتباط آمنة (HttpOnly, Secure Cookies).
    - التحقق الصارم من صلاحيات المستخدم في كل طلب برمجياً لضمان عدم وصول أي مستخدم لبيانات شركة أخرى.
+   - **المواصفة التنفيذية المعتمدة (SPRINT-04):** Argon2id لكلمات المرور (`argon2-cffi`)؛ JWT وصول HS256 بعمر 900 ثانية مع `iss`/`aud`/خوارزمية صريحة؛ Refresh **دوّار** في كوكي `__Host-refresh` (HttpOnly, Secure, SameSite=Strict, Path=/api/v1/auth) يُخزَّن منه `sha256` فقط؛ **كشف إعادة الاستخدام يُبطل كل جلسات المستخدم**؛ CSRF برأس مخصص أو Origin ضمن قائمة؛ دخول بتوقيت ثابت؛ المسارات الحساسة تتحقق من الجلسة في DB (`CurrentUserFresh`). ممنوع `python-jose` و`passlib`.
+
+---
+
+## 📊 2. حالة التنفيذ الفعلية (تُحدَّث من مراجعات المخطط)
+
+| البند | الحالة (2026-10-30، `main` @ `8f1f246`) | المرجع |
+|---|---|---|
+| Zero-Secret في الكود والمستودع | ✅ فحص أسرار يدوي في كل مراجعة + `gitleaks` في CI على كامل التاريخ | `.github/workflows/ci.yml` |
+| Zero-Secret في واجهات API | ✅ حارس اختباري على `/openapi.json`: لا حقل باسم يحوي `token` إلا `has_page_token` | `tests/modules/social_connect/test_router.py` |
+| تشفير توكنات Meta المخزَّنة | ✅ MultiFernet خلف `TokenEncryptionService` (استثناء D-058) | `src/core/security.py` |
+| `state` في OAuth | ✅ HMAC موقَّع `{t, b, n, iat}` بمدة صلاحية؛ اختبار تلاعب حتمي على مستوى البايت | `src/core/oauth_state.py` |
+| هوية Meta | ✅ من `/me` + `appsecret_proof`؛ `/debug_token` مُتحقَّق (`is_valid`, `app_id`, `user_id`) | `src/modules/social_connect/service.py` |
+| عزل المستأجرين | ✅ `brand_id` + `BrandAccessResolver` (404 عند انعدام الوصول) | `src/modules/tenancy/` |
+| **هوية الفاعل** | ⚠️ **مُدَّعاة ذاتياً** (`?tenant_id=`) — الفجوة الوحيدة المعروفة؛ **تُغلق في SPRINT-04** (JWT + Refresh كما في §1-4) | `CURRENT_DIRECTIVE.md` |
+| تراخيص شجرة التشغيل | ✅ 34–37 حزمة كلها MIT/BSD/Apache/PSF؛ `certifi` بـ **MPL-2.0** مقبولة بوعي (ترخيص ملفّي ضعيف الـcopyleft، لا يمسّ النواة) | `scripts/check_licenses.py` |
+| تحديد معدل الطلبات | ⏳ أدنى داخل العملية في SPRINT-04؛ Redis لاحقاً | — |
