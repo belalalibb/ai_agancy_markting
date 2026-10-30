@@ -12,7 +12,7 @@ Run with::
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
@@ -51,6 +51,7 @@ from tests.conftest import (
     FAKE_STATE_SECRET,
     OWNER_ID,
     STRANGER_ID,
+    USER_BY_TENANT,
     debug_token_payload,
     me_payload,
     pages_payload,
@@ -1887,4 +1888,256 @@ def test_a1_i1_resync_on_reauth_required_row_is_409_and_touches_nothing_on_pg(
             scalar=True,
         )
         is True
+    )
+
+
+# ================================================================ SPRINT-06 Part B
+CONTENT = f"{API}/brands/{BRAND_ID}/content"
+HUMAN = '\'{"kind": "human"}\'::jsonb'
+
+
+def _content_create(client: TestClient, headers: dict[str, str], **overrides: object) -> dict:
+    payload = {"channel": "facebook_page", "body": "نص تجريبي للمراجعة", **overrides}
+    res = client.post(f"{CONTENT}/items", json=payload, headers=headers)
+    assert res.status_code == 201, res.text
+    return res.json()
+
+
+def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
+    """B1-M1 — ``0005`` up ⇒ edge inserts (5000-char body OK; 5001 chars violates the CHECK;
+    ``scheduled`` without ``scheduled_for`` violates the CHECK) ⇒ down ⇒ up."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    command.downgrade(cfg, "0004")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
+    tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert not {"content_items", "content_revisions", "approval_events"} & tables
+    cols = {
+        r[0]
+        for r in _rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'social_connections'"
+        )
+    }
+    assert "scopes_verified" not in cols
+
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
+    _seed_fresh()
+    item_id, rev_id = uuid4(), uuid4()
+    _run(
+        "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+        "VALUES (:id, :b, :t, 'facebook_page', 'draft')",
+        {"id": item_id, "b": BRAND_ID, "t": OWNER_ID},
+    )
+    _run(
+        "INSERT INTO content_revisions (id, item_id, revision_no, body, provenance, "
+        "created_by_tenant_id) VALUES (:id, :item, 1, :body, CAST(:prov AS JSONB), :t)",
+        {
+            "id": rev_id,
+            "item": item_id,
+            "body": "x" * 5000,
+            "prov": '{"kind": "human"}',
+            "t": OWNER_ID,
+        },
+    )
+    _run(
+        "UPDATE content_items SET current_revision_id = :r WHERE id = :id",
+        {"r": rev_id, "id": item_id},
+    )
+    with pytest.raises(IntegrityError, match="ck_content_revisions_body_length"):
+        _run(
+            "INSERT INTO content_revisions (id, item_id, revision_no, body, provenance, "
+            "created_by_tenant_id) VALUES (:id, :item, 2, :body, CAST(:prov AS JSONB), :t)",
+            {
+                "id": uuid4(),
+                "item": item_id,
+                "body": "x" * 5001,
+                "prov": '{"kind": "human"}',
+                "t": OWNER_ID,
+            },
+        )
+    with pytest.raises(IntegrityError, match="ck_content_items_scheduled_for_iff_scheduled"):
+        _run("UPDATE content_items SET status = 'scheduled' WHERE id = :id", {"id": item_id})
+    with pytest.raises(IntegrityError, match="ck_content_items_scheduled_for_iff_scheduled"):
+        _run("UPDATE content_items SET scheduled_for = now() WHERE id = :id", {"id": item_id})
+    with pytest.raises(IntegrityError, match="ck_content_items_status"):
+        _run("UPDATE content_items SET status = 'published' WHERE id = :id", {"id": item_id})
+    with pytest.raises(IntegrityError, match="ck_approval_events_action"):
+        _run(
+            "INSERT INTO approval_events (id, item_id, revision_id, action, actor_tenant_id, "
+            "actor_user_id) VALUES (:id, :item, :rev, 'liked', :t, :u)",
+            {
+                "id": uuid4(),
+                "item": item_id,
+                "rev": rev_id,
+                "t": OWNER_ID,
+                "u": USER_BY_TENANT[OWNER_ID],
+            },
+        )
+    # The legal combination passes.
+    _run(
+        "UPDATE content_items SET status = 'scheduled', "
+        "scheduled_for = now() + interval '1 hour' WHERE id = :id",
+        {"id": item_id},
+    )
+    # Cascade: deleting the item removes its revisions.
+    _run("DELETE FROM content_items WHERE id = :id", {"id": item_id})
+    assert _run("SELECT COUNT(*) FROM content_revisions", scalar=True) == 0
+
+    command.downgrade(cfg, "0004")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"
+
+
+def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """B2-I1 — ``schedule`` consults the real ``social_connections`` rows: an unselected Page
+    is refused, a selected one is accepted, and ``scheduled_for`` lands in the DB with the
+    CHECK satisfied; ``unschedule`` clears it again."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    when = (datetime.now(tz=UTC) + timedelta(hours=2)).isoformat()
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        _select_1001(client, cid, owner)
+        item_id = _content_create(client, owner, channel="instagram")["id"]
+        assert client.post(f"{CONTENT}/items/{item_id}/submit", headers=owner).status_code == 200
+        assert client.post(f"{CONTENT}/items/{item_id}/approve", headers=owner).status_code == 200
+        res = client.post(
+            f"{CONTENT}/items/{item_id}/schedule",
+            json={"scheduled_for": when, "target_page_id": "1002"},  # not selected
+            headers=owner,
+        )
+        assert res.status_code == 422
+        assert res.json()["detail"]["error"] == "target_page_not_selected"
+        res = client.post(
+            f"{CONTENT}/items/{item_id}/schedule",
+            json={"scheduled_for": when, "target_page_id": "1001"},  # selected + IG linked
+            headers=owner,
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "scheduled"
+        row = _rows(
+            "SELECT status, target_page_id, scheduled_for IS NOT NULL FROM content_items "
+            "WHERE id = :id",
+            {"id": UUID(item_id)},
+        )
+        assert row == [("scheduled", "1001", True)]
+        res = client.post(f"{CONTENT}/items/{item_id}/unschedule", headers=owner)
+        assert res.status_code == 200 and res.json()["scheduled_for"] is None
+        detail = client.get(f"{CONTENT}/items/{item_id}", headers=owner).json()
+        assert [e["action"] for e in detail["approval_events"]] == ["submitted", "approved"]
+        assert detail["revisions"][0]["provenance"] == {"kind": "human"}
+
+
+def test_b3_i1_concurrent_approve_and_reject_exactly_one_wins_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B3-I1 — ``asyncio.gather(approve, reject)`` on one ``pending_approval`` item through
+    two independent engines ⇒ exactly one 200 and one 409 ``invalid_transition``; exactly
+    one decision event is written."""
+    _seed_fresh()
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        item_id = _content_create(client, owner)["id"]
+        assert client.post(f"{CONTENT}/items/{item_id}/submit", headers=owner).status_code == 200
+
+    from src.main import create_app
+
+    async def _race() -> list[httpx.Response]:
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            return list(
+                await asyncio.gather(
+                    c1.post(f"{CONTENT}/items/{item_id}/approve", headers=owner),
+                    c2.post(
+                        f"{CONTENT}/items/{item_id}/reject",
+                        json={"note": "needs rework"},
+                        headers=owner,
+                    ),
+                )
+            )
+
+    responses = asyncio.run(_race())
+    codes = sorted(r.status_code for r in responses)
+    assert codes == [200, 409], [r.text for r in responses]
+    loser = next(r for r in responses if r.status_code == 409)
+    assert loser.json()["detail"]["error"] == "invalid_transition"
+    winner_status = next(r for r in responses if r.status_code == 200).json()["status"]
+    assert winner_status in {"approved", "rejected"}
+    assert (
+        _run("SELECT status FROM content_items WHERE id = :id", {"id": UUID(item_id)}, scalar=True)
+        == winner_status
+    )
+    actions = [
+        r[0]
+        for r in _rows(
+            "SELECT action FROM approval_events WHERE item_id = :id ORDER BY created_at",
+            {"id": UUID(item_id)},
+        )
+    ]
+    assert actions == ["submitted", winner_status]
+
+
+def test_b3_list_keyset_and_body_edit_on_pg(integration_app: FastAPI) -> None:
+    """B3 on PG — keyset pagination (``created_at DESC, id DESC`` with the opaque cursor),
+    ``?status=`` filter, and a body edit after approval that writes revision 2, flips the row
+    back to ``draft`` and logs the automatic ``withdrawn`` event."""
+    _seed_fresh()
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        ids = [_content_create(client, owner)["id"] for _ in range(5)]
+        assert client.post(f"{CONTENT}/items/{ids[0]}/submit", headers=owner).status_code == 200
+        first = client.get(f"{CONTENT}/items", params={"limit": 2}, headers=owner).json()
+        assert len(first["items"]) == 2 and first["has_more"] is True
+        second = client.get(
+            f"{CONTENT}/items", params={"limit": 2, "cursor": first["next_cursor"]}, headers=owner
+        ).json()
+        third = client.get(
+            f"{CONTENT}/items", params={"limit": 2, "cursor": second["next_cursor"]}, headers=owner
+        ).json()
+        seen = [i["id"] for page in (first, second, third) for i in page["items"]]
+        assert sorted(seen) == sorted(ids) and third["has_more"] is False
+        pending = client.get(
+            f"{CONTENT}/items", params={"status": "pending_approval"}, headers=owner
+        ).json()
+        assert [i["id"] for i in pending["items"]] == [ids[0]]
+        missing = client.get(f"{CONTENT}/items/{uuid4()}", headers=owner)
+        assert missing.status_code == 404
+        assert client.post(f"{CONTENT}/items/{ids[0]}/approve", headers=owner).status_code == 200
+        edited = client.put(
+            f"{CONTENT}/items/{ids[0]}/body", json={"body": "نسخة معدلة"}, headers=owner
+        )
+        assert edited.status_code == 200 and edited.json()["status"] == "draft"
+        detail = client.get(f"{CONTENT}/items/{ids[0]}", headers=owner).json()
+        assert [r["revision_no"] for r in detail["revisions"]] == [2, 1]
+        assert [e["action"] for e in detail["approval_events"]] == [
+            "submitted",
+            "approved",
+            "withdrawn",
+        ]
+    assert _rows(
+        "SELECT status, current_revision_id IS NOT NULL FROM content_items WHERE id = :id",
+        {"id": UUID(ids[0])},
+    ) == [("draft", True)]
+    assert (
+        _run(
+            "SELECT COUNT(*) FROM content_revisions WHERE item_id = :id",
+            {"id": UUID(ids[0])},
+            scalar=True,
+        )
+        == 2
     )

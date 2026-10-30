@@ -29,6 +29,7 @@ from tests.fakes import (
     FakeBrandAccessResolver,
     FakeBrandRepository,
     FakeConnectedAccountRepository,
+    FakeContentRepository,
     FakePasswordHasher,
     FakeRateLimiter,
     FakeRefreshSessionRepository,
@@ -214,6 +215,11 @@ def auth_headers(store: FakeStore, codec: AccessTokenCodec) -> Callable[[UUID], 
 
 
 @pytest.fixture
+def content_repo() -> FakeContentRepository:
+    return FakeContentRepository()
+
+
+@pytest.fixture
 def app(
     settings: Settings,
     store: FakeStore,
@@ -221,6 +227,7 @@ def app(
     status_marker: FakeStatusMarker,
     hasher: FakePasswordHasher,
     limiter: FakeRateLimiter,
+    content_repo: FakeContentRepository,
 ) -> FastAPI:
     """App wired to the fakes — isolated tests never touch PostgreSQL."""
     from src.main import create_app
@@ -230,6 +237,7 @@ def app(
         get_refresh_session_repository,
         get_user_repository,
     )
+    from src.modules.content.router import get_content_repository
     from src.modules.social_connect.router import get_repository, get_status_marker
     from src.modules.tenancy.dependencies import (
         get_brand_access_resolver,
@@ -242,6 +250,7 @@ def app(
     application = create_app(settings)
     application.dependency_overrides[get_repository] = lambda: fake_repo
     application.dependency_overrides[get_status_marker] = lambda: status_marker
+    application.dependency_overrides[get_content_repository] = lambda: content_repo
     application.dependency_overrides[get_user_repository] = lambda: FakeUserRepository(store)
     application.dependency_overrides[get_refresh_session_repository] = lambda: (
         FakeRefreshSessionRepository(store)

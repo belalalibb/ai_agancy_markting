@@ -41,7 +41,7 @@ IDS = [f"{m} {p}" for m, p in PROTECTED]
 
 
 def _concrete(template: str) -> str:
-    for name in ("brand_id", "connection_id", "grant_id", "tenant_id"):
+    for name in ("brand_id", "connection_id", "grant_id", "tenant_id", "item_id"):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
     return template
 
@@ -49,8 +49,8 @@ def _concrete(template: str) -> str:
 def test_protected_route_count_is_reported() -> None:
     """Printed into the executor report (§7); fails loudly if the surface changes."""
     print(f"\nB-U1 protected routes: {PROTECTED_ROUTE_COUNT}")
-    # auth: logout, logout-all, me (3) + tenancy: 7 + social: 5
-    assert PROTECTED_ROUTE_COUNT == 18, PROTECTED  # SPRINT-05: +resync, +posts, +ig media
+    # auth: logout, logout-all, me (3) + tenancy: 7 + social: 8 + content: 11 (SPRINT-06)
+    assert PROTECTED_ROUTE_COUNT == 29, PROTECTED
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)
