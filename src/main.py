@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -20,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.core import database
 from src.core.config import Settings, get_settings
+from src.core.http import build_http_client
 from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
 from src.modules.content import router as content_router
@@ -38,10 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings: Settings = getattr(app.state, "settings", None) or get_settings()
     app.state.settings = settings
-    app.state.http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(settings.meta_http_timeout_seconds),
-        headers={"Accept": "application/json", "User-Agent": "ai-growth-os/0.1"},
-    )
+    app.state.http_client = build_http_client(settings)  # D-068: single outbound client
     try:
         yield
     finally:

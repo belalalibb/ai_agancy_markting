@@ -31,8 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.modules.ai_gateway.contract import AIError, ErrorCategory
 from src.modules.ai_gateway.dependencies import Gateway
-from src.modules.ai_gateway.exceptions import AIRateLimitedError, AIUpstreamError
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import Action
@@ -138,6 +138,33 @@ def to_http(exc: ContentError) -> HTTPException:
 
 
 Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
+
+# B-0 (D-067): the single HTTP map for the twelve provider error categories. Anything not
+# listed is a fixed 502 ``ai_upstream_unavailable`` — no provider text ever reaches clients.
+_AI_HTTP: dict[ErrorCategory, tuple[int, str]] = {
+    ErrorCategory.RATE_LIMITED: (status.HTTP_429_TOO_MANY_REQUESTS, "ai_rate_limited"),
+    ErrorCategory.QUOTA_EXCEEDED: (status.HTTP_429_TOO_MANY_REQUESTS, "ai_quota_exceeded"),
+    ErrorCategory.INVALID_CREDENTIAL: (
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "ai_provider_misconfigured",
+    ),
+    ErrorCategory.AUTH_EXPIRED: (status.HTTP_503_SERVICE_UNAVAILABLE, "ai_provider_misconfigured"),
+    ErrorCategory.CONTENT_REJECTED: (
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "ai_content_rejected",
+    ),
+}
+_AI_HTTP_DEFAULT = (status.HTTP_502_BAD_GATEWAY, "ai_upstream_unavailable")
+
+
+def _ai_error_to_http(exc: AIError) -> HTTPException:
+    http_status, error = _AI_HTTP.get(exc.category, _AI_HTTP_DEFAULT)
+    headers = None
+    if exc.category is ErrorCategory.RATE_LIMITED and exc.retry_after_ms is not None:
+        headers = {"Retry-After": str(max(1, -(-exc.retry_after_ms // 1000)))}
+    return HTTPException(
+        http_status, detail={"error": error, "category": exc.category.value}, headers=headers
+    )
 
 
 # ------------------------------------------------------------------ cursor --
@@ -536,12 +563,13 @@ async def archive_item(
         403: {"description": "insufficient_role"},
         404: {"description": "content_not_found"},
         409: {"description": "invalid_transition — only draft/rejected items can be generated"},
+        422: {"description": "ai_content_rejected"},
         429: {
             "description": "generation_rate_limited (20/h per brand) / "
-            "generation_budget_exceeded (daily tokens) / ai_rate_limited"
+            "generation_budget_exceeded (daily tokens) / ai_rate_limited / ai_quota_exceeded"
         },
-        502: {"description": "ai_upstream_unavailable (fixed body)"},
-        503: {"description": "ai_provider_not_configured"},
+        502: {"description": "ai_upstream_unavailable (fixed body; every other category)"},
+        503: {"description": "ai_provider_not_configured / ai_provider_misconfigured"},
     },
 )
 async def generate_item(
@@ -573,18 +601,6 @@ async def generate_item(
         )
     except ContentError as exc:
         raise to_http(exc) from exc
-    except AIRateLimitedError as exc:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"error": exc.error, "message": exc.message},
-            headers=(
-                {"Retry-After": str(exc.retry_after_seconds)}
-                if exc.retry_after_seconds is not None
-                else None
-            ),
-        ) from exc
-    except AIUpstreamError as exc:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, detail={"error": "ai_upstream_unavailable"}
-        ) from exc
+    except AIError as exc:
+        raise _ai_error_to_http(exc) from exc
     return ContentItemPublic.from_domain(item, current_body=await _body_of(service, item))

@@ -391,6 +391,7 @@ class ContentService:
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
             "latency_ms": result.latency_ms,
+            "credential_mode": result.credential_mode,
             "truncated": truncated,
         }
         if item.status is ContentStatus.REJECTED:

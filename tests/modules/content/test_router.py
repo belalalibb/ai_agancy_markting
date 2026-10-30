@@ -510,6 +510,7 @@ def test_a2_u1_channel_limit_enforced_on_create_and_update(
 def test_a2_u2_generate_truncates_to_channel_limit_and_records_it(
     client: TestClient, app: FastAPI, as_: Headers
 ) -> None:
+    from src.modules.ai_gateway.contract import Usage
     from src.modules.ai_gateway.dependencies import get_ai_gateway
     from src.modules.ai_gateway.gateway import CompletionResult
 
@@ -520,8 +521,7 @@ def test_a2_u2_generate_truncates_to_channel_limit_and_records_it(
                 provider="fake",
                 model="fake-1",
                 latency_ms=1,
-                prompt_tokens=5,
-                completion_tokens=9,
+                usage=Usage(prompt_tokens=5, completion_tokens=9),
             )
 
     app.dependency_overrides[get_ai_gateway] = lambda: LongProvider()
@@ -777,7 +777,7 @@ def test_b5_u4_provenance_and_usage_log(
     assert "Facebook Page" in fb and "5000" in fb and "English" in fb
 
 
-def test_b5_gateway_errors_map_to_429_502_503(
+def test_b5_gateway_errors_map_to_http_by_category(
     client: TestClient,
     as_: Headers,
     app,
@@ -785,8 +785,8 @@ def test_b5_gateway_errors_map_to_429_502_503(
 ) -> None:
     from pydantic import SecretStr
     from src.core.config import get_settings
+    from src.modules.ai_gateway.contract import AIError, ErrorCategory
     from src.modules.ai_gateway.dependencies import get_ai_gateway
-    from src.modules.ai_gateway.exceptions import AIRateLimitedError, AIUpstreamError
 
     owner = as_(OWNER_ID)
     item_id = _create(client, owner)["id"]
@@ -798,13 +798,35 @@ def test_b5_gateway_errors_map_to_429_502_503(
         async def complete(self, req):  # noqa: ANN001, ANN202
             raise self.exc
 
-    app.dependency_overrides[get_ai_gateway] = lambda: Boom(AIRateLimitedError(42))
-    res = _generate(client, owner, item_id)
-    assert res.status_code == 429 and res.json()["detail"]["error"] == "ai_rate_limited"
-    assert res.headers["Retry-After"] == "42"
-    app.dependency_overrides[get_ai_gateway] = lambda: Boom(AIUpstreamError())
-    res = _generate(client, owner, item_id)
-    assert res.status_code == 502 and res.json()["detail"] == {"error": "ai_upstream_unavailable"}
+    # B-0 (D-067): one HTTP map for the twelve categories.
+    expectations = {
+        ErrorCategory.RATE_LIMITED: (429, "ai_rate_limited"),
+        ErrorCategory.QUOTA_EXCEEDED: (429, "ai_quota_exceeded"),
+        ErrorCategory.INVALID_CREDENTIAL: (503, "ai_provider_misconfigured"),
+        ErrorCategory.AUTH_EXPIRED: (503, "ai_provider_misconfigured"),
+        ErrorCategory.CONTENT_REJECTED: (422, "ai_content_rejected"),
+        ErrorCategory.MODEL_UNAVAILABLE: (502, "ai_upstream_unavailable"),
+        ErrorCategory.PROVIDER_UNAVAILABLE: (502, "ai_upstream_unavailable"),
+        ErrorCategory.UNSUPPORTED_CAPABILITY: (502, "ai_upstream_unavailable"),
+        ErrorCategory.BAD_REQUEST: (502, "ai_upstream_unavailable"),
+        ErrorCategory.TIMEOUT: (502, "ai_upstream_unavailable"),
+        ErrorCategory.RETRYABLE_SERVER_ERROR: (502, "ai_upstream_unavailable"),
+        ErrorCategory.NON_RETRYABLE_ERROR: (502, "ai_upstream_unavailable"),
+    }
+    assert set(expectations) == set(ErrorCategory)
+    for category, (code, error) in expectations.items():
+        app.dependency_overrides[get_ai_gateway] = lambda c=category: Boom(
+            AIError(c, retry_after_ms=42_000, provider_code="x")
+        )
+        res = _generate(client, owner, item_id)
+        assert (res.status_code, res.json()["detail"]) == (
+            code,
+            {"error": error, "category": category.value},
+        ), category
+        if category is ErrorCategory.RATE_LIMITED:
+            assert res.headers["Retry-After"] == "42"
+        else:
+            assert "Retry-After" not in res.headers
     app.dependency_overrides.pop(get_ai_gateway)
     # 503 when openai_compatible is selected without a key (real dependency path).
     base = app.dependency_overrides.get(get_settings)
@@ -827,7 +849,8 @@ def test_b5_gateway_errors_map_to_429_502_503(
         )
         res = _generate(client, owner, item_id)
         assert res.status_code == 502 and res.json()["detail"] == {
-            "error": "ai_upstream_unavailable"
+            "error": "ai_upstream_unavailable",
+            "category": "provider_unavailable",  # connection refused ⇒ D-067 category
         }
         assert FAKE_AI_KEY not in res.text
     finally:

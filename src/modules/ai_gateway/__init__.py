@@ -5,10 +5,18 @@ HTTP provider over the shared ``httpx.AsyncClient``. Provider keys travel only i
 ``Authorization`` header and are never logged (SPRINT-06 §2-0 a).
 """
 
+from src.modules.ai_gateway.contract import AIError, ErrorCategory, Usage
 from src.modules.ai_gateway.gateway import (
     AIGateway,
     CompletionRequest,
     CompletionResult,
 )
 
-__all__ = ["AIGateway", "CompletionRequest", "CompletionResult"]
+__all__ = [
+    "AIError",
+    "AIGateway",
+    "CompletionRequest",
+    "CompletionResult",
+    "ErrorCategory",
+    "Usage",
+]
