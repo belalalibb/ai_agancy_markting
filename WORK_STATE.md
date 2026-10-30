@@ -9,9 +9,9 @@
 ## 1. ملخص الحالة العامة للمشروع (Project Snapshot)
 
 - **اسم المشروع:** AI Marketing Platform (AI Growth OS / BrandMind AI / QEVION)
-- **الحالة الإجمالية:** `SPRINT_04_DELIVERED_AWAITING_REVIEW`
-- **آخر تحديث للمؤشر:** 2026-10-30 — **المنفذ سلّم SPRINT-04** (PR #11، CI خضراء، 434 اختباراً، 99%) وينتظر مراجعة المخطط. سابقاً: المخطط راجع **SPRINT-03** مستقلاً في بيئة طازجة (PG 17.11؛ 315 اختباراً، 99.68%؛ CI خضراء بالفحوص الخمسة؛ هجرة 0003 مُختبَرة بحالات حدية) ⇒ **مقبول** ⇒ PR #7 دُمج في `main` @ `c88a721`. أُصدر توجيه **SPRINT-04** (وحدة المصادقة + هوية فاعل مُتحقَّق منها — إغلاق N1).
-- **المرحلة الحالية:** Phase 1 — من «منصة متعددة المستأجرين بهوية مُدَّعاة» إلى «هوية مُصادَقة (JWT + Refresh دوّار)» (SPRINT-04)
+- **الحالة الإجمالية:** `SPRINT_04_ACCEPTED_CONDITIONAL__HOTFIX_04_1_ISSUED`
+- **آخر تحديث للمؤشر:** 2026-10-30 — المخطط راجع **SPRINT-04** مستقلاً (PG 17.11؛ 434 اختباراً، 99%؛ CI خضراء) **وتحقق بالسطر من 8 ملاحظات رقابية خارجية — كلها ثابتة** (اثنتان P0 موروثتان من SPRINT-03: تسريب صفحات عملاء الوكالة/اختطاف الاختيار، وأسرار Graph في query params تُسجَّل في `httpx` — أُثبتت تجريبياً). القرار: **قبول مشروط** ⇒ PR #11 دُمج (`6f263ac`) لأنه يُغلق فجوة الهوية ولا يُدخل الـP0، **ولا بناء فوقه قبل `SPRINT-04.1-HOTFIX`** (H1–H8).
+- **المرحلة الحالية:** Phase 1 — تصحيح أمني إلزامي (SPRINT-04.1) قبل أي ميزة: عزل بيانات عملاء الوكالة، أسرار Graph خارج الروابط، كوكي Refresh صالح للمتصفحات
 - **الفرع المعتمد المستقر:** `main`
 - **فرع التطوير المستمر:** `work/implementation`
 - **المرجع المعرفي المعتمد:** مجلد `AI_Marketing_Platform_Hub/` (57 وثيقة تخصصية)
@@ -38,28 +38,26 @@
 
 ## 3. المهمة النشطة الحالية (Active Task)
 
-- **معرف المهمة:** `SPRINT-04-AUTH-AND-ACTOR-IDENTITY`
+- **معرف المهمة:** `SPRINT-04.1-HOTFIX`
 - **وثيقة التوجيه المعتمدة (المصدر الوحيد):** [`CURRENT_DIRECTIVE.md`](./CURRENT_DIRECTIVE.md)
-- **حالة المهمة:** `DELIVERED_AWAITING_PLANNER_REVIEW` — مُسلَّم على `work/implementation` في **PR #11** (https://github.com/belalalibb/ai_agancy_markting/pull/11): Part A `b2bd3ad`، Part B `b0a4ccf`، + كوميت التوثيق. CI خضراء (الفحوص الخمسة) على push وPR. التقرير الكامل في §7 من `CURRENT_DIRECTIVE.md`.
-- **الهدف:** (Part A) وحدة `auth`: جدولا `users` + `refresh_sessions`، Argon2id، JWT وصول HS256 قصير (15 دقيقة)، Refresh دوّار في كوكي HttpOnly/SameSite=Strict مع كشف إعادة الاستخدام (يُبطل كل الجلسات)، CSRF، تحديد معدل أدنى، `CurrentUser`/`CurrentUserFresh`. (Part B) `ActorTenantId` يُشتق من JWT؛ حذف `tenant_id` من كل المعاملات والأجسام؛ التسجيل ينشئ المستأجر؛ `POST /tenants` يُحذف؛ اختبار بارامتري «بلا Bearer ⇒ 401» على كل مسار محمي؛ هجرة `0004`.
-- **خارج النطاق:** OAuth اجتماعي للدخول، MFA، استعادة كلمة المرور، عضوية متعددة داخل المستأجر، أي ميزة منتج.
-- **السبرنت السابق:** `SPRINT-03-CI-GATES-AND-TENANCY` — **مقبول ودُمج** (PR #7 ⇒ `c88a721`) — مراجعته في [`sprints/SPRINT-03_REVIEW.md`](./sprints/SPRINT-03_REVIEW.md).
-- **ردود المخطط على أسئلة المنفذ (SPRINT-03):** اختبارات Stub للمستودعات تُدمج (طبقة مكمّلة للتكامل)؛ تفويض `MANAGER ⇒ VIEWER` مرفوض حتى `tenant_members`؛ تدوير التوكن مرفوع للمالك.
+- **حالة المهمة:** `READY_FOR_EXECUTION` — تبدأ من `main` (التوجيه مدموج)؛ المنفذ يفتح **PR #12**.
+- **الهدف:** إغلاق 8 ثغرات مُثبتة بالسطر — **Part A (موروث من 03):** H1 عزل صفحات الوكالة + ملكية الاتصال (`connected_by_tenant_id`) 🔴P0؛ H2 أسرار Graph من `params` إلى `Authorization: Bearer`/POST form + كبح `httpx` + مرشّح تنقيح + لا `{exc}` في 502 🔴P0؛ H3 `set_status(REAUTH_REQUIRED)` خارج معاملة الطلب + صفحة بلا توكن ⇒ 422؛ H4 فحص https/مضيف لـ`paging.next` + `ON CONFLICT DO NOTHING RETURNING` بدل 500. **Part B (عيوب 04):** H5 `__Secure-refresh` بدل `__Host-` (يكسر الدخول في المتصفحات) 🔴؛ H6 `CurrentUserFresh` يفحص `expires_at` + `users.is_active` و`GET /auth/me` عليه؛ H7 إبطال قبل إصدار + `rowcount == 1`؛ H8 سقف ذاكرة للمحدِّد.
+- **خارج النطاق:** أي ميزة. Redis. تغيير مخطط البيانات.
+- **السبرنت السابق:** `SPRINT-04-AUTH-AND-ACTOR-IDENTITY` — **مقبول مشروطاً ودُمج** (PR #11 ⇒ `6f263ac`) — [`sprints/SPRINT-04_REVIEW.md`](./sprints/SPRINT-04_REVIEW.md).
+- **ردود المخطط على أسئلة المنفذ (04):** نموذج `start` الفارغ يبقى (`extra="forbid"`)؛ `GET /auth/me` ⇒ `CurrentUserFresh`؛ Redis خلف `RateLimiter` قرار مؤجل (Hub)؛ تدوير التوكن مرفوع للمالك (الطلب الثالث).
+- **درس للمخطط (مُسجَّل):** S03-1 وS03-2 ثغرتا **توجيه** لا تنفيذ — التوجيه القادم لأي تكامل خارجي يجب أن ينص على: (أ) أين تُرسل الأسرار (رؤوس/جسم، لا روابط)، (ب) من يرى ماذا بدقة الحقل.
 
 ---
 
 ## 4. معايير القبول للمهمة الحالية (Acceptance Criteria)
 
-الكاملة في **§4 من `CURRENT_DIRECTIVE.md`**. ملخصها:
-- [x] CI خضراء على PR #11 (الرقم #9 كان مستهلكاً)؛ بوابة التراخيص exit 0 (39 حزمة) تقبل `pyjwt` / `argon2-cffi` / `email-validator`؛ لا `python-jose` ولا `passlib`.
-- [x] 0 فشل (413 وحدة + 21 تكامل = 434)، تغطية 99%، ruff نظيف.
-- [x] `grep 'alias="tenant_id"' src` و`grep TEMPORARY src` فارغان.
-- [x] اختبار بارامتري يغطي **15** مساراً محمياً: بلا Bearer ⇒ 401 + `WWW-Authenticate` (`tests/test_auth_guard.py`).
-- [x] OpenAPI: `bearerAuth` مُعلَن ومطبَّق على الـ15؛ الحارس الموسَّع يرفض `password|hash|secret|token` في كل مخططات الاستجابة إلا `access_token`/`token_type`/`has_page_token`.
-- [x] I-A2 على PG: دوران Refresh + كشف إعادة الاستخدام يُبطل كل الجلسات (0 جلسات حية في DB).
-- [x] هجرة `0004` صعود/نزول/صعود؛ `uq_users_email_lower` يرفض `A@x.com` بعد `a@x.com`.
-- [x] كوميتان (Part A `b2bd3ad`, Part B `b0a4ccf`) فوق `main` + كوميت توثيق؛ لا ملف محظور مُسّ.
-- **ينتظر:** مراجعة المخطط ⇒ دمج PR #11 بواسطة المخطط.
+الكاملة في **§3 من `CURRENT_DIRECTIVE.md`**. ملخصها:
+- [ ] CI خضراء على PR #12؛ 0 فشل؛ تغطية ≥ 95%؛ ruff نظيف.
+- [ ] لا سر Graph في `params=` (أسطر `headers=`/`data=` مذكورة في §6)؛ تجربة `httpx` INFO تُظهر `client_secret in log: False`.
+- [ ] `grep "__Host-" src` فارغ؛ حارس H5-U1 موجود.
+- [ ] H1-I1, H3-I1, H4-I1, H6-I1, H7-I1 موجودة وناجحة على PG.
+- [ ] `grep 'f".*{exc}' meta_client.py` فارغ.
+- [ ] كوميتان فوق `main`؛ لا ملف محظور مُسّ.
 
 ---
 
@@ -67,14 +65,12 @@
 
 | الترتيب | الدور | الخطوة |
 |---|---|---|
-| 1 | ~~المالك~~ **المخطط** | ~~دمج PR #8~~ ✅ **دُمج بواسطة المخطط** (`2851c9f`). **قاعدة دائمة:** المالك لا يدمج يدوياً بعد الآن — المخطط يدمج توجيهاته فوراً ويدمج PRs المنفذ بعد الاعتماد. |
-| 2 | **المالك** | 🔑 **تدوير توكن GitHub** (ظهر في الدردشة مراراً) وإرسال الجديد مع «تابع». 🛡️ تفعيل حماية `main` بالفحوص الخمسة. |
-| 3 | **المالك** | يأمر المنفذ: *«نفذ التوجيه الموجود في الريبو»*. |
-| 4 | ~~المنفذ~~ | ✅ **أُنجز** — Part A `b2bd3ad` + Part B `b0a4ccf` + توثيق على `work/implementation` ⇒ **PR #11** (CI خضراء). §7 مملوء (12 انحرافاً موثَّقاً + 4 أسئلة). |
-| 5 | **المخطط** | عند *«راجع شغل المنفذ»*: مراجعة SPRINT-04 على PG حقيقية (تركيز A5/A6: JWT، الدوران، كشف إعادة الاستخدام، CSRF، والانحرافان 2 و5 في §7) ⇒ **يدمج PR #11 بنفسه** عند الاعتماد ⇒ Hub docs (+ سطر «Auth ✅») ⇒ يكتب SPRINT-05 **ويدمج PR التوجيه بنفسه**. |
-| 6 | **المالك** | 🔑 حذف/تدوير توكن GitHub الظاهر في الدردشة. |
+| 1 | **المالك** | 🔑 **تدوير توكن GitHub (الطلب الثالث — إلزامي قبل SPRINT-05)**. 🛡️ حماية `main` بالفحوص الخمسة. |
+| 2 | **المالك** | يأمر المنفذ: *«نفذ التوجيه الموجود في الريبو»*. |
+| 3 | **المنفذ** | `merge --ff-only origin/main` ⇒ Part A (H1–H4) كوميت + دفع + PR #12 ⇒ Part B (H5–H8) كوميت + دفع ⇒ §6 ⇒ هذا الملف ⇒ *«PR #12 جاهز لمراجعة المخطط»*. |
+| 4 | **المخطط** | مراجعة 04.1 على PG حقيقية + **إعادة تجربة تسريب `httpx` بنفسه** + سباق H7-I1 ⇒ يدمج PR #12 بنفسه ⇒ يحدّث `SECURITY_BASELINE` §2 و`KNOWN_ISSUES` ⇒ يكتب SPRINT-05 ويدمج توجيهه. |
 
-> **ثلاث قواعد:** (1) لا يبدأ المنفذ قبل دمج توجيه المخطط في `main`. (2) المخطط يفرّع `genspark_ai_developer` من `main` **فقط**. (3) **المالك لا يدمج يدوياً** — المخطط يدمج توجيهاته فور فتح PR، ويدمج PRs المنفذ بعد المراجعة والاعتماد؛ المنفذ لا يدمج أبداً.
+> **ثلاث قواعد:** (1) لا يبدأ المنفذ قبل دمج توجيه المخطط في `main`. (2) المخطط يفرّع `genspark_ai_developer` من `main` **فقط**. (3) **المالك لا يدمج يدوياً** — المخطط يدمج توجيهاته فوراً وPRs المنفذ بعد الاعتماد؛ المنفذ لا يدمج أبداً.
 
 ---
 
@@ -84,6 +80,7 @@
 
 | التاريخ | الوكيل | الفرع | الكوميت | ما تم تأكيده | الخطوة التالية |
 |---|---|---|---|---|---|
+| 2026-10-30 | المخطط | `genspark_ai_developer` → PR #13 | `709ffad` | مراجعة SPRINT-04 @ `0db7828`: 434 اختباراً/99%/CI خضراء/greps نظيفة ⇒ **8 ملاحظات رقابية خارجية تُحقق منها المخطط بالسطر — كلها ثابتة**؛ S03-2 أُثبتت تجريبياً (سجل `httpx` INFO طبع `client_secret=` و`access_token=`). **قبول مشروط** ⇒ PR #11 دُمج `6f263ac`. أُصدر **SPRINT-04.1-HOTFIX** (H1–H8، كوميتان، لا ميزات) مع إقرار أن S03-1/S03-2 ثغرتا توجيه المخطط. | المالك: تدوير التوكن + إطلاق المنفذ ⇒ PR #12. |
 | 2026-10-30 | المنفذ | `work/implementation` → PR [#11](https://github.com/belalalibb/ai_agancy_markting/pull/11) | `b2bd3ad` (Part A) / `b0a4ccf` (Part B) / كوميت التوثيق فوقهما | SPRINT-04 مُسلَّم. **Part A (auth):** هجرة `0004` (`users` بـ `uq_users_email_lower` + `tenant_id` UNIQUE؛ `refresh_sessions` بـ `token_hash` sha256 و`replaced_by` و`ip INET`)، Argon2id خلف `PasswordHasher` Protocol مع `DUMMY_HASH` وإعادة التجزئة، JWT HS256 (`sub/tid/sid/iat/exp=iat+900/iss/aud=api/jti`، `algorithms=["HS256"]`، سر ≥32 بايت إلزامي خارج development)، كوكي `__Host-refresh` HttpOnly SameSite=Strict Path=/api/v1/auth مع دوران وكشف إعادة الاستخدام (إبطال كل الجلسات)، CSRF، محدِّد معدل in-memory خلف `RateLimiter` Protocol، مسارات `register/login/refresh/logout/logout-all/me`، `bearerAuth` في OpenAPI، `CurrentUser`/`CurrentUserFresh`. **Part B (الهوية):** `ActorTenantId` من JWT، حذف `tenant_id` من كل الأجسام/الاستعلامات، حذف `POST /tenants`، `CurrentUserFresh` على المسارات الهدّامة، claim `u` في state، حارس B-U1 على **15** مساراً، حارس Zero-Secret موسَّع. **الأرقام:** 413 + 21 = **434 ناجحاً**، 0 فشل، **99%**، ruff نظيف، تراخيص 39/0، 0004 صعود/نزول/صعود على PG 17. CI خضراء على `b0a4ccf` (push + PR). ساندبوكس أُعيد ≥15 مرة؛ gitleaks أجبر على إعادة بناء Part A. 12 انحرافاً + 4 أسئلة في §7. | مراجعة المخطط لـ PR #11 ⇒ دمجه ⇒ المالك يدوّر التوكن ⇒ SPRINT-05. |
 | 2026-10-30 | المخطط | `genspark_ai_developer` → PR #10 | `76ab3d8` | دورة انتظار (المنفذ لم يسلّم SPRINT-04 بعد؛ `work/implementation` @ `2b1e1fe`). أُنجز البند المؤجل على المخطط: **مزامنة Hub docs** — `DECISION_LOG` (D-056…D-063)، `SECURITY_BASELINE` (استثناء D-058، مواصفة JWT/Refresh، جدول حالة التنفيذ)، `DATA_AND_INTEGRATIONS` (المخطط الفعلي حتى 0003)، `DEFERRED_DECISIONS` (tenant_members، التفويض الفرعي، AES-256-GCM)، `CHANGELOG` (المحطة 7). `verify_hub.py` ناجح. | المالك: تدوير التوكن + إطلاق المنفذ على SPRINT-04. |
 | 2026-10-30 | المخطط | `genspark_ai_developer` → PR #9-docs | `ed565c3` | PR #8 **دُمج بواسطة المخطط** (`2851c9f`) بناءً على قرار المالك: **لا دمج يدوي من المالك بعد الآن**. القاعدة ثُبِّتت في `CURRENT_DIRECTIVE.md` (بطاقة المهمة، §6/4، §8) و§5 هنا. SPRINT-04 أصبح قابلاً للتنفيذ فوراً. | المالك: تدوير التوكن + إطلاق المنفذ. المخطط يدمج هذا الـPR بنفسه. |

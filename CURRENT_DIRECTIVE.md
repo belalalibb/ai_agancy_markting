@@ -1,6 +1,6 @@
 # 🎯 CURRENT DIRECTIVE — التوجيه التنفيذي النشط
 
-> **المصدر الوحيد للمهمة الحالية.** SPRINT-03 رُوجع واعتُمد ودُمج (PR #7 ⇒ `main` @ `c88a721`)؛ تقريره في [`sprints/SPRINT-03_REVIEW.md`](./sprints/SPRINT-03_REVIEW.md). هذا التوجيه يفتح **SPRINT-04**: إغلاق **الفجوة الأمنية الوحيدة المعروفة** في المنتج — هوية الفاعل المُدَّعاة ذاتياً (`?tenant_id=`) — بوحدة مصادقة حقيقية، دون أي ميزة منتج جديدة.
+> **المصدر الوحيد للمهمة الحالية.** SPRINT-04 رُوجع و**قُبل مشروطاً** ودُمج (PR #11 ⇒ `main` @ `6f263ac`)؛ تقريره في [`sprints/SPRINT-04_REVIEW.md`](./sprints/SPRINT-04_REVIEW.md). هذا التوجيه **دفعة تصحيح إلزامية**: 8 ثغرات ثبتت بالملف والسطر (اثنتان P0 موروثتان من SPRINT-03). **لا ميزة جديدة، ولا بناء فوق الكود الحالي قبل إغلاقها.**
 
 ---
 
@@ -8,285 +8,151 @@
 
 | البند | القيمة |
 |---|---|
-| **معرف المهمة** | `SPRINT-04-AUTH-AND-ACTOR-IDENTITY` |
-| **النوع** | أمن تأسيسي — وحدة `auth` + استبدال سطح الهوية المؤقت (B4) |
+| **معرف المهمة** | `SPRINT-04.1-HOTFIX` |
+| **النوع** | تصحيح أمني — **لا ميزات** |
 | **الحالة** | `READY_FOR_EXECUTION` |
-| **يبدأ من** | `main` @ `2851c9f` (PR #8 **مدموج بالفعل** — المخطط يدمج توجيهاته بنفسه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
-| **الفرع المستهدف** | `work/implementation` ⇒ **PR جديد #9** إلى `main` |
-| **الكوميتات** | **اثنان بالضبط**: Part A (وحدة auth) ثم Part B (استبدال سطح الهوية). كل كوميت يُدفع فوراً |
-| **الحجم المتوقع** | Part A ~700 سطر؛ Part B ~400 سطر (معظمه حذف `tenant_id` من المعاملات وتحديث اختبارات) |
-| **تاريخ الإصدار** | 2026-10-29 |
+| **يبدأ من** | `main` @ `6f263ac` (مدموج). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **الفرع المستهدف** | `work/implementation` ⇒ **PR #12** إلى `main` |
+| **الكوميتات** | **اثنان**: Part A = H1–H4 (P0 + الفخاخ الموروثة من 03)، Part B = H5–H8 (عيوب 04). كل كوميت يُدفع فوراً |
+| **الحجم المتوقع** | ~500 سطر كود + ~400 سطر اختبارات |
+| **تاريخ الإصدار** | 2026-10-30 |
 
 ---
 
-## 0. لماذا هذا السبرنت؟
+## 0. لماذا؟
 
-1. **N1 من مراجعة SPRINT-03:** أي عميل يرسل `?tenant_id=<uuid>` يصبح ذلك المستأجر. الهيكل (Tenant → Brand → Grants) صحيح لكن **الفاعل غير مُتحقَّق منه**. لا يمكن فتح المنتج لأي مستخدم حقيقي قبل إغلاق هذا.
-2. `SECURITY_BASELINE.md` §1-4 يحدد الاتجاه سلفاً: **JWT قصير الأجل (15 دقيقة) + Refresh Token في كوكي HttpOnly/Secure + تحقق صارم من الصلاحيات في كل طلب**. هذا التوجيه ينفّذه حرفياً.
-3. التصميم في SPRINT-03 جعل الاستبدال رخيصاً عمداً: الهوية تُقرأ من **مكان واحد** (`tenancy/dependencies.py::ActorTenantId` + حقول `tenant_id` في 4 schemas). Part B يبدّل هذا المكان الواحد فقط.
+مراقب خارجي قدّم 8 ملاحظات؛ **المخطط تحقق من كلٍّ منها بالسطر وأثبت S03-2 تجريبياً** (سجل `httpx` على INFO طبع `client_secret=…` و`access_token=…` حرفياً). اثنتان منها P0 تخصّان عزل بيانات العملاء وتسريب الأسرار، وموجودتان على `main` منذ SPRINT-03 — **ثغرة في توجيه المخطط لا في تنفيذ المنفذ.** الباقية عيوب محصورة في كود SPRINT-04. التفاصيل الكاملة في `sprints/SPRINT-04_REVIEW.md` §2.
+
+| # | الملف:السطر (@ `6f263ac`) | العيب | الخطورة |
+|---|---|---|---|
+| H1 | `social_connect/schemas.py:236`, `router.py:234-254, 265-275`, `service.py:178-215` | صفحات عملاء الوكالة الآخرين تظهر لكل مخوّل على العلامة؛ `select_pages` لا يتحقق أن الفاعل هو صاحب الاتصال ⇒ اختطاف توكن صفحة عميل آخر | 🔴 P0 |
+| H2 | `meta_client.py:130,151,168,189,204` + `:260-262` | `client_secret`/`access_token` في query params ⇒ تُسجَّل في `httpx` INFO؛ `str(exc)` يحمل الرابط بالأسرار إلى 502 | 🔴 P0 |
+| H3 | `service.py:194-198`, `:270` | `set_status(REAUTH_REQUIRED)` يضيع بـ`rollback`؛ صفحة بلا توكن تُقبل بـ200 بدل 422 | 🟠 |
+| H4 | `meta_client.py:226,243-254`؛ `tenancy`/`auth` postgres repos | `paging.next` بلا فحص https/مضيف؛ `IntegrityError` ⇒ 500 | 🟠/🟡 |
+| H5 | `config.py:150-152`, `auth/router.py:116-129` | `__Host-refresh` مع `Path=/api/v1/auth` — المتصفحات تُسقطه بصمت (RFC 6265bis §4.1.3.2) | 🔴 يكسر الدخول في الإنتاج |
+| H6 | `auth/postgres_repository.py:79-85`, `dependencies.py:135-142` | `CurrentUserFresh` لا يفحص `expires_at` ولا `users.is_active` | 🟠 |
+| H7 | `auth/service.py:142-144`, `postgres_repository.py:87-94` | الإصدار قبل الإبطال؛ `revoke` بلا `rowcount` ⇒ تزاحم يُصدر جلستين | 🟠 |
+| H8 | `auth/infrastructure/rate_limit.py:19-21` | القواميس بلا سقف ولا تنظيف | 🟡 |
 
 ---
 
 ## 1. النطاق
 
-### داخل النطاق
-- **Part A — وحدة `src/modules/auth/`:** جدول `users` + `refresh_sessions`، تسجيل/دخول بكلمة مرور (Argon2id)، JWT وصول قصير (HS256، 15 دقيقة)، Refresh دوّار في كوكي HttpOnly، خروج، تبعية `CurrentUser`.
-- **Part B — استبدال سطح الهوية:** `ActorTenantId` يصبح مشتقاً من `CurrentUser`؛ حذف `tenant_id` من كل معاملات الاستعلام وأجسام الطلبات؛ `POST /tenants` يصبح جزءاً من التسجيل؛ تحديث كل الاختبارات؛ هجرة `0004`.
-- تحديث `.env.template` و`docker-compose.yml` إن لزم (قيم فارغة فقط).
-
-### خارج النطاق (ممنوع)
-- OAuth اجتماعي لتسجيل الدخول (Google/Meta Login)، MFA، استعادة كلمة المرور بالبريد (لا بنية بريد بعد)، تحديد المعدل (Rate limiting) بخلاف ما في §2-A8، إدارة أعضاء متعددين داخل المستأجر الواحد (مستخدم واحد = مستأجر واحد في هذا السبرنت — انظر A2).
-- أي تغيير في `social_connect` بخلاف استبدال الهوية (Part B).
-- LiteLLM / Temporal / WhatsApp / واجهات أمامية.
-- الملفات المحظورة: `ARCHITECTURE_LOCK.md`, `SESSION_RECOVERY.md`, `imaster_planner.md`, `README.md`, `AI_Marketing_Platform_Hub/**`, `sprints/**`. (يُسمح: `WORK_STATE.md` و§7 هنا.)
+**داخل:** H1–H8 فقط + اختباراتها + ردود الأسئلة المعتمدة (§3 من المراجعة): `GET /auth/me` ⇒ `CurrentUserFresh`؛ نموذج `start` الفارغ يبقى.
+**خارج (ممنوع):** أي ميزة، أي تغيير مخطط بيانات بخلاف ما يلزم H1 (لا يلزم شيء)، تغيير التشفير، Redis، الملفات المحظورة (`ARCHITECTURE_LOCK.md`, `SESSION_RECOVERY.md`, `imaster_planner.md`, `README.md`, `AI_Marketing_Platform_Hub/**`, `sprints/**`).
 
 ---
 
-## 2. المواصفات الفنية
+## 2. المواصفات
 
-### Part A — وحدة `auth`
+### Part A — الموروث من SPRINT-03
 
-#### A1. التبعيات الجديدة (كلها مقبولة ببوابة D-054)
-- `pyjwt>=2.9` (MIT) — JWT HS256.
-- `argon2-cffi>=23.1` (MIT) — تجزئة كلمات المرور Argon2id.
-- `pydantic[email]` (يجلب `email-validator`, Unlicense/CC0) — التحقق من البريد.
-- **لا** `python-jose`, **لا** `passlib` (غير مصانة). بوابة التراخيص في CI يجب أن تبقى خضراء.
+#### H1. عزل صفحات الوكالة وملكية الاتصال
+**المبدأ:** الصفحات **غير المختارة** هي بيانات شخصية لحساب Meta الخاص بمن أجرى OAuth (`connected_by_tenant_id`)، لا بيانات العلامة. لا يراها ولا يختار منها إلا **صاحب الاتصال**. بقية المخوّلين على العلامة يرون المختارة فقط.
 
-#### A2. نموذج الهوية في هذا السبرنت
-- **مستخدم واحد ↔ مستأجر واحد** (`users.tenant_id` UNIQUE). التسجيل يُنشئ المستأجر والمستخدم معاً في معاملة واحدة. العضوية المتعددة تأتي في سبرنت لاحق عبر جدول `tenant_members` — **لا تُبنَ الآن**، لكن لا تكتب كوداً يفترض استحالتها (مثلاً: لا تجعل `User.tenant_id` هو المفتاح الأساسي).
-- `BrandAccessResolver` و`brand_access_grants` **لا يتغيران**: الفاعل ما زال `tenant_id`، فقط أصبح مُستنتَجاً من مستخدم مُصادَق.
+1. **الرؤية** — في `ConnectedAccountPublic.from_domain(account, *, viewer_tenant_id: UUID)`:
+   - `pages = [p for p in account.pages if p.is_selected or account.connected_by_tenant_id == viewer_tenant_id]`.
+   - أضف حقل `is_connection_owner: bool` (= المساواة أعلاه) ليعرف العميل إن كان يستطيع تعديل الاختيار.
+   - `router.py` يمرر `actor.tenant_id` في `list`/`get`/`callback`/`select_pages`.
+2. **التعديل** — `select_pages` و`disconnect`:
+   - في `MetaConnectService.select_pages(brand_id, account_id, page_ids, *, actor_tenant_id)`: بعد `get`، إن `account.connected_by_tenant_id != actor_tenant_id` ⇒ ارمِ `NotConnectionOwnerError` ⇒ **403 `not_connection_owner`** (الاتصال موجود ومرئي، لذا 403 لا 404).
+   - `disconnect`: **يُسمح** لـ OWNER بفصل أي اتصال على علامته (حقه في طرد الوكالة) **و** لصاحب الاتصال؛ MANAGER غير المالك يفصل اتصالاته فقط. طبّقها في الخدمة بنفس النمط.
+3. **Callback بإعادة ربط**: `find_by_identity` يعيد اتصالاً قائماً لنفس `(brand, provider, provider_user_id)`؛ إن كان `connected_by_tenant_id` مختلفاً عن الفاعل الحالي ⇒ **حدّثه** إلى الفاعل الحالي (من أعاد OAuth هو المالك الجديد للتوكن) وسجّل `logger.info` بالمعرّفات فقط.
+4. **اختبارات (وحدة):** H1-U1 مالك العلامة يرى صفحات اتصال الوكالة **المختارة فقط** و`is_connection_owner=false`؛ H1-U2 الوكالة ترى الكل على اتصالها؛ H1-U3 مالك العلامة ⇒ `PUT …/pages/selection` على اتصال الوكالة ⇒ **403** ولا تغيير ولا نداء Graph (`pages_route.call_count == 0`)؛ H1-U4 الوكالة على اتصال المالك ⇒ 403؛ H1-U5 OWNER يفصل اتصال الوكالة ⇒ 204؛ MANAGER يفصل اتصال المالك ⇒ 403؛ H1-U6 إعادة ربط بفاعل مختلف تنقل `connected_by_tenant_id`. **(تكامل)** H1-I1 السيناريو الكامل على PG: وكالة بـ3 صفحات لعملاء مختلفين تربط بعلامة (أ) ⇒ مالك (أ) يرى 0 صفحات قبل الاختيار ⇒ الوكالة تختار 1 ⇒ المالك يرى 1 فقط ⇒ المالك يحاول اختيار صفحة أخرى ⇒ 403 ⇒ `SELECT count(*) … encrypted_page_token IS NOT NULL` = 1.
 
-#### A3. الجداول (هجرة `0004_auth.py`)
+#### H2. أسرار Graph خارج الرابط
+1. **كل** استدعاء في `meta_client.py` ينقل `access_token`/`input_token`/`client_secret`/`appsecret_proof` من `params` إلى:
+   - `GET` ⇒ رأس `Authorization: Bearer <token>` + `appsecret_proof` في **الرأس غير ممكن** في Graph ⇒ حوّل تلك الطلبات إلى **`POST` مع `method=GET` override** غير مطلوب؛ **الحل المعتمد:** Graph API يقبل `access_token` و`appsecret_proof` في **جسم `application/x-www-form-urlencoded` لطلبات POST**، ويقبل `Authorization: Bearer` للـGET. اعتمد:
+     - `GET /me`, `GET /me/accounts`, `GET /debug_token`: `headers={"Authorization": f"Bearer {token}"}` + `params={"appsecret_proof": proof, "fields": …}` (الـproof ليس سراً قابلاً لإعادة الاستخدام بلا التوكن؛ مقبول في الرابط).
+     - `GET /oauth/access_token` (تبادل الكود/الـlong-lived): **حوّله إلى `POST`** بجسم form (`client_id`, `client_secret`, `grant_type`, `code`/`fb_exchange_token`, `redirect_uri`) — Graph يدعم POST لهذا المسار.
+   - `debug_token` يحتاج `input_token` (سر): مرّره في الرأس؟ غير مدعوم. ⇒ **POST** بجسم form `input_token=…` مع `Authorization: Bearer <app_token>`.
+2. **كبح `httpx`**: في `src/core/logging.py` (جديد) دالة `configure_logging()` تُستدعى من `create_app()` تضبط `logging.getLogger("httpx").setLevel(logging.WARNING)` و`httpcore` كذلك، **وتُركّب `logging.Filter` على الجذر** يُنقّح أي `record.getMessage()` بأنماط: `(access_token|client_secret|input_token|fb_exchange_token|code)=[^&\s]+` ⇒ `\1=***`، و`Bearer\s+[A-Za-z0-9._~+/=-]+` ⇒ `Bearer ***`، و`EAA[A-Za-z0-9]{20,}` ⇒ `EAA***`. (دفاع في العمق؛ الكبح الأول هو عدم وضعها في الرابط أصلاً.)
+3. **رسائل الأخطاء:** `meta_client.py:260-262`: `MetaNetworkError("Meta Graph API timeout")` / `("Meta Graph API network error")` **بلا `{exc}`**؛ السبب يُسجَّل بـ`logger.warning("…: %s", type(exc).__name__)` فقط. تحقق أن `_to_http` لا يُمرر `str(exc)` لأي استثناء شبكي إلى الجسم.
+4. **اختبارات:** H2-U1 `respx` يثبت أن **لا طلب** يحمل `access_token`/`client_secret`/`input_token` في `request.url.query` (تحقق على كل مسارات `MetaGraphClient`)؛ H2-U2 `test_identity_and_secrets_never_logged` يُوسَّع ليراقب **الجذر** (`logger=None`) على DEBUG مع `httpx` على INFO صراحةً، ويفشل إن ظهر أي سر؛ H2-U3 `ConnectError("…?access_token=LEAK")` ⇒ جسم 502 لا يحوي `LEAK`؛ H2-U4 مرشّح التنقيح يحوّل الأنماط الأربعة إلى `***`.
 
-**`users`**
-| العمود | النوع | قيود |
-|---|---|---|
-| `id` | UUID PK | |
-| `tenant_id` | UUID FK → `tenants.id` ON DELETE RESTRICT | NOT NULL، **UNIQUE** (A2) |
-| `email` | CITEXT أو VARCHAR(320) مع فهرس فريد على `lower(email)` | NOT NULL؛ **اختر `VARCHAR(320)` + فهرس فريد `uq_users_email_lower ON users (lower(email))`** (لا تضف امتداد citext — أقل تبعية) |
-| `password_hash` | TEXT | NOT NULL (Argon2id PHC string) |
-| `is_active` | BOOLEAN | NOT NULL DEFAULT true |
-| `created_at`, `updated_at`, `last_login_at` | TIMESTAMPTZ | الأخير NULL |
+#### H3. فخ rollback + صفحة بلا توكن
+1. `select_pages` عند `MetaTokenExpiredError`: بدل `set_status` داخل نفس الجلسة ثم `raise`، استخدم **جلسة مستقلة**: `async with get_session_factory()() as s, s.begin(): await PostgresRepo(s).set_status(...)` عبر دالة `mark_reauth_required_out_of_band(brand_id, account_id)` تُحقن في الخدمة (Protocol `StatusMarker`؛ في الاختبارات fake). ثم `raise`. طبّق نفس النمط على **كل** `set_status(REAUTH_REQUIRED)` قبل `raise` في `social_connect` (ابحث: `grep -n "REAUTH_REQUIRED" src`).
+2. `select_pages`: أي `page_id` مطلوب وصفحته في `fresh` **بلا `access_token`** ⇒ `PageNotSelectableError(page_ids)` ⇒ **422 `page_not_selectable`** ولا تغيير.
+3. **اختبارات:** H3-I1 (PG): توكن منتهٍ أثناء selection ⇒ 401 **و** `status = 'reauth_required'` محفوظ فعلاً بعد انتهاء الطلب؛ H3-U1 صفحة بلا توكن ⇒ 422 ولا تغيير.
 
-**`refresh_sessions`**
-| العمود | النوع | قيود |
-|---|---|---|
-| `id` | UUID PK | = `sid` داخل الكوكي |
-| `user_id` | UUID FK → `users.id` ON DELETE CASCADE | NOT NULL، index |
-| `token_hash` | BYTEA(32) أو TEXT | **SHA-256 للسر العشوائي**؛ السر نفسه لا يُخزَّن أبداً |
-| `expires_at` | TIMESTAMPTZ | NOT NULL، index |
-| `revoked_at` | TIMESTAMPTZ | NULL = ساري |
-| `replaced_by` | UUID NULL FK → `refresh_sessions.id` | سلسلة الدوران (كشف إعادة الاستخدام) |
-| `user_agent` | VARCHAR(255) NULL، `ip` INET NULL | بيانات تدقيق فقط |
-| `created_at` | TIMESTAMPTZ | |
+#### H4. SSRF + IntegrityError
+1. `meta_client.py` قبل `_request_absolute(next_url)`: `urlparse(next_url)`: `scheme == "https"` **و** `netloc == urlparse(settings.meta_graph_base_url).netloc` وإلا `MetaGraphError("untrusted pagination url")` (لا طلب). اختبار H4-U1 بـ`paging.next = "http://evil/…"` و`https://evil/…` ⇒ لا طلب (`respx` route على evil غير مستدعى).
+2. مستودعات `tenancy` و`auth` (PostgreSQL): لفّ `flush()` في `create_*` بـ`try/except IntegrityError` ⇒ `await session.rollback()`؟ **لا** — `rollback` يقتل المعاملة. **الحل:** استخدم `INSERT … ON CONFLICT DO NOTHING RETURNING id`؛ إن لم يُرجع صفاً ⇒ ارمِ الاستثناء المجالي (`TenantSlugTakenError`/`BrandSlugTakenError`/`EmailTakenError`/`GrantAlreadyActiveError`). اختبار H4-I1 (PG): إدراجان متزامنان بنفس slug عبر `asyncio.gather` بجلستين ⇒ واحد 201 وواحد 409، لا 500.
 
-`downgrade()`: إسقاط الجدولين. (لا بيانات قديمة تُهاجَر.)
+### Part B — عيوب SPRINT-04
 
-#### A4. كلمات المرور
-- `argon2.PasswordHasher()` بالإعدادات الافتراضية (RFC 9106 low-memory) عبر واجهة `PasswordHasher` Protocol في `auth/domain/` (قابلة للاستبدال).
-- سياسة الحد الأدنى: ≥ 10 أحرف، ≤ 128، لا قائمة تعقيد سخيفة. رفض كلمات مرور تساوي البريد.
-- `verify_password` يتبع **توقيتاً ثابتاً** عند عدم وجود المستخدم: احسب `hasher.verify` على hash وهمي ثابت (`_DUMMY_HASH`) كي لا يكشف زمن الاستجابة وجود البريد.
-- عند نجاح الدخول وكان `hasher.check_needs_rehash(hash)` صحيحاً ⇒ أعد التجزئة واحفظها.
+#### H5. اسم الكوكي
+- **القرار:** `__Secure-refresh` مع إبقاء `Path=/api/v1/auth` (حصر الإرسال بمسارات المصادقة أهم من حماية `__Host-` ضد الـsubdomains، ونحن نتحكم بالمضيف). في `development` يبقى `refresh`.
+- `config.py:150-152`: `"__Secure-refresh" if self.auth_cookie_secure else "refresh"`. حدّث docstring `router.py:12-13`.
+- **اختبار H5-U1:** يفحص رأس `Set-Cookie` الخام: إن بدأ الاسم بـ`__Host-` ⇒ يجب `Path=/` وبلا `Domain`؛ إن بدأ بـ`__Secure-` ⇒ يجب `Secure`. (حارس دائم ضد تكرار الخطأ.) H5-U2 في وضع secure الاسم `__Secure-refresh` و`Path=/api/v1/auth`.
 
-#### A5. رموز الوصول (Access JWT)
-- HS256، سر من `AUTH_JWT_SECRET` (SecretStr، ≥ 32 بايت، **إلزامي** — غيابه يُفشل الإقلاع في غير `development`، وفي `development` يُولَّد عشوائياً مع تحذير واحد).
-- Claims: `sub` = `user_id`، `tid` = `tenant_id`، `sid` = `refresh_sessions.id`، `iat`, `exp` (= iat + `AUTH_ACCESS_TTL_SECONDS`، افتراضي **900**)، `iss` = `settings.app_name`، `aud` = `"api"`, `jti` عشوائي.
-- فك الرمز يتحقق من `exp`, `iss`, `aud`, الخوارزمية **المحددة صراحةً** (`algorithms=["HS256"]`) — لا `none`.
-- **لا يُستشار قاعدة البيانات عند كل طلب** للوصول (هذا هدف JWT)؛ إبطال الجلسة يأخذ مفعوله خلال ≤ 15 دقيقة أو فوراً عبر Refresh. **استثناء:** مسارات الكتابة الحساسة (`DELETE /brands/{id}/grants/*`, `DELETE …/connections/*`, `PUT …/pages/selection`) تستخدم تبعية `CurrentUserFresh` التي تتحقق من `refresh_sessions.revoked_at IS NULL` لـ `sid` — طلب DB واحد.
+#### H6. `CurrentUserFresh` كامل
+- `RefreshSessionRepository.is_active(session_id, now)` ⇒ استعلام واحد بـ`JOIN users`: `revoked_at IS NULL AND expires_at > :now AND users.is_active`.
+- `GET /auth/me` ⇒ `CurrentUserFresh` (قرار المراجعة §3-2).
+- **اختبارات:** H6-U1 جلسة منتهية ⇒ 401 `session_revoked`؛ H6-U2 مستخدم `is_active=false` ⇒ 401 على `DELETE …/connections/{id}` و`GET /auth/me`؛ H6-I1 (PG) تعطيل المستخدم بـ`UPDATE users SET is_active=false` ⇒ الطلب التالي بـ`CurrentUserFresh` 401.
 
-#### A6. رموز التحديث (Refresh) — دوّارة، في كوكي
-- السر: 32 بايت عشوائي (`secrets.token_urlsafe(32)`)؛ يُخزَّن `sha256(secret)` فقط.
-- الكوكي: اسم `__Host-refresh` في الإنتاج (يفرض Secure + Path=/ + بلا Domain)، `refresh` في `development`؛ `HttpOnly`, `SameSite=Strict`, `Secure` (إلا development), `Path=/api/v1/auth`, `Max-Age` = `AUTH_REFRESH_TTL_SECONDS` (افتراضي **30 يوماً**).
-- **الدوران:** كل `POST /auth/refresh` يُبطل الجلسة الحالية (`revoked_at`, `replaced_by`) ويُنشئ جديدة ويُعيد كوكي جديداً + access جديداً.
-- **كشف إعادة الاستخدام:** إن قُدِّم refresh لجلسة `revoked_at IS NOT NULL` ⇒ **أبطل كل جلسات المستخدم** (سرقة محتملة) وأعد 401 `refresh_reuse_detected`.
-- `POST /auth/logout`: يُبطل الجلسة الحالية ويمسح الكوكي. `POST /auth/logout-all`: يُبطل كل جلسات المستخدم.
-- **CSRF:** لأن refresh في كوكي، يجب أن يحمل الطلب رأس `X-Requested-With: XMLHttpRequest` أو `Origin` ضمن `AUTH_ALLOWED_ORIGINS` (قائمة، فارغة = يُرفض أي `Origin` خارجي؛ غياب `Origin` + وجود الرأس المخصص = مقبول). `SameSite=Strict` طبقة ثانية لا بديل.
+#### H7. دوران ذرّي
+- `postgres_repository.revoke(...)` تُرجع `int(rowcount)`.
+- `AuthService.refresh`: **أبطل أولاً**: `revoked = await self._sessions.revoke(session.id, now)`؛ إن `revoked != 1` ⇒ عامل كإعادة استخدام (`revoke_all_for_user` + `RefreshReuseDetectedError`). ثم `_issue` ثم `update replaced_by` للجلسة القديمة (أو مرّر `replaced_by` لاحقاً بـ`UPDATE` ثانٍ).
+- **اختبارات:** H7-U1 fake repo يُرجع 0 من `revoke` ⇒ `RefreshReuseDetectedError` وكل الجلسات مُبطَلة؛ H7-I1 (PG) `asyncio.gather` لطلبي refresh بنفس الكوكي بجلستين ⇒ **بالضبط** واحد 200 وواحد 401، و`SELECT count(*) WHERE revoked_at IS NULL AND user_id=…` = 1.
 
-#### A7. المسارات (تحت `settings.api_v1_prefix`)
-
-| الطريقة | المسار | الجسم | الاستجابة |
-|---|---|---|---|
-| POST | `/auth/register` | `{email, password, tenant_slug, tenant_name}` | 201 `{access_token, token_type:"bearer", expires_in, user:{id,email,tenant_id}}` + كوكي refresh؛ 409 `email_taken` / 409 `tenant_slug_taken`؛ 422 لسياسة كلمة المرور |
-| POST | `/auth/login` | `{email, password}` | 200 نفس الشكل + كوكي؛ **401 `invalid_credentials` موحَّد** (لا تمييز بريد/كلمة)؛ 403 `user_inactive` |
-| POST | `/auth/refresh` | — (كوكي) | 200 نفس الشكل + كوكي جديد؛ 401 `refresh_missing` / `refresh_invalid` / `refresh_expired` / `refresh_reuse_detected` |
-| POST | `/auth/logout` | — (كوكي أو Bearer) | 204 + مسح الكوكي |
-| POST | `/auth/logout-all` | Bearer | 204 |
-| GET | `/auth/me` | Bearer | 200 `{id, email, tenant_id, tenant:{id,slug,name}}` |
-
-- **`POST /tenants` يُحذف** (التسجيل ينشئ المستأجر). `GET /tenants/{tenant_id}` يبقى ويُحمى (المستأجر الخاص فقط ⇒ وإلا 404).
-- لا حقل في أي استجابة يحوي `password` أو `hash` أو `secret`؛ حارس Zero-Secret يُوسَّع ليرفض أيضاً `password`, `hash`, `secret` في أسماء حقول **الاستجابات** (الطلبات تحوي `password` بالضرورة).
-
-#### A8. تحديد المعدل الأدنى (داخل العملية، كافٍ لهذا السبرنت)
-- `login` و`register` و`refresh`: نافذة منزلقة **10 طلبات/دقيقة لكل IP** + **5 فشل دخول متتالٍ لكل بريد ⇒ 429 لمدة 5 دقائق**. تنفيذ بسيط في الذاكرة خلف Protocol `RateLimiter` (يُستبدل بـ Redis لاحقاً). يُطفأ في الاختبارات بتبعية وهمية.
-- رأس `Retry-After` في 429.
-
-#### A9. تبعيات الهوية (`src/modules/auth/dependencies.py`)
-```python
-CurrentUser      # يفك Bearer JWT ⇒ AuthenticatedActor(user_id, tenant_id, sid) — بلا DB
-CurrentUserFresh # CurrentUser + تحقق أن sid غير مُبطَل — طلب DB واحد
-```
-- غياب/تلف الرمز ⇒ **401** مع `WWW-Authenticate: Bearer`. الرمز صالح لكن الجلسة مُبطَلة (Fresh) ⇒ 401 `session_revoked`.
-- الـ`AuthenticatedActor` نموذج Pydantic مجمَّد في `auth/domain/models.py`.
-
-#### A10. الإعدادات الجديدة (`src/core/config.py`) — تُسجَّل في `.env.template` بقيم فارغة
-`AUTH_JWT_SECRET`, `AUTH_ACCESS_TTL_SECONDS=900`, `AUTH_REFRESH_TTL_SECONDS=2592000`, `AUTH_COOKIE_SECURE` (افتراضي `true` إلا في development), `AUTH_ALLOWED_ORIGINS` (قائمة مفصولة بفواصل، افتراضي فارغ).
-
-#### A11. الاستثناءات
-`auth/exceptions.py`: `EmailTakenError`(409), `InvalidCredentialsError`(401), `UserInactiveError`(403), `RefreshMissingError`/`RefreshInvalidError`/`RefreshExpiredError`/`RefreshReuseDetectedError`(401), `SessionRevokedError`(401), `RateLimitedError`(429), `CsrfRejectedError`(403). خريطة موحدة بنفس أسلوب `to_http` في `tenancy`.
+#### H8. سقف الذاكرة
+- `InMemoryRateLimiter(max_keys=10_000)`: كل `hit`/`record_failure` ينفّذ تنظيفاً كسولاً كل N=256 استدعاء (يحذف المفاتيح التي نافذتها فارغة و`blocked_until` منتهٍ)؛ عند بلوغ `max_keys` يحذف **الأقدم** (استخدم `OrderedDict` أو حقل last-seen). `_failures` تُحذف مع النافذة.
+- **اختبار H8-U1:** 20,000 مفتاح عشوائي ⇒ `len(_hits) <= 10_000`؛ H8-U2 مفتاح انتهت نافذته يُحذف بعد التنظيف.
 
 ---
 
-### Part B — استبدال سطح الهوية
+## 3. معايير القبول
 
-#### B1. `tenancy/dependencies.py`
-- `ActorTenantId` يصبح: `Annotated[UUID, Depends(_actor_tenant_id)]` حيث `_actor_tenant_id(actor: CurrentUser) -> UUID: return actor.tenant_id`. **الاسم يبقى** كي يكون التغيير في الموجِّهات صفرياً، **والتوثيق يُحدَّث** (لم يعد مؤقتاً).
-- **اتجاه الاستيراد:** `tenancy` ⇒ `auth.dependencies` مسموح؛ `auth` **لا يستورد** `tenancy` إلا `tenancy.domain` (لإنشاء المستأجر عند التسجيل عبر `TenantRepository`).
-
-#### B2. الـschemas
-- حذف `tenant_id` من: `BrandCreate`, `GrantCreate`, `StartConnectionRequest`, `PageSelectionRequest`. (`grantee_tenant_id` يبقى — هو الهدف لا الفاعل.)
-- حذف `?tenant_id=` من كل مسارات GET/DELETE. `grep -rn "alias=\"tenant_id\"" src` ⇒ فارغ.
-
-#### B3. الحالة الحساسة — `/social/meta/callback`
-- Meta تُعيد المتصفح إلى `callback` **بلا Bearer** (إعادة توجيه عليا). الهوية هنا تأتي حصراً من `state` الموقَّع (`t`, `b`) كما في SPRINT-03 — **هذا يبقى**. لكن يجب إثبات أن `state` أُصدر لمستخدم مُصادَق: `start` الآن يتطلب `CurrentUser` ويضع `t = actor.tenant_id` (لا من الجسم). النتيجة: لا يمكن تزوير `state` بلا سر التوقيع، ولا إصدارها بلا تسجيل دخول.
-- أضف claim `u` = `user_id` إلى payload الـ`state` (للتدقيق فقط).
-
-#### B4. `POST /tenants` يُحذف؛ `TenancyService.create_tenant` يبقى ويُستدعى من `AuthService.register` داخل نفس المعاملة (جلسة واحدة مشتركة عبر `get_db_session`).
-
-#### B5. الاختبارات
-- `tests/conftest.py`: مصنع `auth_headers(tenant_id)` يُصدر JWT حقيقياً بسر الاختبار (لا تبعية وهمية للهوية — نختبر المسار الحقيقي). عالم Tenancy الثابت (`OWNER_ID/AGENCY_ID/STRANGER_ID`) يكتسب مستخدماً لكل مستأجر.
-- كل اختبار كان يمرر `?tenant_id=` أو `"tenant_id":` في الجسم يُحوَّل إلى رأس `Authorization`.
-- اختبار جديد لكل مسار محمي: **بلا رأس ⇒ 401** (مولَّد بارامترياً من `app.routes` كي لا يُنسى مسار).
+- [ ] CI خضراء على PR #12 (الفحوص الخمسة).
+- [ ] 0 فشل؛ تغطية ≥ 95%؛ ruff نظيف.
+- [ ] `grep -rn '"access_token"\|"client_secret"\|"input_token"' src/modules/social_connect/meta_client.py` يُظهرها **فقط** داخل `headers=`/`data=` لا `params=` (اذكر الأسطر في §7).
+- [ ] `grep -n "__Host-" src` ⇒ فارغ؛ H5-U1 موجود.
+- [ ] H2-U2 يراقب الجذر ويمر؛ تجربة المخطط (`/tmp/httpx_leak2.py` في المراجعة) تُعاد وتُظهر `client_secret in log: False`.
+- [ ] H1-I1, H3-I1, H4-I1, H6-I1, H7-I1 موجودة بالاسم وناجحة على PG.
+- [ ] `grep -rn "f\".*{exc}" src/modules/social_connect/meta_client.py` ⇒ فارغ.
+- [ ] كوميتان فوق `main`؛ لا ملف محظور مُسّ.
 
 ---
 
-## 3. الاختبارات الإلزامية
-
-### Part A — وحدة (fakes/in-memory repos، بلا I/O)
-| # | الاختبار |
-|---|---|
-| A-U1 | التسجيل ينشئ مستأجراً ومستخدماً؛ بريد مكرر (بحالة أحرف مختلفة `A@x.com` vs `a@x.com`) ⇒ 409؛ slug مكرر ⇒ 409 **ولا يُنشأ مستخدم يتيم** |
-| A-U2 | سياسة كلمة المرور: < 10 ⇒ 422؛ = البريد ⇒ 422 |
-| A-U3 | الدخول: صحيح ⇒ 200 + كوكي بـ`HttpOnly; SameSite=Strict; Path=/api/v1/auth`؛ بريد غير موجود وكلمة خاطئة ⇒ **نفس** 401 `invalid_credentials`؛ مستخدم غير نشط ⇒ 403 |
-| A-U4 | التوقيت الثابت: `verify` يُستدعى مرة واحدة في الحالتين (بريد موجود/غير موجود) — يُفحص عبر hasher وهمي يعدّ الاستدعاءات |
-| A-U5 | JWT: `exp` = iat+900؛ `aud`/`iss` خاطئان ⇒ 401؛ `alg=none` ⇒ 401؛ رمز منتهٍ ⇒ 401؛ توقيع بسر آخر ⇒ 401 |
-| A-U6 | Refresh: الدوران يُبطل القديم ويُنشئ جديداً؛ القديم بعد الدوران ⇒ 401 `refresh_reuse_detected` **وكل جلسات المستخدم مُبطَلة**؛ منتهٍ ⇒ `refresh_expired`؛ بلا كوكي ⇒ `refresh_missing` |
-| A-U7 | CSRF: refresh بلا `X-Requested-With` وبـ`Origin` خارجي ⇒ 403؛ مع `Origin` ضمن القائمة ⇒ 200 |
-| A-U8 | logout يمسح الكوكي (`Max-Age=0`) ويُبطل الجلسة؛ logout-all يُبطل جميعها؛ `CurrentUserFresh` بعد logout ⇒ 401 `session_revoked`؛ `CurrentUser` (بلا DB) ما زال يقبل الرمز حتى انتهائه — **سلوك موثَّق ومُختبَر** |
-| A-U9 | Rate limit: الطلب 11 خلال دقيقة ⇒ 429 + `Retry-After`؛ 5 فشل لبريد ⇒ 429 لذلك البريد فقط |
-| A-U10 | `/auth/me` يعيد المستأجر؛ حارس Zero-Secret الموسّع: لا `password`/`hash`/`secret` في أي schema استجابة ولا في `/openapi.json` responses |
-| A-U11 | `check_needs_rehash` ⇒ إعادة التجزئة تُحفظ (hasher وهمي يعلن الحاجة) |
-| A-U12 | الإعدادات: غياب `AUTH_JWT_SECRET` في `production` ⇒ `ValidationError` عند الإقلاع؛ في `development` ⇒ تحذير واحد وسر عشوائي |
-
-### Part B — وحدة
-| # | الاختبار |
-|---|---|
-| B-U1 | **بارامتري على كل مسار** في `app.routes` تحت `/api/v1` عدا `/auth/register|login|refresh` و`/social/meta/callback` و`/health*`: بلا Bearer ⇒ 401 مع `WWW-Authenticate` |
-| B-U2 | المالك (JWT) ينشئ علامة ⇒ `owner_tenant_id == actor.tenant_id`؛ محاولة تمرير `tenant_id` في الجسم ⇒ 422 (`extra="forbid"`) |
-| B-U3 | الوكالة (JWT) تبدأ اتصالاً لعلامة ممنوحة ⇒ `state.t == AGENCY_ID`؛ الغريب ⇒ 404 |
-| B-U4 | `state` الصادر يحمل `u` = user_id؛ callback بـ`state` صالح يعمل بلا Bearer (مسار إعادة توجيه Meta) |
-| B-U5 | `?tenant_id=` مُرسَل مع Bearer ⇒ **يُتجاهَل** (الهوية من الرمز)؛ `grep alias="tenant_id"` فارغ |
-| B-U6 | `POST /tenants` ⇒ 404/405 (محذوف) |
-
-### تكامل (PostgreSQL حقيقية)
-| # | الاختبار |
-|---|---|
-| I-A1 | هجرة `0004` صعود/نزول/صعود؛ `uq_users_email_lower` يرفض `A@x.com` بعد `a@x.com` |
-| I-A2 | التدفق الكامل: register ⇒ me ⇒ refresh (دوران) ⇒ إعادة استخدام القديم ⇒ 401 + كل الجلسات مُبطَلة في DB ⇒ login جديد ⇒ logout-all ⇒ `refresh_sessions` كلها `revoked_at IS NOT NULL` |
-| I-A3 | التسجيل بـslug مكرر ⇒ 409 و`SELECT count(*) FROM users` لم يتغير (ذرية المعاملة) |
-| I-A4 | `password_hash` يبدأ بـ`$argon2id$`؛ `token_hash` ≠ قيمة الكوكي؛ لا عمود يحوي السر الخام |
-| I-B1 | تدفق SPRINT-03 الكامل (I-B8 السابق) يعمل **بـ JWT** بدل `tenant_id`: register مالك + register وكالة ⇒ brand ⇒ grant ⇒ start (الوكالة) ⇒ callback (respx) ⇒ selection ⇒ revoke ⇒ اتصالات الوكالة 0 |
-| I-B2 | `CurrentUserFresh`: بعد `logout` ⇒ `DELETE …/connections/{id}` ⇒ 401؛ `GET …/connections` بنفس الرمز ⇒ 200 حتى الانتهاء (موثَّق) |
-
----
-
-## 4. معايير القبول
-
-- [ ] CI خضراء على PR #9 (الفحوص الخمسة؛ `licenses` يقبل `pyjwt`, `argon2-cffi`, `email-validator`).
-- [ ] 0 فشل (وحدة + تكامل)؛ تغطية ≥ 95%؛ ruff نظيف.
-- [ ] `grep -rn 'alias="tenant_id"' src` ⇒ فارغ؛ `grep -rn "TEMPORARY" src` ⇒ فارغ.
-- [ ] B-U1 البارامتري يغطي **كل** مسار محمي (عدد الحالات = عدد المسارات المحمية، يُطبع في §7).
-- [ ] `/openapi.json`: مخطط أمان `bearerAuth` مُعلَن ومطبَّق على كل المسارات المحمية؛ لا حقل `password|hash|secret|token` في الاستجابات إلا `access_token` و`has_page_token`.
-- [ ] لا `python-jose`/`passlib` في `pyproject.toml`.
-- [ ] `alembic upgrade head` ⇒ `0004`؛ `downgrade 0003` ⇒ `upgrade head`.
-- [ ] كوميتان على `work/implementation` فوق `main` (+ كوميت توثيق اختياري)؛ لا ملف محظور مُسّ؛ gitleaks نظيف.
-- [ ] §7 مملوء و`WORK_STATE.md` §1/§3/§4/§5/§6 محدَّثة.
-
----
-
-## 5. أوامر التشغيل
+## 4. أوامر
 
 ```bash
 git checkout work/implementation && git fetch origin && git merge --ff-only origin/main
 pip install -e ".[dev]"
 export TEST_DATABASE_URL=postgresql+asyncpg://aigos@localhost:5433/ai_growth_os_test
 export AUTH_JWT_SECRET=$(python -c "import secrets;print(secrets.token_urlsafe(48))")
-
 ruff check src tests alembic scripts && ruff format --check src tests alembic scripts
-pytest -m "not integration" --cov=src --cov-fail-under=95
-pytest -m integration
-python -m venv /tmp/lic && /tmp/lic/bin/pip install -q . && /tmp/lic/bin/python scripts/check_licenses.py
-
-grep -rn 'alias="tenant_id"' src; grep -rn "TEMPORARY" src
-grep -n "python-jose\|passlib" pyproject.toml
-git diff --name-only origin/main...HEAD | grep -E "^(ARCHITECTURE_LOCK|SESSION_RECOVERY|imaster_planner|README)\.md$|^AI_Marketing_Platform_Hub/|^sprints/" && echo "FORBIDDEN TOUCHED" || echo "forbidden OK"
+pytest --cov=src --cov-fail-under=95
+grep -n "__Host-" -r src; grep -n 'f".*{exc}' src/modules/social_connect/meta_client.py
 ```
 
 ---
 
-## 6. التزامات المنفذ عند الإنهاء
+## 5. التزامات المنفذ
 
-1. **كوميت Part A**: `feat(auth): SPRINT-04 Part A — users/refresh_sessions, Argon2id, HS256 access JWT (15m), rotating HttpOnly refresh cookie with reuse detection, rate limiting` ⇒ ادفع فوراً ⇒ افتح **PR #9** بعنوان `SPRINT-04: Auth module + verified actor identity` ⇒ تأكد أن CI تعمل.
-2. **كوميت Part B**: `refactor(identity): SPRINT-04 Part B — ActorTenantId from JWT, drop tenant_id params/bodies, register creates tenant, auth-required guard for all protected routes` ⇒ ادفع فوراً.
-3. املأ **§7**؛ حدّث `WORK_STATE.md` (§1 ⇒ `SPRINT_04_DELIVERED_AWAITING_REVIEW`). كوميت توثيق ثالث مسموح.
-4. **لا تدمج PR #9 بنفسك.** المخطط يراجع ثم **يدمجه هو** عند الاعتماد (المالك لا يُطلب منه أي دمج يدوي — قاعدة دائمة من هذا السبرنت). عند التسليم اكتب في §7 وفي ردك على المالك: *«PR #9 جاهز لمراجعة المخطط»* — لا «بانتظار دمج المالك».
-5. أسئلة تعيق التنفيذ ⇒ §7 «أسئلة»، ونفّذ ما لا يعتمد عليها. **لا تخمّن في قرارات الأمن** (مدد الصلاحية، أسماء الكوكي، سياسة CSRF) — هي محددة أعلاه.
-
----
-
-## 7. تقرير المنفذ (يملؤه المنفذ)
-
-- **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي — السبب:` —
-- **Commit SHA Part A:** `b2bd3ad` — **Part B:** `b0a4ccf` — **docs:** الكوميت الذي يحمل هذا التقرير (فوق `b0a4ccf`).
-- **PR #11** (لا #9 — الرقمان #9/#10 استُهلكا بـ PRs المخطط): https://github.com/belalalibb/ai_agancy_markting/pull/11 — **رابط تشغيل CI الأخضر:** PR run https://github.com/belalalibb/ai_agancy_markting/actions/runs/41003801090 · push run https://github.com/belalalibb/ai_agancy_markting/actions/runs/41003796062 (الفحوص الخمسة `success` على `b0a4ccf`).
-- **`pytest -m "not integration"` / `-m integration` / الكل:** **413** / **21** / **434** ناجحاً، 0 فشل (محلياً على PostgreSQL 17 + pgvector؛ CI على `pgvector/pgvector:pg16`).
-- **التغطية:** **99%** (2054 عبارة، 2 غير مغطاة؛ الحد 95).
-- **ruff:** `ruff check src tests alembic scripts` ⇒ All checks passed؛ `ruff format --check` ⇒ 87 ملفاً مُنسَّقاً.
-- **`check_licenses.py`:** exit **0** في venv نظيف (`pip install .` فقط) — 39 حزمة، 0 مرفوضة. الحزم الجديدة: `pyjwt 2.15.1` (MIT)، `argon2-cffi 25.1.0` (MIT) + `argon2-cffi-bindings` (MIT)، `email-validator 2.3.0` (Unlicense) + `dnspython` (ISC). لا `python-jose` ولا `passlib`.
-- **B-U1 البارامتري:** عدد المسارات المحمية المغطاة = **15** (auth: `me`, `logout`, `logout-all` ×3 + tenancy ×7 + social ×5)، يُطبع في `tests/test_auth_guard.py::test_protected_route_count_is_reported`؛ كل مسار ⇒ 401 + `WWW-Authenticate: Bearer` بلا Bearer، و401 `token_invalid` مع Bearer تالف، و`security: [{bearerAuth: []}]` في OpenAPI. المسارات العامة الوحيدة: `register/login/refresh`، `/social/meta/callback`، `/health*`.
-- **I-A2 (الدوران + كشف إعادة الاستخدام) على PG:** ناجح — register ⇒ me ⇒ refresh (الجلسة القديمة `revoked_at IS NOT NULL` و`replaced_by` = الجديدة) ⇒ إعادة استخدام الكوكي القديمة ⇒ 401 `refresh_reuse_detected` و**0** جلسات حية للمستخدم في DB ⇒ login ×2 (بريد بحالة أحرف مختلفة) ⇒ logout-all ⇒ 4/4 جلسات `revoked_at IS NOT NULL`، `last_login_at` مضبوط. أيضاً I-A1 (0004 صعود/نزول/صعود + `uq_users_email_lower` يرفض `A@x.com` بعد `a@x.com` + `uq_users_tenant_id` يرفض مستخدماً ثانياً)، I-A3 (داخل I-B1: slug مكرر ⇒ 409 وعدد `users` ثابت)، I-A4 (`$argon2id$`، `token_hash` ≠ سر الكوكي، لا عمود/قيمة تحمل السر الخام)، I-B1 (التدفق الكامل بـ JWT حقيقي من `/auth/register`، الكولباك بلا Bearer، الوكالة تفقد كل الاتصالات بعد سحب المنحة)، I-B2 (`CurrentUserFresh` بعد logout: GET 200 / DELETE وPUT selection ⇒ 401 `session_revoked`، لا حذف).
-- **اختبارات حُذفت/أُعيدت تسميتها (بالاسم والسبب):**
-  - حُذفت `test_create_tenant_201` / `test_create_tenant_rejects_bad_slug` / `test_create_tenant_accepts_edge_slugs` / `test_create_tenant_duplicate_slug_409` (tenancy/test_router) — المسار `POST /tenants` حُذف (B4)؛ تغطيتها انتقلت إلى `tests/modules/auth/test_router.py` (A-U1/A-U2) و`test_post_tenants_is_gone_tenants_come_from_register` (B-U6).
-  - أُعيدت تسمية `test_tenant_id_is_required_and_uuid_on_read_routes` ⇒ `test_bearer_is_required_on_read_routes_and_query_tenant_id_is_ignored` (social/test_router) — الدلالة تغيّرت من 422 (غياب `?tenant_id`) إلى 401 (غياب Bearer) + B-U5.
-  - أُعيدت تسمية `test_full_tenancy_flow_via_api` (I-B8) ⇒ `test_full_tenancy_flow_via_api_with_jwt` (I-B1) — نفس التدفق بهوية JWT من `/auth/register`.
-  - `test_start_connection_validates_body` أُعيدت كتابتها: الجسم اختياري وفارغ؛ `tenant_id` في الجسم ⇒ 422.
-  - توقع `test_alembic_0003_migrates_legacy_rows_and_roundtrips`: `head == "0004"` بدل `"0003"`.
-- **انحرافات عن التوجيه (بالسطر والسبب):**
-  1. **رقم الـPR:** التوجيه يقول «PR #9»؛ #9 و#10 استُهلكا بـ PRs المخطط فالـPR الفعلي **#11** (نفس العنوان المطلوب).
-  2. **`POST /auth/refresh` عند الخطأ يُعيد `JSONResponse` بدل `raise HTTPException`** (router.py): رفع الاستثناء يجعل `get_db_session` يُرجع المعاملة فيضيع `revoke_all_for_user` الخاص بكشف إعادة الاستخدام (ثبت ذلك في I-A2 على PG). الاستجابة 401 نفسها + مسح الكوكي + `WWW-Authenticate`.
-  3. **`ip` في `refresh_sessions` يُخزَّن فقط إن كان IPv4/IPv6 حرفياً** (`_inet_or_none`) — العمود `INET` ويرفض نحو `testclient`/unix sockets؛ وإلا `NULL`. اختبار يؤكد تخزين IP حقيقي.
-  4. **`POST /auth/logout` يقبل الكوكي و/أو Bearer** (`OptionalCurrentUser`): مع كوكي ⇒ CSRF إلزامي؛ Bearer وحده ⇒ يُبطل `sid` الرمز؛ لا شيء ⇒ 401 `refresh_missing`. التوجيه لم يحدد مصدر الهوية لـ logout فاعتمدتُ الأوسع أماناً.
-  5. **CSRF (A6) مع الحالة «ترويسة موجودة + Origin خارجي»:** رُفضت (403) حتى مع الترويسة المخصصة — التوجيه ينص «قائمة فارغة ⇒ رفض أي Origin خارجي»، فطبّقتُه حرفياً حتى لو حضرت الترويسة. «لا Origin + ترويسة» ⇒ OK كما هو مطلوب.
-  6. **`AUTH_JWT_SECRET` < 32 بايت ⇒ فشل الإقلاع** في كل البيئات (ليس فقط غيابه) — تشديد يتسق مع «≥32 بايت».
-  7. **`OAuthStateSigner.decode_payload()`** أُضيفت (إلى جانب `verify`) لكشف claim `u` للتدقيق/الاختبارات؛ `verify` لم يتغير توقيعه. `u` اختياري عند التحقق (states قديمة تبقى صالحة).
-  8. **`ConnectionStartRequest` أصبح جسماً فارغاً اختيارياً** (`payload: ... | None = None`) بدل حذفه: يحافظ على `extra="forbid"` فيُرفض `tenant_id` بـ 422 (B-U2) ويسمح بطلب بلا جسم.
-  9. **حارس Zero-Secret الموسَّع** يتبع إغلاق `$ref` من `responses` فقط (لا يمسح `RegisterRequest`/`LoginRequest` التي تحمل `password` شرعاً)، ويسمح بـ `access_token` و`token_type` (ثابت `"bearer"` الذي يفرضه A7) و`has_page_token`.
-  10. **اختبارات التكامل:** `integration_app` يبدّل `get_rate_limiter` بـ `FakeRateLimiter` (المحدِّد الفعلي process-wide وكان سيتراكم عبر الاختبارات على نفس «IP»)، كما يقضي A8 «معطّل في الاختبارات عبر fake».
-  11. **ملفات اختبار إضافية غير مطلوبة بالاسم:** `tests/modules/auth/test_infrastructure.py` (hasher/limiter/repos على StubSession)، `test_dependencies.py`، `test_jwt_and_config.py`، `tests/test_auth_guard.py` — لرفع التغطية فوق 95 وإثبات العقود.
-  12. **بيئة المنفذ:** ساندبوكس أُعيد تشغيله **≥ 15 مرة** خلال السبرنت؛ الدفع بعد كل نقطة تفتيش أنقذ العمل كل مرة؛ كوميتات WIP سُحقت نهائياً في الكوميتين المطلوبين. gitleaks رصد الكلمة الوهمية `wrong-pass-123` في Part A (ثلاثة مواضع) فأُعيد بناء Part A بثابت `WRONG_PASSWORD` مع `# gitleaks:allow` ثم أُعيد cherry-pick لـ Part B — لذا تغيّر SHA الجزء A بعد فتح الـPR (`f9d61a7` ⇒ `b2bd3ad`).
-- **أسئلة:**
-  1. هل يُعتمد «الجسم الاختياري الفارغ» لـ `start` أم يُفضَّل حذف نموذج الطلب كلياً (عندها لا يمكن رفض `tenant_id` بـ 422 — سيُتجاهل بصمت)؟
-  2. `CurrentUser` يقبل رمزاً صالحاً حتى `exp` (≤15 دقيقة) بعد logout على مسارات القراءة — موثَّق ومختبَر (A-U8/I-B2). هل يُطلب لاحقاً نقل مسارات قراءة بعينها (مثل `GET /auth/me`) إلى `CurrentUserFresh`؟
-  3. المحدِّد in-memory process-local؛ عند التوسع الأفقي يلزم Redis خلف نفس `RateLimiter` Protocol — هل يُسجَّل كقرار مؤجل في Hub؟
-  4. 🔑 تذكير: توكن GitHub المستخدم في هذه الجلسات ظهر في الدردشة مراراً — يُرجى حذفه/تدويره بعد اعتماد الـPR.
+1. **Part A** كوميت: `fix(security): SPRINT-04.1 Part A — agency page isolation & connection ownership (H1), Graph secrets out of URLs + log redaction (H2), out-of-band reauth status & non-selectable pages (H3), pagination host check & ON CONFLICT inserts (H4)` ⇒ ادفع ⇒ افتح **PR #12** `SPRINT-04.1: security hotfix (8 verified findings)`.
+2. **Part B** كوميت: `fix(auth): SPRINT-04.1 Part B — __Secure- refresh cookie (H5), full CurrentUserFresh check (H6), atomic refresh rotation (H7), bounded rate limiter (H8)` ⇒ ادفع.
+3. §7 + `WORK_STATE.md` (§1 ⇒ `SPRINT_04_1_DELIVERED_AWAITING_REVIEW`). عند التسليم: *«PR #12 جاهز لمراجعة المخطط»*. **لا تدمج.**
+4. أي بند لا يمكن تنفيذه كما حُدد (خاصة H2: إن رفض Graph `Authorization: Bearer` لمسار ما) ⇒ **لا تُعِد السر إلى الرابط**؛ استخدم POST بجسم form لذلك المسار ووثّق في §7.
 
 ---
 
-## 8. ما ينتظر المالك (ليس للمنفذ)
+## 6. تقرير المنفذ (يملؤه المنفذ)
 
-> **قاعدة الدمج الدائمة (قرار المالك 2026-10-30):** المالك **لا يدمج يدوياً**. المخطط يدمج PRs توجيهاته فور فتحها، ويدمج PRs المنفذ بعد مراجعتها واعتمادها. دور المالك: القرارات، التوكن، وإطلاق المنفذ.
+- **حالة التنفيذ:** `[ ] مكتمل` / `[ ] جزئي — السبب:`
+- **Commit SHA Part A:** `…` — **Part B:** `…` — **docs:** `…`
+- **PR #12:** … — **CI:** …
+- **الاختبارات:** وحدة … / تكامل … / الكل … — **التغطية:** …%
+- **H2: أسطر `headers=`/`data=` التي تحمل الأسرار، وأي مسار Graph احتاج POST بدل Bearer:** …
+- **H7-I1: نتيجة السباق على PG:** …
+- **انحرافات (بالسطر والسبب):** …
+- **أسئلة:** …
 
-1. 🔑 **تدوير توكن GitHub** المستخدم في الجلسات (ظهر في الدردشة مراراً) وإرسال الجديد مع «تابع» القادمة.
-2. 🛡️ **حماية الفرع `main`**: الفحوص الخمسة Required + Require PR + up-to-date (الفحوص ظاهرة الآن بعد PR #7).
-3. **قرار مؤجل (لا يحجب 04):** العضوية المتعددة داخل المستأجر (`tenant_members` بأدوار) — التوصية: SPRINT-05 أو 06 حسب أولوية المحتوى.
-4. **قرار مؤجل:** تفويض `MANAGER ⇒ VIEWER` — مرفوض حالياً (مراجعة 03 §4-س2)؛ يُعاد فتحه مع `tenant_members`.
-5. ✅ **أُنجز مبكراً (PR #10):** Hub docs مُزامَنة — `DECISION_LOG` D-056…D-063، `SECURITY_BASELINE`، `DATA_AND_INTEGRATIONS`، `DEFERRED_DECISIONS`، `CHANGELOG`. بعد اعتماد SPRINT-04 يُضاف فقط سطر «Auth ✅» في جدول حالة التنفيذ.
+---
+
+## 7. ما ينتظر المالك
+
+1. 🔑 **تدوير توكن GitHub — الطلب الثالث.** إلزامي قبل SPRINT-05.
+2. 🛡️ حماية `main` بالفحوص الخمسة.
+3. بعد اعتماد 04.1: المخطط يحدّث `SECURITY_BASELINE` §2 و`KNOWN_ISSUES` (درس: «رؤية الصفحات غير المختارة» و«الأسرار في query params» كانا ثغرتي توجيه).
