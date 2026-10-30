@@ -1,9 +1,13 @@
-"""Unit tests — HMAC-signed OAuth ``state`` (SPRINT-02 A5 / C2)."""
+"""Unit tests — HMAC-signed OAuth ``state`` (SPRINT-02 A5 / C2, SPRINT-03 B-U14).
+
+SPRINT-03: the payload carries ``t`` (tenant) **and** ``b`` (brand), both UUIDs.
+"""
 
 from __future__ import annotations
 
 import base64
 import json
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import SecretStr
@@ -18,6 +22,9 @@ from src.core.oauth_state import (
 pytestmark = pytest.mark.unit
 
 SECRET = "unit-test-state-secret"
+TENANT_A = UUID("11111111-1111-4111-8111-111111111111")
+TENANT_B = UUID("22222222-2222-4222-8222-222222222222")
+BRAND = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
 
 class FakeClock:
@@ -39,21 +46,23 @@ def signer(clock: FakeClock) -> OAuthStateSigner:
 
 
 def test_oauth_state_roundtrip(signer: OAuthStateSigner) -> None:
-    state = signer.issue("tenant-a")
+    state = signer.issue(TENANT_A, BRAND)
     assert state.count(".") == 1
-    assert signer.verify(state) == "tenant-a"
+    assert signer.verify(state) == (TENANT_A, BRAND)
+    payload = json.loads(base64.urlsafe_b64decode(state.split(".")[0] + "=="))
+    assert set(payload) == {"t", "b", "n", "iat"}
 
 
 def test_oauth_state_is_unique_per_issue(signer: OAuthStateSigner) -> None:
-    assert signer.issue("t") != signer.issue("t")
+    assert signer.issue(TENANT_A, BRAND) != signer.issue(TENANT_A, BRAND)
 
 
 def test_oauth_state_tampered_rejected(signer: OAuthStateSigner) -> None:
-    state = signer.issue("tenant-a")
+    state = signer.issue(TENANT_A, BRAND)
     body, sig = state.split(".")
     # Flip the tenant inside the payload while keeping the original signature.
     payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-    payload["t"] = "tenant-b"
+    payload["t"] = str(TENANT_B)
     forged_body = (
         base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode())
         .rstrip(b"=")
@@ -73,16 +82,16 @@ def test_oauth_state_tampered_rejected(signer: OAuthStateSigner) -> None:
 
 
 def test_oauth_state_expired_rejected(signer: OAuthStateSigner, clock: FakeClock) -> None:
-    state = signer.issue("tenant-a")
+    state = signer.issue(TENANT_A, BRAND)
     clock.now += 599
-    assert signer.verify(state) == "tenant-a"
+    assert signer.verify(state) == (TENANT_A, BRAND)
     clock.now += 2
     with pytest.raises(InvalidOAuthStateError, match="expired"):
         signer.verify(state)
 
 
 def test_oauth_state_future_rejected(signer: OAuthStateSigner, clock: FakeClock) -> None:
-    state = signer.issue("tenant-a")
+    state = signer.issue(TENANT_A, BRAND)
     clock.now -= 61
     with pytest.raises(InvalidOAuthStateError, match="future"):
         signer.verify(state)
@@ -91,7 +100,7 @@ def test_oauth_state_future_rejected(signer: OAuthStateSigner, clock: FakeClock)
 def test_oauth_state_wrong_secret_rejected(signer: OAuthStateSigner, clock: FakeClock) -> None:
     other = OAuthStateSigner("another-secret", clock=clock)
     with pytest.raises(InvalidOAuthStateError):
-        other.verify(signer.issue("tenant-a"))
+        other.verify(signer.issue(TENANT_A, BRAND))
 
 
 @pytest.mark.parametrize(
@@ -103,12 +112,56 @@ def test_oauth_state_malformed_rejected(signer: OAuthStateSigner, garbage: str) 
         signer.verify(garbage)
 
 
+def _signed(signer: OAuthStateSigner, payload: bytes) -> str:
+    body = base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
+    sig = base64.urlsafe_b64encode(signer._sign(payload)).rstrip(b"=").decode()
+    return f"{body}.{sig}"
+
+
 def test_oauth_state_payload_missing_fields_rejected(signer: OAuthStateSigner) -> None:
-    for payload in (b"[]", b'{"t":"","iat":1}', b'{"t":"x"}', b"not-json"):
-        body = base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
-        sig = base64.urlsafe_b64encode(signer._sign(payload)).rstrip(b"=").decode()
+    t, b = str(TENANT_A), str(BRAND)
+    for payload in (
+        b"[]",
+        b'{"t":"","iat":1}',
+        b'{"t":"x"}',
+        b"not-json",
+        f'{{"t":"{t}","b":"{b}"}}'.encode(),  # no iat
+        f'{{"t":"{t}","b":"","iat":1800000000}}'.encode(),  # empty b
+        f'{{"t":"{t}","b":123,"iat":1800000000}}'.encode(),  # b not a string
+    ):
         with pytest.raises(InvalidOAuthStateError):
-            signer.verify(f"{body}.{sig}")
+            signer.verify(_signed(signer, payload))
+
+
+# ----------------------------------------------------------------- B-U14 ---
+def test_oauth_state_payload_without_brand_rejected(
+    signer: OAuthStateSigner, clock: FakeClock
+) -> None:
+    """A legacy (SPRINT-02) state with only ``t`` is rejected even when correctly signed."""
+    legacy = json.dumps(
+        {"t": str(TENANT_A), "n": "nonce", "iat": int(clock.now)}, separators=(",", ":")
+    ).encode()
+    with pytest.raises(InvalidOAuthStateError, match="missing required fields"):
+        signer.verify(_signed(signer, legacy))
+
+
+@pytest.mark.parametrize("bad", ["demo", "not-a-uuid", "12345678-1234", " "])
+def test_oauth_state_non_uuid_ids_rejected(
+    signer: OAuthStateSigner, clock: FakeClock, bad: str
+) -> None:
+    for key in ("t", "b"):
+        payload = {"t": str(TENANT_A), "b": str(BRAND), "n": "nonce", "iat": int(clock.now)}
+        payload[key] = bad
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        with pytest.raises(InvalidOAuthStateError, match="non-UUID"):
+            signer.verify(_signed(signer, raw))
+
+
+def test_oauth_state_verify_returns_uuid_instances(signer: OAuthStateSigner) -> None:
+    t, b = signer.verify(signer.issue(TENANT_A, BRAND))
+    assert isinstance(t, UUID) and isinstance(b, UUID)
+    other = uuid4()
+    assert signer.verify(signer.issue(other, BRAND)) == (other, BRAND)
 
 
 def test_empty_secret_rejected() -> None:
@@ -118,7 +171,7 @@ def test_empty_secret_rejected() -> None:
 
 def test_factory_reads_settings(settings: Settings) -> None:
     signer = get_oauth_state_signer(settings)
-    assert signer.verify(signer.issue("t")) == "t"
+    assert signer.verify(signer.issue(TENANT_A, BRAND)) == (TENANT_A, BRAND)
 
 
 def test_factory_requires_secret(settings: Settings) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -18,9 +19,11 @@ from src.modules.social_connect.schemas import (
     MetaTokenResponse,
     MetaUserInfo,
     PageAssetPublic,
+    PageSelectionRequest,
 )
+from src.modules.tenancy.schemas import BrandOut, BrandWithRoleOut, GrantOut, TenantOut
 
-from tests.conftest import pages_payload
+from tests.conftest import BRAND_ID, OWNER_ID, pages_payload
 
 pytestmark = pytest.mark.unit
 
@@ -131,7 +134,8 @@ def test_page_info_ignores_unknown_graph_fields() -> None:
 # ------------------------------------------------- Public views (SPRINT-02)
 def _sample_account() -> ConnectedAccount:
     return ConnectedAccount(
-        tenant_id="t1",
+        brand_id=BRAND_ID,
+        connected_by_tenant_id=OWNER_ID,
         provider_user_id="u1",
         encrypted_user_token="gAAAAA-user",
         granted_scopes=["pages_show_list"],
@@ -152,8 +156,20 @@ def _sample_account() -> ConnectedAccount:
 _ALLOWED_FLAG_FIELDS = frozenset({"has_page_token"})
 
 
+_PUBLIC_MODELS = (
+    ConnectedAccountPublic,
+    PageAssetPublic,
+    InstagramAssetPublic,
+    # B11 — tenancy outputs join the Zero-Secret guard.
+    TenantOut,
+    BrandOut,
+    BrandWithRoleOut,
+    GrantOut,
+)
+
+
 def test_public_schemas_have_no_token_fields() -> None:
-    for model in (ConnectedAccountPublic, PageAssetPublic, InstagramAssetPublic):
+    for model in _PUBLIC_MODELS:
         for name, info in model.model_fields.items():
             if name in _ALLOWED_FLAG_FIELDS:
                 assert info.annotation is bool, f"{model.__name__}.{name} must be a bool flag"
@@ -168,6 +184,9 @@ def test_connected_account_public_from_domain_drops_secrets() -> None:
     assert "gAAAAA" not in dumped
     assert "token" not in dumped.lower().replace("has_page_token", "")
     assert "expires_at" in dumped
+    assert str(BRAND_ID) in dumped
+    assert str(OWNER_ID) in dumped
+    assert "tenant_id" not in dumped.replace("connected_by_tenant_id", "")
     assert public.pages[0].instagram is not None
     assert public.pages[0].instagram.username == "nile"
     assert public.pages[1].instagram is None
@@ -195,11 +214,31 @@ def test_page_info_from_graph_extracts_full_instagram_asset() -> None:
 
 
 def test_connection_start_request_validation() -> None:
-    assert ConnectionStartRequest(tenant_id="  demo ").tenant_id == "demo"
+    req = ConnectionStartRequest(tenant_id=str(OWNER_ID))
+    assert isinstance(req.tenant_id, UUID)
+    assert req.tenant_id == OWNER_ID
     with pytest.raises(ValidationError):
         ConnectionStartRequest(tenant_id="")
     with pytest.raises(ValidationError):
-        ConnectionStartRequest(tenant_id="x", extra="no")  # type: ignore[call-arg]
+        ConnectionStartRequest(tenant_id="demo")  # legacy free-form slugs are rejected
+    with pytest.raises(ValidationError):
+        ConnectionStartRequest(tenant_id=str(OWNER_ID), extra="no")  # type: ignore[call-arg]
+
+
+def test_page_selection_request_validation() -> None:
+    """B6 — page ids: 1..50, non-empty, unique; tenant_id is a UUID."""
+    req = PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=["1001", "1002"])
+    assert req.page_ids == ["1001", "1002"]
+    with pytest.raises(ValidationError):
+        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=[])
+    with pytest.raises(ValidationError):
+        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=["1001", "1001"])
+    with pytest.raises(ValidationError):
+        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=[" "])
+    with pytest.raises(ValidationError):
+        PageSelectionRequest(tenant_id="not-a-uuid", page_ids=["1001"])
+    with pytest.raises(ValidationError):
+        PageSelectionRequest(tenant_id=str(OWNER_ID), page_ids=[str(i) for i in range(51)])
 
 
 def test_page_asset_public_has_page_token_flag() -> None:

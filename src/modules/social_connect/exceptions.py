@@ -128,3 +128,14 @@ def _as_int(value: Any) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+class UnknownPageIdsError(ValueError):
+    """B6 selection: requested ``page_ids`` not among the Pages Meta returns for the user.
+
+    Mapped to 422 ``{"error": "unknown_page_ids", "page_ids": [...]}``; nothing is written.
+    """
+
+    def __init__(self, page_ids: list[str]) -> None:
+        super().__init__(f"unknown page ids: {', '.join(page_ids)}")
+        self.page_ids = list(page_ids)

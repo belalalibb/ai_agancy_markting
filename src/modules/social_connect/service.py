@@ -1,23 +1,37 @@
-"""Application service orchestrating the Meta onboarding flow (SPRINT-02 §5-C).
+"""Application service orchestrating the Meta onboarding flow (SPRINT-02 §5-C, SPRINT-03 B6).
 
 Responsibilities
 ----------------
-1. ``start_connection``    — issue a signed CSRF ``state`` and the Facebook Login URL.
+1. ``start_connection``    — issue a signed CSRF ``state`` (tenant + brand) and the Login URL.
 2. ``complete_connection`` — verify ``state`` → exchange ``code`` → identify the user via
    ``GET /me`` (mandatory, trusted identity) → validate the token via ``/debug_token``
    (optional: when present it must be valid, issued to *our* app and belong to the same
-   user as ``/me``) → list Pages (+ IG accounts) → encrypt every token → persist.
-   There is deliberately **no derived / fallback identity** (SPRINT-02.1 F3).
-3. ``list/get/disconnect`` — tenant-scoped reads/deletes through the repository.
+   user as ``/me``) → list Pages (+ IG accounts) → apply the **page selection policy**
+   (B6) → encrypt → persist. No derived / fallback identity (SPRINT-02.1 F3).
+3. ``select_pages``        — B6 explicit selection: re-fetch Pages, store tokens only for the
+   selected ones, wipe tokens of deselected ones.
+4. ``list/get/disconnect`` — brand-scoped reads/deletes through the repository.
 
-The service never touches SQLAlchemy (ARCHITECTURE_LOCK D-013); persistence is behind
-:class:`ConnectedAccountRepository`. Plaintext tokens exist only inside
-``complete_connection`` and are never logged or returned.
+Page selection policy (B6 + owner note on reconnect):
+* exactly one Page returned ⇒ stored **selected** with its token (no mixing possible);
+* two or more Pages ⇒ metadata only (``is_selected=false``, token ``NULL``, IG kept) —
+  **except** when a connection for the same ``(brand, provider, provider_user_id)`` already
+  exists: the previously selected Pages keep their selection and get **fresh** encrypted
+  tokens (token renewal must not wipe the brand's selection); unselected Pages stay
+  token-less;
+* zero Pages ⇒ the connection is stored without Pages.
+
+Invariant after every operation: no Page with ``is_selected=false`` and a stored token.
+
+The service never touches SQLAlchemy (ARCHITECTURE_LOCK D-013). Plaintext tokens exist
+only transiently here and are never logged or returned. B7: ``provider_user_name`` /
+``provider_user_id`` are never written to logs either.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -37,6 +51,7 @@ from src.modules.social_connect.exceptions import (
     MetaTokenExpiredError,
     MetaTokenForeignAppError,
     MetaTokenInvalidError,
+    UnknownPageIdsError,
 )
 from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.social_connect.schemas import (
@@ -48,8 +63,12 @@ from src.modules.social_connect.schemas import (
 logger = logging.getLogger(__name__)
 
 
+class SelectionInvariantError(RuntimeError):
+    """Defensive guard: an unselected Page would have been stored with a token."""
+
+
 class MetaConnectService:
-    """Use-case layer for connecting a Meta (Facebook/Instagram) account to a tenant."""
+    """Use-case layer for connecting a Meta (Facebook/Instagram) account to a brand."""
 
     def __init__(
         self,
@@ -66,25 +85,31 @@ class MetaConnectService:
         self._settings = settings
 
     # ------------------------------------------------------------- start ---
-    def start_connection(self, tenant_id: str) -> MetaAuthorizeUrlResponse:
-        state = self._state_signer.issue(tenant_id)
+    def start_connection(self, tenant_id: UUID, brand_id: UUID) -> MetaAuthorizeUrlResponse:
+        state = self._state_signer.issue(tenant_id, brand_id)
         url, _ = self._client.build_authorize_url(
             self._settings.meta_oauth_redirect_uri, state=state
         )
         return MetaAuthorizeUrlResponse(authorization_url=url, state=state)
 
-    # ---------------------------------------------------------- complete ---
-    async def complete_connection(self, state: str, code: str) -> ConnectedAccount:
-        """Full callback flow. Raises ``InvalidOAuthStateError`` / ``MetaGraphError``."""
-        tenant_id = self._state_signer.verify(state)
+    def verify_state(self, state: str) -> tuple[UUID, UUID]:
+        """Expose ``(tenant_id, brand_id)`` so the router can authorise *before* any Graph call."""
+        return self._state_signer.verify(state)
 
+    # ---------------------------------------------------------- complete ---
+    async def complete_connection(
+        self, tenant_id: UUID, brand_id: UUID, code: str
+    ) -> ConnectedAccount:
+        """Full callback flow (state already verified + authorised by the caller).
+
+        Raises ``MetaGraphError`` subclasses on provider failures.
+        """
         token = await self._client.exchange_code_for_token(
             code=code, redirect_uri=self._settings.meta_oauth_redirect_uri
         )
         long_lived = token.long_lived_token.get_secret_value()
 
         # Step 3 (SPRINT-02.1 F2/F3): the identity is *always* the token owner per ``/me``.
-        # A failure here is fatal — we never persist a connection with a guessed identity.
         me = await self._client.get_me(long_lived)
 
         # ``/debug_token`` is best-effort for scopes/expiry, but when it does answer its
@@ -115,8 +140,16 @@ class MetaConnectService:
 
         pages = await self._client.get_user_pages(long_lived)
 
+        # B6 (+ owner note): preserve an existing selection on reconnect.
+        existing = await self._repository.find_by_identity(brand_id, Provider.META.value, me.id)
+        keep_selected = (
+            {p.page_id for p in existing.pages if p.is_selected} if existing is not None else set()
+        )
+        page_assets = self._apply_selection_policy(pages, keep_selected)
+
         account = ConnectedAccount(
-            tenant_id=tenant_id,
+            brand_id=brand_id,
+            connected_by_tenant_id=tenant_id,
             provider=Provider.META,
             provider_user_id=me.id,
             provider_user_name=me.name,
@@ -124,22 +157,73 @@ class MetaConnectService:
             token_expires_at=token_expires_at,
             granted_scopes=granted_scopes,
             status=AccountStatus.ACTIVE,
-            connected_at=datetime.now(tz=UTC),
+            connected_at=existing.connected_at if existing else datetime.now(tz=UTC),
             last_synced_at=datetime.now(tz=UTC),
-            pages=[self._to_page_asset(page) for page in pages],
+            pages=page_assets,
         )
-        return await self._repository.upsert(account)
+        _assert_invariant(account.pages)
+        stored = await self._repository.upsert(account)
+        logger.info(
+            "meta connection stored: brand=%s pages=%d selected=%d reconnect=%s",
+            brand_id,
+            len(stored.pages),
+            sum(1 for p in stored.pages if p.is_selected),
+            existing is not None,
+        )
+        return stored
+
+    # --------------------------------------------------------- selection ---
+    async def select_pages(
+        self, brand_id: UUID, account_id: UUID, page_ids: Iterable[str]
+    ) -> ConnectedAccount | None:
+        """B6: make exactly ``page_ids`` the selected Pages of the connection.
+
+        * unknown ids ⇒ ``UnknownPageIdsError`` and **no** DB change;
+        * expired user token (190) ⇒ ``MetaTokenExpiredError`` after marking the
+          connection ``reauth_required`` (caller maps to 401);
+        * returns ``None`` when the connection does not exist in this brand.
+        """
+        account = await self._repository.get(brand_id, account_id)
+        if account is None:
+            return None
+        requested = list(dict.fromkeys(page_ids))
+
+        user_token = self._encryption.decrypt_token(account.encrypted_user_token)
+        try:
+            fresh = await self._client.get_user_pages(user_token)
+        except MetaTokenExpiredError:
+            await self._repository.set_status(brand_id, account_id, AccountStatus.REAUTH_REQUIRED)
+            raise
+        finally:
+            del user_token
+
+        known = {p.page_id for p in fresh}
+        unknown = [pid for pid in requested if pid not in known]
+        if unknown:
+            raise UnknownPageIdsError(unknown)
+
+        new_pages = [self._to_page_asset(p, selected=p.page_id in requested) for p in fresh]
+        _assert_invariant(new_pages)
+        await self._repository.replace_pages(brand_id, account_id, new_pages)
+        updated = await self._repository.get(brand_id, account_id)
+        logger.info(
+            "meta page selection updated: brand=%s selected=%d of %d",
+            brand_id,
+            len(requested),
+            len(new_pages),
+        )
+        return updated
 
     # ------------------------------------------------------------- reads ---
-    async def list_connections(self, tenant_id: str) -> list[ConnectedAccount]:
-        return await self._repository.list_by_tenant(tenant_id)
+    async def list_connections(self, brand_id: UUID) -> list[ConnectedAccount]:
+        return await self._repository.list_by_brand(brand_id)
 
-    async def get_connection(self, tenant_id: str, account_id: UUID) -> ConnectedAccount | None:
-        return await self._repository.get(tenant_id, account_id)
+    async def get_connection(self, brand_id: UUID, account_id: UUID) -> ConnectedAccount | None:
+        return await self._repository.get(brand_id, account_id)
 
-    async def disconnect(self, tenant_id: str, account_id: UUID) -> bool:
+    async def disconnect(self, brand_id: UUID, account_id: UUID) -> bool:
         """Remove the stored connection (DB only — no Meta call in this sprint)."""
-        return await self._repository.delete(tenant_id, account_id)
+        return await self._repository.delete(brand_id, account_id)
 
     def decrypt_stored_token(self, encrypted_token: str) -> str:
         """Helper for downstream modules that need the raw token transiently."""
@@ -167,15 +251,25 @@ class MetaConnectService:
             )
             return None
 
-    def _to_page_asset(self, page: MetaPageInfo) -> PageAsset:
-        # A Page without ``access_token`` (user lacks a Page role) is stored with
-        # ``encrypted_page_token = NULL`` (F4): the Page stays visible, nothing is
-        # encrypted (``encrypt_token("")`` would raise) and nothing can be decrypted.
+    def _apply_selection_policy(
+        self, pages: list[MetaPageInfo], keep_selected: set[str]
+    ) -> list[PageAsset]:
+        if len(pages) == 1:
+            return [self._to_page_asset(pages[0], selected=True)]
+        return [self._to_page_asset(p, selected=p.page_id in keep_selected) for p in pages]
+
+    def _to_page_asset(self, page: MetaPageInfo, *, selected: bool) -> PageAsset:
+        # Only a *selected* Page keeps its token. A Page without ``access_token`` (user
+        # lacks a Page role, F4) can never be selected — nothing to encrypt
+        # (``encrypt_token("")`` would raise) and nothing to act with.
         raw_page_token = (
             page.page_access_token.get_secret_value() if page.page_access_token else None
         )
+        is_selected = selected and raw_page_token is not None
         encrypted_page_token = (
-            self._encryption.encrypt_token(raw_page_token) if raw_page_token else None
+            self._encryption.encrypt_token(raw_page_token)
+            if is_selected and raw_page_token
+            else None
         )
         instagram = (
             InstagramAsset(
@@ -193,8 +287,16 @@ class MetaConnectService:
             category=page.category,
             tasks=list(page.permissions),
             encrypted_page_token=encrypted_page_token,
+            is_selected=is_selected,
             instagram=instagram,
         )
+
+
+def _assert_invariant(pages: list[PageAsset]) -> None:
+    """B6 invariant: ``NOT is_selected ⇒ encrypted_page_token IS NULL``."""
+    offenders = [p.page_id for p in pages if not p.is_selected and p.encrypted_page_token]
+    if offenders:  # pragma: no cover - construction above makes this unreachable
+        raise SelectionInvariantError(f"unselected pages with token: {offenders}")
 
 
 def _expiry_from_debug(debug: MetaDebugTokenInfo) -> datetime | None:

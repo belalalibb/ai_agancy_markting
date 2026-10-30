@@ -28,7 +28,7 @@ from src.modules.social_connect.infrastructure.orm import (
 
 
 class PostgresConnectedAccountRepository:
-    """Tenant-scoped persistence for connected accounts and their pages."""
+    """Brand-scoped persistence for connected accounts and their pages (SPRINT-03)."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -40,7 +40,8 @@ class PostgresConnectedAccountRepository:
             pg_insert(SocialConnectionRow)
             .values(
                 id=account.id,
-                tenant_id=account.tenant_id,
+                brand_id=account.brand_id,
+                connected_by_tenant_id=account.connected_by_tenant_id,
                 provider=account.provider.value,
                 provider_user_id=account.provider_user_id,
                 provider_user_name=account.provider_user_name,
@@ -53,8 +54,9 @@ class PostgresConnectedAccountRepository:
                 updated_at=now,
             )
             .on_conflict_do_update(
-                constraint="uq_social_connections_identity",
+                constraint="uq_social_connections_brand_identity",
                 set_={
+                    "connected_by_tenant_id": account.connected_by_tenant_id,
                     "provider_user_name": account.provider_user_name,
                     "encrypted_user_token": account.encrypted_user_token,
                     "token_expires_at": account.token_expires_at,
@@ -68,53 +70,77 @@ class PostgresConnectedAccountRepository:
         )
         connection_id: UUID = (await self._session.execute(stmt)).scalar_one()
 
-        # Replace pages wholesale inside the same transaction.
-        await self._session.execute(
-            delete(SocialConnectionPageRow).where(
-                SocialConnectionPageRow.connection_id == connection_id
-            )
-        )
-        if account.pages:
-            await self._session.execute(
-                pg_insert(SocialConnectionPageRow).values(
-                    [_page_values(connection_id, page) for page in account.pages]
-                )
-            )
-        await self._session.flush()
+        await self._write_pages(connection_id, account.pages)
 
-        stored = await self.get(account.tenant_id, connection_id)
+        stored = await self.get(account.brand_id, connection_id)
         if stored is None:  # pragma: no cover - defensive; the row was just written
             msg = "Upserted connection vanished within the transaction."
             raise RuntimeError(msg)
         return stored
 
-    async def set_status(self, tenant_id: str, account_id: UUID, status: AccountStatus) -> bool:
+    async def replace_pages(
+        self, brand_id: UUID, account_id: UUID, pages: list[PageAsset]
+    ) -> bool:
+        exists = (
+            await self._session.execute(
+                select(SocialConnectionRow.id).where(
+                    SocialConnectionRow.brand_id == brand_id, SocialConnectionRow.id == account_id
+                )
+            )
+        ).scalar_one_or_none()
+        if exists is None:
+            return False
+        await self._write_pages(account_id, pages)
+        await self._session.execute(
+            update(SocialConnectionRow)
+            .where(SocialConnectionRow.id == account_id)
+            .values(last_synced_at=datetime.now(tz=UTC), updated_at=datetime.now(tz=UTC))
+        )
+        await self._session.flush()
+        return True
+
+    async def _write_pages(self, connection_id: UUID, pages: list[PageAsset]) -> None:
+        """Replace pages wholesale inside the current transaction."""
+        await self._session.execute(
+            delete(SocialConnectionPageRow).where(
+                SocialConnectionPageRow.connection_id == connection_id
+            )
+        )
+        if pages:
+            await self._session.execute(
+                pg_insert(SocialConnectionPageRow).values(
+                    [_page_values(connection_id, page) for page in pages]
+                )
+            )
+        await self._session.flush()
+
+    async def set_status(self, brand_id: UUID, account_id: UUID, status: AccountStatus) -> bool:
         result = await self._session.execute(
             update(SocialConnectionRow)
             .where(
-                SocialConnectionRow.tenant_id == tenant_id,
+                SocialConnectionRow.brand_id == brand_id,
                 SocialConnectionRow.id == account_id,
             )
             .values(status=status.value, updated_at=datetime.now(tz=UTC))
         )
         return (result.rowcount or 0) > 0
 
-    async def delete(self, tenant_id: str, account_id: UUID) -> bool:
+    async def delete(self, brand_id: UUID, account_id: UUID) -> bool:
         result = await self._session.execute(
             delete(SocialConnectionRow).where(
-                SocialConnectionRow.tenant_id == tenant_id,
+                SocialConnectionRow.brand_id == brand_id,
                 SocialConnectionRow.id == account_id,
             )
         )
         return (result.rowcount or 0) > 0
 
     # ------------------------------------------------------------- reads ---
-    async def get(self, tenant_id: str, account_id: UUID) -> ConnectedAccount | None:
+    async def get(self, brand_id: UUID, account_id: UUID) -> ConnectedAccount | None:
         row = (
             await self._session.execute(
                 select(SocialConnectionRow)
                 .where(
-                    SocialConnectionRow.tenant_id == tenant_id,
+                    SocialConnectionRow.brand_id == brand_id,
                     SocialConnectionRow.id == account_id,
                 )
                 .execution_options(populate_existing=True)
@@ -122,10 +148,26 @@ class PostgresConnectedAccountRepository:
         ).scalar_one_or_none()
         return _to_domain(row) if row is not None else None
 
-    async def list_by_tenant(self, tenant_id: str) -> list[ConnectedAccount]:
+    async def find_by_identity(
+        self, brand_id: UUID, provider: str, provider_user_id: str
+    ) -> ConnectedAccount | None:
+        row = (
+            await self._session.execute(
+                select(SocialConnectionRow)
+                .where(
+                    SocialConnectionRow.brand_id == brand_id,
+                    SocialConnectionRow.provider == provider,
+                    SocialConnectionRow.provider_user_id == provider_user_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        return _to_domain(row) if row is not None else None
+
+    async def list_by_brand(self, brand_id: UUID) -> list[ConnectedAccount]:
         result = await self._session.execute(
             select(SocialConnectionRow)
-            .where(SocialConnectionRow.tenant_id == tenant_id)
+            .where(SocialConnectionRow.brand_id == brand_id)
             .order_by(SocialConnectionRow.connected_at, SocialConnectionRow.id)
             .execution_options(populate_existing=True)
         )
@@ -143,6 +185,7 @@ def _page_values(connection_id: UUID, page: PageAsset) -> dict[str, object]:
         "category": page.category,
         "tasks": list(page.tasks),
         "encrypted_page_token": page.encrypted_page_token,
+        "is_selected": page.is_selected,
         "ig_user_id": ig.ig_user_id if ig else None,
         "ig_username": ig.username if ig else None,
         "ig_name": ig.name if ig else None,
@@ -153,7 +196,8 @@ def _page_values(connection_id: UUID, page: PageAsset) -> dict[str, object]:
 def _to_domain(row: SocialConnectionRow) -> ConnectedAccount:
     return ConnectedAccount(
         id=row.id,
-        tenant_id=row.tenant_id,
+        brand_id=row.brand_id,
+        connected_by_tenant_id=row.connected_by_tenant_id,
         provider=Provider(row.provider),
         provider_user_id=row.provider_user_id,
         provider_user_name=row.provider_user_name,
@@ -185,5 +229,6 @@ def _page_to_domain(row: SocialConnectionPageRow) -> PageAsset:
         category=row.category,
         tasks=list(row.tasks or []),
         encrypted_page_token=row.encrypted_page_token,
+        is_selected=row.is_selected,
         instagram=instagram,
     )

@@ -115,12 +115,34 @@ class MetaAuthorizeUrlResponse(BaseModel):
 
 
 class ConnectionStartRequest(BaseModel):
-    """Body of ``POST /connections/start``."""
+    """Body of ``POST /brands/{brand_id}/social/meta/connections/start``."""
 
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
-    # TEMPORARY until auth module: the tenant is an explicit, caller-supplied value.
-    tenant_id: str = Field(..., min_length=1, max_length=64)
+    # TEMPORARY until auth module (B4): the acting tenant is an explicit body value.
+    tenant_id: UUID
+
+
+class PageSelectionRequest(BaseModel):
+    """Body of ``PUT …/connections/{id}/pages/selection`` (B6): 1–50 unique Page ids."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # TEMPORARY until auth module (B4).
+    tenant_id: UUID
+    page_ids: list[str] = Field(..., min_length=1, max_length=50)
+
+    @field_validator("page_ids")
+    @classmethod
+    def _unique_non_empty(cls, value: list[str]) -> list[str]:
+        cleaned = [v.strip() for v in value]
+        if any(not v for v in cleaned):
+            msg = "page_ids must not contain empty values"
+            raise ValueError(msg)
+        if len(set(cleaned)) != len(cleaned):
+            msg = "page_ids must be unique"
+            raise ValueError(msg)
+        return cleaned
 
 
 class MetaUserInfo(BaseModel):
@@ -170,6 +192,8 @@ class PageAssetPublic(BaseModel):
     category: str | None = None
     tasks: list[str] = Field(default_factory=list)
     instagram: InstagramAssetPublic | None = None
+    # B6: explicit selection flag — the selection UI needs *all* Pages with both flags.
+    is_selected: bool = False
     # Derived flag only — tells the client whether this Page can be acted upon; the
     # ciphertext itself is never exposed (Zero-Secret).
     has_page_token: bool = False
@@ -181,11 +205,16 @@ class PageAssetPublic(BaseModel):
         return cls.model_validate(data)
 
 
+# Directive naming (B6): ``PageAssetOut`` / ``ConnectedAccountOut`` are the public views.
+PageAssetOut = PageAssetPublic
+
+
 class ConnectedAccountPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="ignore")
 
     id: UUID
-    tenant_id: str
+    brand_id: UUID
+    connected_by_tenant_id: UUID
     provider: str
     provider_user_id: str
     provider_user_name: str | None = None
@@ -208,3 +237,6 @@ class ConnectedAccountPublic(BaseModel):
         data = account.model_dump(exclude={"pages", *_SENSITIVE_ACCOUNT_FIELDS})
         data["pages"] = [PageAssetPublic.from_domain(page) for page in account.pages]
         return cls.model_validate(data)
+
+
+ConnectedAccountOut = ConnectedAccountPublic

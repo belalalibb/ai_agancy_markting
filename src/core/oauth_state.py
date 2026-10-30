@@ -2,9 +2,10 @@
 
 ``state = base64url(payload) + "." + base64url(hmac_sha256(secret, payload))``
 
-The payload is ``{"t": tenant_id, "n": nonce, "iat": unix_ts}``. Verification checks
-the signature in constant time, rejects expired / future-dated states and returns
-the embedded ``tenant_id`` so the callback knows which tenant started the flow.
+The payload is ``{"t": tenant_id, "b": brand_id, "n": nonce, "iat": unix_ts}`` (SPRINT-03:
+both UUIDs). Verification checks the signature in constant time, rejects expired /
+future-dated states and returns ``(tenant_id, brand_id)`` so the callback knows which
+acting tenant started the flow and for which brand.
 
 Deliberately separate from :mod:`src.core.security` (Fernet token encryption): the two
 mechanisms protect different things and must never share a key.
@@ -20,6 +21,7 @@ import secrets
 import time
 from collections.abc import Callable
 from typing import Any
+from uuid import UUID
 
 from src.core.config import Settings, get_settings
 
@@ -63,13 +65,18 @@ class OAuthStateSigner:
         self._clock = clock
 
     # ------------------------------------------------------------------ API --
-    def issue(self, tenant_id: str) -> str:
-        payload = {"t": tenant_id, "n": secrets.token_urlsafe(16), "iat": int(self._clock())}
+    def issue(self, tenant_id: UUID, brand_id: UUID) -> str:
+        payload = {
+            "t": str(tenant_id),
+            "b": str(brand_id),
+            "n": secrets.token_urlsafe(16),
+            "iat": int(self._clock()),
+        }
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         return f"{_b64encode(body)}.{_b64encode(self._sign(body))}"
 
-    def verify(self, state: str) -> str:
-        """Return the ``tenant_id`` embedded in a valid ``state``; raise otherwise."""
+    def verify(self, state: str) -> tuple[UUID, UUID]:
+        """Return ``(tenant_id, brand_id)`` embedded in a valid ``state``; raise otherwise."""
         if not isinstance(state, str) or state.count(".") != 1:
             raise InvalidOAuthStateError("Malformed OAuth state.")
         body_b64, sig_b64 = state.split(".", 1)
@@ -89,7 +96,7 @@ class OAuthStateSigner:
             raise InvalidOAuthStateError("OAuth state issued in the future.")
         if now - issued_at > self._ttl:
             raise InvalidOAuthStateError("OAuth state has expired.")
-        return payload["t"]
+        return payload["t"], payload["b"]
 
     # -------------------------------------------------------------- helpers --
     def _sign(self, body: bytes) -> bytes:
@@ -101,13 +108,16 @@ class OAuthStateSigner:
             payload = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             raise InvalidOAuthStateError("OAuth state payload is not valid JSON.") from exc
-        if (
-            not isinstance(payload, dict)
-            or not isinstance(payload.get("t"), str)
-            or not payload["t"]
-            or not isinstance(payload.get("iat"), int)
-        ):
+        if not isinstance(payload, dict) or not isinstance(payload.get("iat"), int):
             raise InvalidOAuthStateError("OAuth state payload is missing required fields.")
+        for key in ("t", "b"):
+            value = payload.get(key)
+            if not isinstance(value, str) or not value:
+                raise InvalidOAuthStateError("OAuth state payload is missing required fields.")
+            try:
+                payload[key] = UUID(value)
+            except ValueError as exc:
+                raise InvalidOAuthStateError("OAuth state payload has a non-UUID id.") from exc
         return payload
 
 

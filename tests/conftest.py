@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -18,8 +19,16 @@ from fastapi.testclient import TestClient
 from src.core.config import Settings, get_settings
 from src.core.security import TokenEncryptionService
 from src.modules.social_connect.meta_client import MetaGraphClient
+from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole, Tenant
 
-from tests.fakes import FakeConnectedAccountRepository
+from tests.fakes import (
+    FakeBrandAccessGrantRepository,
+    FakeBrandAccessResolver,
+    FakeBrandRepository,
+    FakeConnectedAccountRepository,
+    FakeStore,
+    FakeTenantRepository,
+)
 
 FAKE_APP_ID = "123456789012345"
 FAKE_APP_SECRET = "fake-app-secret-for-tests-only"
@@ -83,18 +92,73 @@ async def meta_client(settings: Settings) -> AsyncIterator[MetaGraphClient]:
 
 
 @pytest.fixture
-def fake_repo() -> FakeConnectedAccountRepository:
-    return FakeConnectedAccountRepository()
+def store() -> FakeStore:
+    """One in-memory world (tenants, brands, grants, connections) per test."""
+    return FakeStore()
 
 
 @pytest.fixture
-def app(settings: Settings, fake_repo: FakeConnectedAccountRepository) -> FastAPI:
-    """App wired to the fake repository — isolated tests never touch PostgreSQL."""
+def fake_repo(store: FakeStore) -> FakeConnectedAccountRepository:
+    return FakeConnectedAccountRepository(store)
+
+
+# --- SPRINT-03 tenancy world: an owner tenant with one brand, an agency tenant --------
+OWNER_ID = UUID("00000000-0000-4000-8000-000000000001")
+AGENCY_ID = UUID("00000000-0000-4000-8000-000000000002")
+STRANGER_ID = UUID("00000000-0000-4000-8000-000000000003")
+BRAND_ID = UUID("00000000-0000-4000-8000-00000000000a")
+BRAND2_ID = UUID("00000000-0000-4000-8000-00000000000b")
+
+
+def seed_world(store: FakeStore) -> None:
+    store.tenants[OWNER_ID] = Tenant(id=OWNER_ID, slug="nile-owner", name="Nile Owner Co")
+    store.tenants[AGENCY_ID] = Tenant(id=AGENCY_ID, slug="agency", name="Agency Ltd")
+    store.tenants[STRANGER_ID] = Tenant(id=STRANGER_ID, slug="stranger", name="Stranger")
+    store.brands[BRAND_ID] = Brand(
+        id=BRAND_ID, owner_tenant_id=OWNER_ID, slug="nile-coffee", name="Nile Coffee"
+    )
+    store.brands[BRAND2_ID] = Brand(
+        id=BRAND2_ID, owner_tenant_id=OWNER_ID, slug="cairo-dental", name="Cairo Dental"
+    )
+
+
+def grant(store: FakeStore, brand_id: UUID, grantee: UUID, role: GrantRole) -> BrandAccessGrant:
+    g = BrandAccessGrant(
+        id=uuid4(),
+        brand_id=brand_id,
+        grantee_tenant_id=grantee,
+        role=role,
+        granted_by_tenant_id=store.brands[brand_id].owner_tenant_id,
+    )
+    store.grants[g.id] = g
+    return g
+
+
+@pytest.fixture
+def app(
+    settings: Settings, store: FakeStore, fake_repo: FakeConnectedAccountRepository
+) -> FastAPI:
+    """App wired to the fakes — isolated tests never touch PostgreSQL."""
     from src.main import create_app
     from src.modules.social_connect.router import get_repository
+    from src.modules.tenancy.dependencies import (
+        get_brand_access_resolver,
+        get_brand_repository,
+        get_grant_repository,
+        get_tenant_repository,
+    )
 
+    seed_world(store)
     application = create_app(settings)
     application.dependency_overrides[get_repository] = lambda: fake_repo
+    application.dependency_overrides[get_tenant_repository] = lambda: FakeTenantRepository(store)
+    application.dependency_overrides[get_brand_repository] = lambda: FakeBrandRepository(store)
+    application.dependency_overrides[get_grant_repository] = lambda: (
+        FakeBrandAccessGrantRepository(store)
+    )
+    application.dependency_overrides[get_brand_access_resolver] = lambda: FakeBrandAccessResolver(
+        store
+    )
     return application
 
 
@@ -112,27 +176,33 @@ def token_payload(
     return {"access_token": token, "token_type": "bearer", "expires_in": expires_in}
 
 
-def pages_payload() -> dict[str, Any]:
-    return {
-        "data": [
-            {
-                "id": "1001",
-                "name": "Nile Coffee Roasters",
-                "category": "Coffee shop",
-                "tasks": ["ANALYZE", "ADVERTISE", "MODERATE", "CREATE_CONTENT", "MANAGE"],
-                "access_token": "PAGE_TOKEN_1001",
-                "instagram_business_account": {"id": "17841400000001", "username": "nilecoffee"},
-            },
-            {
-                "id": "1002",
-                "name": "Cairo Dental Clinic",
-                "category": "Dentist",
-                "tasks": ["ANALYZE", "CREATE_CONTENT"],
-                "access_token": "PAGE_TOKEN_1002",
-            },
-        ],
-        "paging": {"cursors": {"before": "a", "after": "b"}},
-    }
+def pages_payload(count: int = 2) -> dict[str, Any]:
+    """``/me/accounts`` with ``count`` Pages (1, 2 or 3)."""
+    data = [
+        {
+            "id": "1001",
+            "name": "Nile Coffee Roasters",
+            "category": "Coffee shop",
+            "tasks": ["ANALYZE", "ADVERTISE", "MODERATE", "CREATE_CONTENT", "MANAGE"],
+            "access_token": "PAGE_TOKEN_1001",
+            "instagram_business_account": {"id": "17841400000001", "username": "nilecoffee"},
+        },
+        {
+            "id": "1002",
+            "name": "Cairo Dental Clinic",
+            "category": "Dentist",
+            "tasks": ["ANALYZE", "CREATE_CONTENT"],
+            "access_token": "PAGE_TOKEN_1002",
+        },
+        {
+            "id": "1003",
+            "name": "Giza Gym",
+            "category": "Gym",
+            "tasks": ["ANALYZE"],
+            "access_token": "PAGE_TOKEN_1003",
+        },
+    ]
+    return {"data": data[:count], "paging": {"cursors": {"before": "a", "after": "b"}}}
 
 
 def me_payload(user_id: str = "10001", name: str | None = "Nile Owner") -> dict[str, Any]:

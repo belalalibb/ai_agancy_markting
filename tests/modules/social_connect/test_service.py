@@ -3,6 +3,8 @@
 SPRINT-02 note: the SPRINT-01 tests for ``build_authorize_url`` / ``connect`` /
 ``exchange_code`` / ``list_pages`` were rewritten for the new service surface
 (``start_connection`` / ``complete_connection`` / ``list`` / ``get`` / ``disconnect``).
+SPRINT-03: identities are UUIDs and connections are brand-scoped; the router verifies the
+``state`` and authorises *before* calling ``complete_connection(tenant_id, brand_id, code)``.
 """
 
 from __future__ import annotations
@@ -30,7 +32,10 @@ from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.social_connect.service import MetaConnectService
 
 from tests.conftest import (
+    BRAND2_ID,
+    BRAND_ID,
     FAKE_STATE_SECRET,
+    OWNER_ID,
     debug_token_payload,
     me_payload,
     oauth_error_payload,
@@ -88,8 +93,9 @@ def _stub_happy_path(graph_mock: respx.MockRouter) -> None:
 def test_start_connection_issues_signed_state(
     service: MetaConnectService, signer: OAuthStateSigner, settings: Settings
 ) -> None:
-    result = service.start_connection("tenant-a")
-    assert signer.verify(result.state) == "tenant-a"
+    result = service.start_connection(OWNER_ID, BRAND_ID)
+    assert signer.verify(result.state) == (OWNER_ID, BRAND_ID)
+    assert service.verify_state(result.state) == (OWNER_ID, BRAND_ID)
     query = parse_qs(urlparse(result.authorization_url).query)
     assert query["state"] == [result.state]
     assert query["redirect_uri"] == [settings.meta_oauth_redirect_uri]
@@ -105,16 +111,19 @@ async def test_complete_connection_happy_path_with_fake_repo(
     encryption: TokenEncryptionService,
 ) -> None:
     _stub_happy_path(graph_mock)
-    account = await service.complete_connection(state=signer.issue("tenant-a"), code="CODE")
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
 
     assert fake_repo.upsert_calls == 1
-    assert account.tenant_id == "tenant-a"
+    assert account.brand_id == BRAND_ID
+    assert account.connected_by_tenant_id == OWNER_ID
     assert account.provider == "meta"
     assert account.status is AccountStatus.ACTIVE
     assert account.encrypted_user_token != "LONG_LIVED"
     assert encryption.decrypt_token(account.encrypted_user_token) == "LONG_LIVED"
     assert [p.page_id for p in account.pages] == ["1001", "1002"]
-    assert encryption.decrypt_token(account.pages[0].encrypted_page_token) == "PAGE_TOKEN_1001"
+    # B6: two Pages ⇒ metadata only, no Page token stored, nothing selected.
+    assert all(p.encrypted_page_token is None and not p.is_selected for p in account.pages)
+    fake_repo.assert_selection_invariant()
     assert account.pages[0].instagram is not None
     assert account.pages[0].instagram.ig_user_id == "17841400000001"
     assert account.pages[0].instagram.username == "nilecoffee"
@@ -137,7 +146,7 @@ async def test_complete_connection_uses_debug_token_for_scopes_and_expiry(
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json={"data": []}))
 
-    account = await service.complete_connection(state=signer.issue("t"), code="CODE")
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert account.provider_user_id == "777"
     assert account.granted_scopes == ["pages_show_list"]
     assert account.token_expires_at == datetime.fromtimestamp(1_900_000_000, tz=UTC)
@@ -152,7 +161,7 @@ async def test_complete_connection_debug_token_zero_expiry_means_unknown(
         return_value=httpx.Response(200, json=debug_token_payload(expires_at=0))
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json={"data": []}))
-    account = await service.complete_connection(state=signer.issue("t"), code="CODE")
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert account.token_expires_at is None  # D-055: unknown, not "never"
 
 
@@ -175,7 +184,7 @@ async def test_complete_connection_debug_token_failure_keeps_identity_from_me(
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload()))
 
     with caplog.at_level(logging.WARNING):
-        account = await service.complete_connection(state=signer.issue("t"), code="CODE")
+        account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
 
     assert account.granted_scopes == []
     assert account.token_expires_at is None
@@ -193,7 +202,7 @@ async def test_complete_connection_debug_token_190_is_fatal(
         return_value=httpx.Response(401, json=oauth_error_payload(code=190, subcode=463))
     )
     with pytest.raises(MetaTokenExpiredError):
-        await service.complete_connection(state=signer.issue("t"), code="CODE")
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
 
 
 # ------------------------------------------------ SPRINT-02.1 identity (H3-H8)
@@ -207,7 +216,7 @@ async def test_complete_connection_uses_me_for_identity_and_name(
         return_value=httpx.Response(200, json={"data": {"is_valid": True}})
     )
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json={"data": []}))
-    account = await service.complete_connection(state=signer.issue("t"), code="CODE")
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert account.provider_user_id == "424242"
     assert account.provider_user_name == "Nile Owner"
     assert account.pages == []
@@ -228,7 +237,7 @@ async def test_complete_connection_rejects_debug_is_valid_false(
         return_value=httpx.Response(200, json=pages_payload())
     )
     with pytest.raises(MetaTokenInvalidError) as exc_info:
-        await service.complete_connection(state=signer.issue("t"), code="CODE")
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert isinstance(exc_info.value, MetaOAuthError)
     assert exc_info.value.code == 190
     assert pages_route.call_count == 0
@@ -243,7 +252,7 @@ async def test_complete_connection_rejects_debug_is_valid_false_defaults_code_19
         return_value=httpx.Response(200, json=debug_token_payload(is_valid=False))
     )
     with pytest.raises(MetaTokenInvalidError) as exc_info:
-        await service.complete_connection(state=signer.issue("t"), code="CODE")
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert exc_info.value.code == 190
 
 
@@ -259,7 +268,7 @@ async def test_complete_connection_rejects_foreign_app_id(
         return_value=httpx.Response(200, json=debug_token_payload(app_id="999999999999999"))
     )
     with pytest.raises(MetaTokenForeignAppError, match="app_id"):
-        await service.complete_connection(state=signer.issue("t"), code="CODE")
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert fake_repo.upsert_calls == 0
 
 
@@ -275,7 +284,7 @@ async def test_complete_connection_rejects_user_id_mismatch(
         return_value=httpx.Response(200, json=debug_token_payload(user_id="20002"))
     )
     with pytest.raises(MetaTokenForeignAppError, match="user_id does not match /me"):
-        await service.complete_connection(state=signer.issue("t"), code="CODE")
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert fake_repo.upsert_calls == 0
 
 
@@ -304,7 +313,7 @@ async def test_complete_connection_get_me_failure_is_fatal(
         return_value=httpx.Response(200, json=debug_token_payload())
     )
     with pytest.raises(MetaGraphError):
-        await service.complete_connection(state=signer.issue("t"), code="CODE")
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert debug_route.call_count == 0
     assert fake_repo.upsert_calls == 0
 
@@ -317,12 +326,12 @@ def test_no_fallback_identity_symbol_exists() -> None:
     assert "_fallback_identity" not in service_module.__dict__
 
 
-async def test_complete_connection_invalid_state_raises_before_any_graph_call(
+async def test_verify_state_rejects_garbage_before_any_graph_call(
     service: MetaConnectService, graph_mock: respx.MockRouter
 ) -> None:
     route = graph_mock.get("/oauth/access_token").mock(return_value=httpx.Response(200, json={}))
     with pytest.raises(InvalidOAuthStateError):
-        await service.complete_connection(state="garbage", code="CODE")
+        service.verify_state("garbage")
     assert route.call_count == 0
 
 
@@ -333,7 +342,7 @@ async def test_complete_connection_propagates_expired_token_error(
         return_value=httpx.Response(400, json=oauth_error_payload())
     )
     with pytest.raises(MetaTokenExpiredError):
-        await service.complete_connection(state=signer.issue("t"), code="BAD")
+        await service.complete_connection(OWNER_ID, BRAND_ID, code="BAD")
 
 
 async def test_reconnect_same_user_upserts_not_duplicates(
@@ -343,10 +352,15 @@ async def test_reconnect_same_user_upserts_not_duplicates(
     fake_repo: FakeConnectedAccountRepository,
 ) -> None:
     _stub_happy_path(graph_mock)
-    first = await service.complete_connection(state=signer.issue("t"), code="C1")
-    second = await service.complete_connection(state=signer.issue("t"), code="C2")
+    first = await service.complete_connection(OWNER_ID, BRAND_ID, code="C1")
+    second = await service.complete_connection(OWNER_ID, BRAND_ID, code="C2")
     assert first.id == second.id
-    assert len(await service.list_connections("t")) == 1
+    assert len(await service.list_connections(BRAND_ID)) == 1
+    # B-U10: the same Meta user in another brand is a *separate* row.
+    third = await service.complete_connection(OWNER_ID, BRAND2_ID, code="C3")
+    assert third.id != first.id
+    assert len(await service.list_connections(BRAND2_ID)) == 1
+    assert len(fake_repo.rows) == 2
 
 
 async def test_page_without_access_token_is_stored_as_none(
@@ -359,25 +373,72 @@ async def test_page_without_access_token_is_stored_as_none(
     graph_mock.get("/me/accounts").mock(
         return_value=httpx.Response(200, json={"data": [{"id": "5", "name": "No token"}]})
     )
-    account = await service.complete_connection(state=signer.issue("t"), code="CODE")
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="CODE")
     assert account.pages[0].encrypted_page_token is None  # F4: NULL, never encrypt("")
+    # A single Page would normally be auto-selected (B6) — but never without a token.
+    assert account.pages[0].is_selected is False
 
 
 # --------------------------------------------------------------------- reads
-async def test_list_get_disconnect_are_tenant_scoped(
+async def test_list_get_disconnect_are_brand_scoped(
     service: MetaConnectService, signer: OAuthStateSigner, graph_mock: respx.MockRouter
 ) -> None:
     _stub_happy_path(graph_mock)
-    account = await service.complete_connection(state=signer.issue("tenant-a"), code="C")
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="C")
 
-    assert [a.id for a in await service.list_connections("tenant-a")] == [account.id]
-    assert await service.list_connections("tenant-b") == []
-    assert await service.get_connection("tenant-a", account.id) is not None
-    assert await service.get_connection("tenant-b", account.id) is None
-    assert await service.disconnect("tenant-b", account.id) is False
-    assert await service.disconnect("tenant-a", account.id) is True
-    assert await service.disconnect("tenant-a", account.id) is False
-    assert await service.get_connection("tenant-a", uuid4()) is None
+    assert [a.id for a in await service.list_connections(BRAND_ID)] == [account.id]
+    assert await service.list_connections(BRAND2_ID) == []
+    assert await service.get_connection(BRAND_ID, account.id) is not None
+    assert await service.get_connection(BRAND2_ID, account.id) is None
+    assert await service.disconnect(BRAND2_ID, account.id) is False
+    assert await service.disconnect(BRAND_ID, account.id) is True
+    assert await service.disconnect(BRAND_ID, account.id) is False
+    assert await service.get_connection(BRAND_ID, uuid4()) is None
+
+
+# ------------------------------------------------------------ B6 selection
+async def test_single_page_is_auto_selected_with_token(
+    service: MetaConnectService,
+    graph_mock: respx.MockRouter,
+    encryption: TokenEncryptionService,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    _stub_oauth(graph_mock)
+    graph_mock.get("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload())
+    )
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(1)))
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="C")
+    assert len(account.pages) == 1
+    assert account.pages[0].is_selected is True
+    assert encryption.decrypt_token(account.pages[0].encrypted_page_token) == "PAGE_TOKEN_1001"
+    fake_repo.assert_selection_invariant()
+
+
+async def test_select_pages_unknown_connection_returns_none(service: MetaConnectService) -> None:
+    assert await service.select_pages(BRAND_ID, uuid4(), ["1001"]) is None
+
+
+async def test_select_pages_dedupes_requested_ids(
+    service: MetaConnectService,
+    graph_mock: respx.MockRouter,
+    fake_repo: FakeConnectedAccountRepository,
+    encryption: TokenEncryptionService,
+) -> None:
+    _stub_oauth(graph_mock)
+    graph_mock.get("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload())
+    )
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(3)))
+    account = await service.complete_connection(OWNER_ID, BRAND_ID, code="C")
+    updated = await service.select_pages(BRAND_ID, account.id, ["1002", "1002"])
+    assert updated is not None
+    by_id = {p.page_id: p for p in updated.pages}
+    assert by_id["1002"].is_selected is True
+    assert encryption.decrypt_token(by_id["1002"].encrypted_page_token) == "PAGE_TOKEN_1002"
+    assert by_id["1001"].is_selected is False and by_id["1001"].encrypted_page_token is None
+    assert by_id["1003"].is_selected is False and by_id["1003"].encrypted_page_token is None
+    fake_repo.assert_selection_invariant()
 
 
 def test_decrypt_stored_token_roundtrip(

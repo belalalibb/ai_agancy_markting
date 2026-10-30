@@ -13,16 +13,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core import database
 from src.core.config import Settings, get_settings
-from src.core.database import get_db_session
 from src.modules.social_connect import router as social_connect_router
+from src.modules.tenancy import router as tenancy_router
 
 
 @asynccontextmanager
@@ -56,7 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=(
             "AI Marketing Platform backend — Modular Monolith. "
             "Module 1: Social Connect (Meta Graph API for Facebook & Instagram, "
-            "persisted in PostgreSQL)."
+            "persisted in PostgreSQL). Module 2: Tenancy (tenants, brands, access grants)."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -66,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     api_v1 = APIRouter(prefix=settings.api_v1_prefix)
+    api_v1.include_router(tenancy_router)
     api_v1.include_router(social_connect_router)
     app.include_router(api_v1)
 
@@ -79,12 +79,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         summary="Readiness probe (database reachable)",
         responses={503: {"description": "Database unreachable"}},
     )
-    async def health_ready(
-        session: AsyncSession = Depends(get_db_session),  # noqa: B008 - FastAPI DI idiom
-    ) -> JSONResponse:
-        # F7: a real round-trip; the error body never echoes the DSN or driver message.
+    async def health_ready() -> JSONResponse:
+        # SPRINT-03 A6: a raw engine connection — no ORM session, no transaction, no commit.
+        # F7: the error body never echoes the DSN or driver message.
         try:
-            await session.execute(text("SELECT 1"))
+            async with database.get_engine().connect() as conn:
+                await conn.execute(text("SELECT 1"))
         except (SQLAlchemyError, OSError):
             return JSONResponse(
                 status_code=503, content={"status": "not_ready", "database": "unreachable"}
