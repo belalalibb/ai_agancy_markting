@@ -11,7 +11,7 @@
 | **معرف المهمة** | `SPRINT-04-AUTH-AND-ACTOR-IDENTITY` |
 | **النوع** | أمن تأسيسي — وحدة `auth` + استبدال سطح الهوية المؤقت (B4) |
 | **الحالة** | `READY_FOR_EXECUTION` |
-| **يبدأ من** | `main` بعد دمج **PR #8** (هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **يبدأ من** | `main` @ `2851c9f` (PR #8 **مدموج بالفعل** — المخطط يدمج توجيهاته بنفسه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
 | **الفرع المستهدف** | `work/implementation` ⇒ **PR جديد #9** إلى `main` |
 | **الكوميتات** | **اثنان بالضبط**: Part A (وحدة auth) ثم Part B (استبدال سطح الهوية). كل كوميت يُدفع فوراً |
 | **الحجم المتوقع** | Part A ~700 سطر؛ Part B ~400 سطر (معظمه حذف `tenant_id` من المعاملات وتحديث اختبارات) |
@@ -238,7 +238,7 @@ git diff --name-only origin/main...HEAD | grep -E "^(ARCHITECTURE_LOCK|SESSION_R
 1. **كوميت Part A**: `feat(auth): SPRINT-04 Part A — users/refresh_sessions, Argon2id, HS256 access JWT (15m), rotating HttpOnly refresh cookie with reuse detection, rate limiting` ⇒ ادفع فوراً ⇒ افتح **PR #9** بعنوان `SPRINT-04: Auth module + verified actor identity` ⇒ تأكد أن CI تعمل.
 2. **كوميت Part B**: `refactor(identity): SPRINT-04 Part B — ActorTenantId from JWT, drop tenant_id params/bodies, register creates tenant, auth-required guard for all protected routes` ⇒ ادفع فوراً.
 3. املأ **§7**؛ حدّث `WORK_STATE.md` (§1 ⇒ `SPRINT_04_DELIVERED_AWAITING_REVIEW`). كوميت توثيق ثالث مسموح.
-4. **لا تدمج PR #9 بنفسك.**
+4. **لا تدمج PR #9 بنفسك.** المخطط يراجع ثم **يدمجه هو** عند الاعتماد (المالك لا يُطلب منه أي دمج يدوي — قاعدة دائمة من هذا السبرنت). عند التسليم اكتب في §7 وفي ردك على المالك: *«PR #9 جاهز لمراجعة المخطط»* — لا «بانتظار دمج المالك».
 5. أسئلة تعيق التنفيذ ⇒ §7 «أسئلة»، ونفّذ ما لا يعتمد عليها. **لا تخمّن في قرارات الأمن** (مدد الصلاحية، أسماء الكوكي، سياسة CSRF) — هي محددة أعلاه.
 
 ---
@@ -261,6 +261,8 @@ git diff --name-only origin/main...HEAD | grep -E "^(ARCHITECTURE_LOCK|SESSION_R
 ---
 
 ## 8. ما ينتظر المالك (ليس للمنفذ)
+
+> **قاعدة الدمج الدائمة (قرار المالك 2026-10-30):** المالك **لا يدمج يدوياً**. المخطط يدمج PRs توجيهاته فور فتحها، ويدمج PRs المنفذ بعد مراجعتها واعتمادها. دور المالك: القرارات، التوكن، وإطلاق المنفذ.
 
 1. 🔑 **تدوير توكن GitHub** المستخدم في الجلسات (ظهر في الدردشة مراراً) وإرسال الجديد مع «تابع» القادمة.
 2. 🛡️ **حماية الفرع `main`**: الفحوص الخمسة Required + Require PR + up-to-date (الفحوص ظاهرة الآن بعد PR #7).
