@@ -771,14 +771,59 @@ def test_router_responses_never_contain_tokens(
 
 
 def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestClient) -> None:
-    """B-U13 — extended Zero-Secret guard over the *whole* OpenAPI document."""
+    """B-U13 / SPRINT-04 A-U10 — extended Zero-Secret guard over every *response* schema.
+
+    Forbidden key fragments: ``password``, ``hash``, ``secret``, ``token``. Allowed exceptions:
+    ``access_token`` (the JWT itself), ``token_type`` (constant ``"bearer"``, mandated by A7)
+    and ``has_page_token`` (boolean flag). Request bodies legitimately carry ``password`` and
+    are therefore excluded by following only ``responses`` ``$ref``s.
+    """
     spec = client.get("/openapi.json").json()
+    schemas = spec.get("components", {}).get("schemas", {})
+    forbidden = ("password", "hash", "secret", "token")
+    allowed = {"access_token", "token_type", "has_page_token"}
+    structural = {"required", "properties", "title", "description", "type", "format"}
+
+    def refs(node: object) -> set[str]:
+        out: set[str] = set()
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                out.add(ref.rsplit("/", 1)[-1])
+            for value in node.values():
+                out |= refs(value)
+        elif isinstance(node, list):
+            for item in node:
+                out |= refs(item)
+        return out
+
+    # Response schemas = closure over $ref starting from every operation's ``responses``.
+    reachable: set[str] = set()
+    pending = {
+        name
+        for methods in spec["paths"].values()
+        for op in methods.values()
+        for name in refs(op.get("responses", {}))
+    }
+    while pending:
+        name = pending.pop()
+        if name in reachable or name not in schemas:
+            continue
+        reachable.add(name)
+        pending |= refs(schemas[name])
+    # Sanity: the guard really sees the auth + social schemas.
+    assert {"TokenOut", "MeOut", "ConnectedAccountPublic"} <= reachable
 
     def walk(node: object, path: str) -> list[str]:
         hits: list[str] = []
         if isinstance(node, dict):
             for key, value in node.items():
-                if "token" in key.lower() and key != "has_page_token":
+                lowered = key.lower()
+                if (
+                    key not in structural
+                    and key not in allowed
+                    and any(fragment in lowered for fragment in forbidden)
+                ):
                     hits.append(f"{path}/{key}")
                 hits.extend(walk(value, f"{path}/{key}"))
         elif isinstance(node, list):
@@ -786,12 +831,16 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
                 hits.extend(walk(item, f"{path}[{i}]"))
         return hits
 
-    offenders = [
-        h
-        for h in walk(spec.get("components", {}).get("schemas", {}), "schemas")
-        if h.rsplit("/", 1)[-1] not in {"required", "properties", "title", "description"}
-    ]
+    offenders = [h for name in sorted(reachable) for h in walk(schemas[name], name)]
     assert offenders == [], offenders
+    # Request side: password may appear, but never a hash or secret.
+    request_hits = [
+        h
+        for name in sorted(set(schemas) - reachable)
+        for h in walk(schemas[name], name)
+        if "password" not in h.lower()
+    ]
+    assert request_hits == [], request_hits
     # And no path leaks a token-like segment either.
     assert not any("token" in p.lower() for p in spec["paths"])
 

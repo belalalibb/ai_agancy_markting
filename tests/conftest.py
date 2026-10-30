@@ -6,7 +6,8 @@ injected through environment variables with obviously fake values.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,6 +19,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from src.core.config import Settings, get_settings
 from src.core.security import TokenEncryptionService
+from src.modules.auth.domain.models import AuthenticatedActor, RefreshSession, User
+from src.modules.auth.jwt import AccessTokenCodec
 from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole, Tenant
 
@@ -26,13 +29,18 @@ from tests.fakes import (
     FakeBrandAccessResolver,
     FakeBrandRepository,
     FakeConnectedAccountRepository,
+    FakePasswordHasher,
+    FakeRateLimiter,
+    FakeRefreshSessionRepository,
     FakeStore,
     FakeTenantRepository,
+    FakeUserRepository,
 )
 
 FAKE_APP_ID = "123456789012345"
 FAKE_APP_SECRET = "fake-app-secret-for-tests-only"
 FAKE_STATE_SECRET = "fake-oauth-state-secret-for-tests-only"
+FAKE_JWT_SECRET = "fake-jwt-hs256-secret-for-tests-only-at-least-32-bytes"
 GRAPH_VERSION = "v26.0"
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
@@ -53,6 +61,9 @@ def _test_env(monkeypatch: pytest.MonkeyPatch, fernet_key: str) -> Iterator[None
         "META_APP_SECRET": FAKE_APP_SECRET,
         "META_GRAPH_API_VERSION": GRAPH_VERSION,
         "OAUTH_STATE_SECRET": FAKE_STATE_SECRET,
+        "AUTH_JWT_SECRET": FAKE_JWT_SECRET,
+        "AUTH_COOKIE_SECURE": "false",
+        "AUTH_ALLOWED_ORIGINS": "",
         "META_HTTP_MAX_RETRIES": "2",
         "META_HTTP_TIMEOUT_SECONDS": "1",
     }
@@ -109,11 +120,29 @@ STRANGER_ID = UUID("00000000-0000-4000-8000-000000000003")
 BRAND_ID = UUID("00000000-0000-4000-8000-00000000000a")
 BRAND2_ID = UUID("00000000-0000-4000-8000-00000000000b")
 
+# SPRINT-04: one user per tenant (``users.tenant_id`` UNIQUE); fake hasher ⇒ "fake$<pwd>".
+OWNER_USER_ID = UUID("00000000-0000-4000-8000-000000000101")
+AGENCY_USER_ID = UUID("00000000-0000-4000-8000-000000000102")
+STRANGER_USER_ID = UUID("00000000-0000-4000-8000-000000000103")
+USER_BY_TENANT: dict[UUID, UUID] = {
+    OWNER_ID: OWNER_USER_ID,
+    AGENCY_ID: AGENCY_USER_ID,
+    STRANGER_ID: STRANGER_USER_ID,
+}
+TEST_PASSWORD = "correct-horse-battery"  # noqa: S105 - fake fixture value
+
 
 def seed_world(store: FakeStore) -> None:
     store.tenants[OWNER_ID] = Tenant(id=OWNER_ID, slug="nile-owner", name="Nile Owner Co")
     store.tenants[AGENCY_ID] = Tenant(id=AGENCY_ID, slug="agency", name="Agency Ltd")
     store.tenants[STRANGER_ID] = Tenant(id=STRANGER_ID, slug="stranger", name="Stranger")
+    for tenant_id, user_id in USER_BY_TENANT.items():
+        store.users[user_id] = User(
+            id=user_id,
+            tenant_id=tenant_id,
+            email=f"{store.tenants[tenant_id].slug}@example.com",
+            password_hash=f"fake${TEST_PASSWORD}",
+        )
     store.brands[BRAND_ID] = Brand(
         id=BRAND_ID, owner_tenant_id=OWNER_ID, slug="nile-coffee", name="Nile Coffee"
     )
@@ -135,11 +164,65 @@ def grant(store: FakeStore, brand_id: UUID, grantee: UUID, role: GrantRole) -> B
 
 
 @pytest.fixture
+def codec(settings: Settings) -> AccessTokenCodec:
+    assert settings.auth_jwt_secret is not None
+    return AccessTokenCodec(
+        secret=settings.auth_jwt_secret,
+        issuer=settings.app_name,
+        ttl_seconds=settings.auth_access_ttl_seconds,
+    )
+
+
+@pytest.fixture
+def hasher() -> FakePasswordHasher:
+    return FakePasswordHasher()
+
+
+@pytest.fixture
+def limiter() -> FakeRateLimiter:
+    return FakeRateLimiter()
+
+
+@pytest.fixture
+def auth_headers(store: FakeStore, codec: AccessTokenCodec) -> Callable[[UUID], dict[str, str]]:
+    """``auth_headers(tenant_id)`` ⇒ ``{"Authorization": "Bearer <real HS256 JWT>"}``.
+
+    Issues a token for the fixed-world user of that tenant and registers a live refresh
+    session (so ``CurrentUserFresh`` passes until the test logs out).
+    """
+
+    def _make(tenant_id: UUID) -> dict[str, str]:
+        user_id = USER_BY_TENANT.get(tenant_id)
+        if user_id is None:  # unknown tenant ⇒ ad-hoc user (never persisted)
+            user_id = uuid4()
+        session = RefreshSession(
+            user_id=user_id,
+            token_hash="0" * 64,
+            expires_at=datetime.now(tz=UTC) + timedelta(days=30),
+        )
+        store.sessions[session.id] = session
+        actor = AuthenticatedActor(user_id=user_id, tenant_id=tenant_id, sid=session.id)
+        return {"Authorization": f"Bearer {codec.issue(actor)}"}
+
+    return _make
+
+
+@pytest.fixture
 def app(
-    settings: Settings, store: FakeStore, fake_repo: FakeConnectedAccountRepository
+    settings: Settings,
+    store: FakeStore,
+    fake_repo: FakeConnectedAccountRepository,
+    hasher: FakePasswordHasher,
+    limiter: FakeRateLimiter,
 ) -> FastAPI:
     """App wired to the fakes — isolated tests never touch PostgreSQL."""
     from src.main import create_app
+    from src.modules.auth.dependencies import (
+        get_password_hasher,
+        get_rate_limiter,
+        get_refresh_session_repository,
+        get_user_repository,
+    )
     from src.modules.social_connect.router import get_repository
     from src.modules.tenancy.dependencies import (
         get_brand_access_resolver,
@@ -151,6 +234,12 @@ def app(
     seed_world(store)
     application = create_app(settings)
     application.dependency_overrides[get_repository] = lambda: fake_repo
+    application.dependency_overrides[get_user_repository] = lambda: FakeUserRepository(store)
+    application.dependency_overrides[get_refresh_session_repository] = lambda: (
+        FakeRefreshSessionRepository(store)
+    )
+    application.dependency_overrides[get_password_hasher] = lambda: hasher
+    application.dependency_overrides[get_rate_limiter] = lambda: limiter
     application.dependency_overrides[get_tenant_repository] = lambda: FakeTenantRepository(store)
     application.dependency_overrides[get_brand_repository] = lambda: FakeBrandRepository(store)
     application.dependency_overrides[get_grant_repository] = lambda: (

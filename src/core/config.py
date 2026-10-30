@@ -6,13 +6,18 @@ hard-coded here (see ``SESSION_RECOVERY.md`` §3 and ``.env.template``).
 
 from __future__ import annotations
 
+import secrets
+import warnings
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["development", "test", "staging", "production"]
+
+# Minimum HS256 key length (bytes) — RFC 7518 §3.2 recommends >= hash output size.
+AUTH_JWT_SECRET_MIN_BYTES = 32
 
 # Oldest Graph API version still alive (sunset 2027-01-21). Anything older is rejected.
 META_GRAPH_MIN_SUPPORTED_VERSION: tuple[int, int] = (21, 0)
@@ -58,6 +63,25 @@ class Settings(BaseSettings):
     )
     oauth_state_ttl_seconds: int = Field(default=600, ge=30, le=3600)
 
+    # --- Auth (SPRINT-04) ---------------------------------------------------
+    auth_jwt_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "HS256 key for access JWTs (>= 32 bytes). Required outside development; "
+            "in development a random per-process key is generated with a warning."
+        ),
+    )
+    auth_access_ttl_seconds: int = Field(default=900, ge=60, le=3600)
+    auth_refresh_ttl_seconds: int = Field(default=2_592_000, ge=3600, le=7_776_000)
+    auth_cookie_secure: bool | None = Field(
+        default=None,
+        description="`Secure` flag on the refresh cookie. Default: true except development.",
+    )
+    auth_allowed_origins: str = Field(
+        default="",
+        description="Comma-separated browser Origins accepted on cookie-authenticated auth calls.",
+    )
+
     # --- Database (PostgreSQL 16+ / pgvector — ARCHITECTURE_LOCK D-032) ------
     database_url: str = "postgresql+asyncpg://aigos:aigos_dev_only@localhost:5432/ai_growth_os"
     database_echo: bool = False
@@ -91,9 +115,41 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
+    @model_validator(mode="after")
+    def _resolve_auth_defaults(self) -> Settings:
+        """A5/A10: enforce the JWT secret outside development; derive cookie `Secure`."""
+        if self.auth_jwt_secret is None or self.auth_jwt_secret.get_secret_value() == "":
+            if self.app_env != "development":
+                msg = (
+                    "AUTH_JWT_SECRET is required outside development "
+                    f"(app_env={self.app_env!r}); generate with secrets.token_urlsafe(48)."
+                )
+                raise ValueError(msg)
+            warnings.warn(
+                "AUTH_JWT_SECRET not set — using a random per-process key (development only); "
+                "all access tokens are invalidated on restart.",
+                stacklevel=2,
+            )
+            self.auth_jwt_secret = SecretStr(secrets.token_urlsafe(48))
+        elif len(self.auth_jwt_secret.get_secret_value().encode()) < AUTH_JWT_SECRET_MIN_BYTES:
+            msg = f"AUTH_JWT_SECRET must be at least {AUTH_JWT_SECRET_MIN_BYTES} bytes"
+            raise ValueError(msg)
+        if self.auth_cookie_secure is None:
+            self.auth_cookie_secure = self.app_env != "development"
+        return self
+
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def auth_allowed_origins_list(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.auth_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def auth_refresh_cookie_name(self) -> str:
+        """``__Host-`` prefix (RFC 6265bis) everywhere the cookie is `Secure`; plain in dev."""
+        return "__Host-refresh" if self.auth_cookie_secure else "refresh"
 
     @property
     def meta_scopes_list(self) -> list[str]:

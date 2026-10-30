@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
+from src.modules.auth.domain.models import RefreshSession, User
 from src.modules.social_connect.domain.models import AccountStatus, ConnectedAccount, PageAsset
 from src.modules.tenancy.domain.access import BrandRole
 from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, Tenant
@@ -23,6 +24,121 @@ class FakeStore:
         self.brands: dict[UUID, Brand] = {}
         self.grants: dict[UUID, BrandAccessGrant] = {}
         self.connections: dict[UUID, ConnectedAccount] = {}
+        self.users: dict[UUID, User] = {}
+        self.sessions: dict[UUID, RefreshSession] = {}
+
+
+# --------------------------------------------------------------------- auth --
+class FakeUserRepository:
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+
+    async def add(self, user: User) -> User:
+        if any(u.email.lower() == user.email.lower() for u in self._s.users.values()):
+            msg = "uq_users_email_lower"
+            raise ValueError(msg)
+        self._s.users[user.id] = user
+        return user
+
+    async def get(self, user_id: UUID) -> User | None:
+        return self._s.users.get(user_id)
+
+    async def get_by_email(self, email: str) -> User | None:
+        needle = email.strip().lower()
+        return next((u for u in self._s.users.values() if u.email.lower() == needle), None)
+
+    async def update_password_hash(self, user_id: UUID, password_hash: str) -> None:
+        user = self._s.users[user_id]
+        self._s.users[user_id] = user.model_copy(update={"password_hash": password_hash})
+
+    async def touch_last_login(self, user_id: UUID, at: datetime) -> None:
+        user = self._s.users[user_id]
+        self._s.users[user_id] = user.model_copy(update={"last_login_at": at})
+
+
+class FakeRefreshSessionRepository:
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+
+    async def add(self, session: RefreshSession) -> RefreshSession:
+        self._s.sessions[session.id] = session
+        return session
+
+    async def get(self, session_id: UUID) -> RefreshSession | None:
+        return self._s.sessions.get(session_id)
+
+    async def is_active(self, session_id: UUID) -> bool:
+        session = self._s.sessions.get(session_id)
+        return session is not None and session.revoked_at is None
+
+    async def revoke(
+        self, session_id: UUID, at: datetime, replaced_by: UUID | None = None
+    ) -> None:
+        session = self._s.sessions.get(session_id)
+        if session is not None and session.revoked_at is None:
+            self._s.sessions[session_id] = session.model_copy(
+                update={"revoked_at": at, "replaced_by": replaced_by}
+            )
+
+    async def revoke_all_for_user(self, user_id: UUID, at: datetime) -> int:
+        count = 0
+        for sid, session in list(self._s.sessions.items()):
+            if session.user_id == user_id and session.revoked_at is None:
+                self._s.sessions[sid] = session.model_copy(update={"revoked_at": at})
+                count += 1
+        return count
+
+
+class FakePasswordHasher:
+    """Cheap, deterministic hasher that *counts* verify() calls (A-U4 constant-time check).
+
+    ``hash()`` returns ``"fake$<password>"``; ``needs_rehash`` is true for ``"legacy$"`` hashes.
+    """
+
+    def __init__(self) -> None:
+        self.verify_calls = 0
+        self.hash_calls = 0
+
+    def hash(self, password: str) -> str:
+        self.hash_calls += 1
+        return f"fake${password}"
+
+    def verify(self, password_hash: str, password: str) -> bool:
+        self.verify_calls += 1
+        scheme, _, stored = password_hash.partition("$")
+        return scheme in {"fake", "legacy"} and stored == password
+
+    def needs_rehash(self, password_hash: str) -> bool:
+        return password_hash.startswith("legacy$")
+
+
+class FakeRateLimiter:
+    """Never limits unless told to; records every call for assertions."""
+
+    def __init__(self) -> None:
+        self.hits: list[tuple[str, str]] = []
+        self.failures: dict[tuple[str, str], int] = {}
+        self.blocked: dict[tuple[str, str], int] = {}
+        self.reject_after: int | None = None
+
+    def hit(self, bucket: str, key: str, limit: int, window_seconds: int) -> int | None:
+        self.hits.append((bucket, key))
+        if self.reject_after is not None and len(self.hits) > self.reject_after:
+            return window_seconds
+        return None
+
+    def record_failure(self, bucket: str, key: str, limit: int, block_seconds: int) -> None:
+        n = self.failures.get((bucket, key), 0) + 1
+        self.failures[(bucket, key)] = n
+        if n >= limit:
+            self.blocked[(bucket, key)] = block_seconds
+
+    def blocked_for(self, bucket: str, key: str) -> int | None:
+        return self.blocked.get((bucket, key))
+
+    def reset_failures(self, bucket: str, key: str) -> None:
+        self.failures.pop((bucket, key), None)
+        self.blocked.pop((bucket, key), None)
 
 
 # ------------------------------------------------------------------ tenancy --
