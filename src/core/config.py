@@ -148,8 +148,14 @@ class Settings(BaseSettings):
 
     @property
     def auth_refresh_cookie_name(self) -> str:
-        """``__Host-`` prefix (RFC 6265bis) everywhere the cookie is `Secure`; plain in dev."""
-        return "__Host-refresh" if self.auth_cookie_secure else "refresh"
+        """``__Secure-`` prefix wherever the cookie is ``Secure``; plain ``refresh`` in dev.
+
+        SPRINT-04.1 H5: *not* ``__Host-`` — that prefix mandates ``Path=/`` (RFC 6265bis
+        §4.1.3.2) and browsers silently drop a ``__Host-`` cookie scoped to
+        ``/api/v1/auth``. Keeping the narrow path (the cookie is only ever sent to the auth
+        routes) matters more than ``__Host-``'s sub-domain guarantee on a host we control.
+        """
+        return "__Secure-refresh" if self.auth_cookie_secure else "refresh"
 
     @property
     def meta_scopes_list(self) -> list[str]:

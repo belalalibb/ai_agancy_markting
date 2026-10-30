@@ -191,7 +191,7 @@ def test_auth_defaults_and_cookie_flags(
     monkeypatch.setenv("APP_ENV", "production")
     prod = Settings(_env_file=None)  # type: ignore[call-arg]
     assert prod.auth_cookie_secure is True
-    assert prod.auth_refresh_cookie_name == "__Host-refresh"
+    assert prod.auth_refresh_cookie_name == "__Secure-refresh"  # H5: never __Host- with a Path
 
     monkeypatch.setenv("APP_ENV", "development")
     dev = Settings(_env_file=None)  # type: ignore[call-arg]

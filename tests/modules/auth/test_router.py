@@ -25,7 +25,8 @@ from tests.fakes import (
     FakeStore,
 )
 
-AUTH = "/api/v1/auth"
+API = "/api/v1"
+AUTH = f"{API}/auth"
 CSRF = {"X-Requested-With": "XMLHttpRequest"}
 COOKIE = "refresh"  # AUTH_COOKIE_SECURE=false in tests ⇒ no ``__Host-`` prefix
 COOKIE_PATH = "/api/v1/auth"
@@ -369,13 +370,18 @@ def test_current_user_fresh_rejects_revoked_session_but_current_user_still_accep
     client: TestClient, auth_headers: Callable[[UUID], dict[str, str]], store: FakeStore
 ) -> None:
     """Documented trade-off: ``CurrentUser`` is stateless and valid until ``exp`` (≤ 15 min);
-    ``CurrentUserFresh`` (destructive routes) checks ``refresh_sessions`` on every call."""
+    ``CurrentUserFresh`` (destructive routes **and** ``GET /auth/me`` since H6) checks
+    ``refresh_sessions`` on every call."""
     headers = auth_headers(OWNER_ID)
     assert client.get(f"{AUTH}/me", headers=headers).status_code == 200
     assert client.post(f"{AUTH}/logout", headers=headers).status_code == 204
-    # ``CurrentUser`` (no DB) still accepts the token …
-    assert client.get(f"{AUTH}/me", headers=headers).status_code == 200
-    # … while ``CurrentUserFresh`` refuses the revoked sid.
+    # ``CurrentUser`` (no DB) still accepts the token on a stateless route …
+    brands = client.get(f"{API}/brands", headers=headers)
+    assert brands.status_code == 200
+    # … ``/auth/me`` is fresh now (H6) …
+    me = client.get(f"{AUTH}/me", headers=headers)
+    assert me.status_code == 401 and me.json()["detail"]["error"] == "session_revoked"
+    # … and ``CurrentUserFresh`` refuses the revoked sid.
     sid = next(s.id for s in store.sessions.values() if s.revoked_at is not None)
     actor = AuthenticatedActor(user_id=OWNER_USER_ID, tenant_id=OWNER_ID, sid=sid)
     with pytest.raises(HTTPException) as exc_info:
@@ -459,12 +465,15 @@ def test_me_requires_bearer_and_rejects_garbage(client: TestClient) -> None:
     assert client.get(f"{AUTH}/me", headers={"Authorization": "Basic abc"}).status_code == 401
 
 
-def test_me_inactive_or_deleted_user_403(
+def test_me_inactive_or_deleted_user(
     client: TestClient, auth_headers: Callable[[UUID], dict[str, str]], store: FakeStore
 ) -> None:
     headers = auth_headers(OWNER_ID)
     store.users[OWNER_USER_ID] = store.users[OWNER_USER_ID].model_copy(update={"is_active": False})
-    assert client.get(f"{AUTH}/me", headers=headers).status_code == 403
+    # H6: the fresh check (session JOIN users.is_active) answers first ⇒ 401 session_revoked.
+    res = client.get(f"{AUTH}/me", headers=headers)
+    assert res.status_code == 401 and res.json()["detail"]["error"] == "session_revoked"
+    # A user row that vanished entirely: the fresh check cannot see it, the service does.
     del store.users[OWNER_USER_ID]
     assert client.get(f"{AUTH}/me", headers=headers).status_code == 403
 
@@ -541,17 +550,59 @@ def test_login_does_not_rehash_modern_hash(
 
 
 # ------------------------------------------------------------ cookie flags --
-def test_secure_cookie_uses_host_prefix(
+def _assert_cookie_prefix_rules(raw: str) -> None:
+    """H5-U1 — permanent guard (RFC 6265bis §4.1.3): ``__Host-`` ⇒ ``Secure`` + ``Path=/`` +
+    no ``Domain``; ``__Secure-`` ⇒ ``Secure``. A violation is silently dropped by browsers."""
+    name, _, _ = raw.partition("=")
+    attrs = {a.strip().lower() for a in raw.split(";")[1:]}
+    attr_names = {a.split("=", 1)[0] for a in attrs}
+    if name.startswith("__Host-"):
+        assert "secure" in attrs, raw
+        assert "path=/" in attrs, raw
+        assert "domain" not in attr_names, raw
+    if name.startswith("__Secure-"):
+        assert "secure" in attrs, raw
+
+
+def test_h5_u2_secure_cookie_uses_secure_prefix_with_auth_path(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI
 ) -> None:
     monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
     _override_settings(app)
     response = client.post(f"{AUTH}/login", json=OWNER_LOGIN)
     raw = response.headers["set-cookie"]
-    assert raw.startswith("__Host-refresh=")
+    assert raw.startswith("__Secure-refresh=")
+    assert not raw.startswith("__Host-")
     assert "Secure" in raw
     assert "HttpOnly" in raw
     assert "Path=/api/v1/auth" in raw
+    _assert_cookie_prefix_rules(raw)
+    # The clearing cookie obeys the same rules.
+    out = client.post(f"{AUTH}/logout", headers={"X-Requested-With": "XMLHttpRequest"})
+    for header in out.headers.get_list("set-cookie"):
+        _assert_cookie_prefix_rules(header)
+
+
+def test_h5_u1_cookie_prefix_guard_on_every_set_cookie(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI
+) -> None:
+    """Runs the guard against dev *and* secure mode so a future ``__Host-`` + Path regression
+    fails here, even though ``TestClient`` itself would happily accept the cookie."""
+    for secure in ("false", "true"):
+        monkeypatch.setenv("AUTH_COOKIE_SECURE", secure)
+        _override_settings(app)
+        res = client.post(f"{AUTH}/login", json=OWNER_LOGIN)
+        assert res.status_code == 200
+        for header in res.headers.get_list("set-cookie"):
+            _assert_cookie_prefix_rules(header)
+    # Self-test of the guard: the SPRINT-04 shape must be rejected.
+    with pytest.raises(AssertionError):
+        _assert_cookie_prefix_rules(
+            "__Host-refresh=x; HttpOnly; Path=/api/v1/auth; SameSite=strict; Secure"
+        )
+    _assert_cookie_prefix_rules("__Host-refresh=x; HttpOnly; Path=/; SameSite=strict; Secure")
+    with pytest.raises(AssertionError):
+        _assert_cookie_prefix_rules("__Secure-refresh=x; HttpOnly; Path=/api/v1/auth")
 
 
 def test_session_stores_only_sha256_of_cookie_secret(client: TestClient, store: FakeStore) -> None:
@@ -571,3 +622,83 @@ def test_session_records_real_client_ip(app: FastAPI, store: FakeStore) -> None:
         assert res.status_code == 200, res.text
         sid = UUID(set_cookie_header(res)[COOKIE].value.partition(".")[0])
     assert store.sessions[sid].ip == "203.0.113.9"
+
+
+# ======================================================= SPRINT-04.1 H6 / H7
+def test_h6_u1_expired_session_is_refused_by_current_user_fresh(
+    client: TestClient, auth_headers: Callable[[UUID], dict[str, str]], store: FakeStore
+) -> None:
+    headers = auth_headers(OWNER_ID)
+    sid = next(s.id for s in store.sessions.values() if s.user_id == OWNER_USER_ID)
+    store.sessions[sid] = store.sessions[sid].model_copy(
+        update={"expires_at": datetime.now(tz=UTC) - timedelta(seconds=1)}
+    )
+    res = client.get(f"{AUTH}/me", headers=headers)
+    assert res.status_code == 401
+    assert res.json()["detail"]["error"] == "session_revoked"
+    assert res.headers["www-authenticate"] == "Bearer"
+
+
+def test_h6_u2_disabled_user_is_refused_on_fresh_routes(
+    client: TestClient, auth_headers: Callable[[UUID], dict[str, str]], store: FakeStore
+) -> None:
+    headers = auth_headers(OWNER_ID)
+    assert client.get(f"{AUTH}/me", headers=headers).status_code == 200
+    store.users[OWNER_USER_ID] = store.users[OWNER_USER_ID].model_copy(update={"is_active": False})
+
+    me = client.get(f"{AUTH}/me", headers=headers)
+    assert me.status_code == 401 and me.json()["detail"]["error"] == "session_revoked"
+    # DELETE …/connections/{id} is a CurrentUserFresh route ⇒ refused before any lookup.
+    from tests.conftest import BRAND_ID
+
+    gone = client.delete(
+        f"{API}/brands/{BRAND_ID}/social/meta/connections/{UUID(int=1)}", headers=headers
+    )
+    assert gone.status_code == 401 and gone.json()["detail"]["error"] == "session_revoked"
+    # A stateless route still honours the JWT until ``exp`` (documented trade-off).
+    assert client.get(f"{API}/brands", headers=headers).status_code == 200
+
+
+def test_h7_u1_losing_the_revoke_race_is_treated_as_reuse(
+    app: FastAPI, client: TestClient, store: FakeStore
+) -> None:
+    """The repo reports 0 rows revoked (another request won) ⇒ 401 reuse + all sessions gone."""
+    from src.modules.auth.dependencies import get_refresh_session_repository
+
+    _, cookie = _login(client)
+    _, cookie2 = _login(client)  # a second live session of the same user
+    live = [s for s in store.sessions.values() if s.user_id == OWNER_USER_ID and not s.revoked_at]
+    assert len(live) >= 2
+
+    racing_repo = FakeRefreshSessionRepository(store)
+    racing_repo.revoke_returns = 0
+    app.dependency_overrides[get_refresh_session_repository] = lambda: racing_repo
+    res = client.post(
+        f"{AUTH}/refresh",
+        cookies={COOKIE: cookie},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert res.status_code == 401, res.text
+    assert res.json()["detail"]["error"] == "refresh_reuse_detected"
+    assert all(
+        s.revoked_at is not None for s in store.sessions.values() if s.user_id == OWNER_USER_ID
+    )
+    # No new session was issued for the loser.
+    assert not any(
+        s.revoked_at is None for s in store.sessions.values() if s.user_id == OWNER_USER_ID
+    )
+
+
+def test_h7_refresh_revokes_before_issuing_and_links_replacement(
+    client: TestClient, store: FakeStore
+) -> None:
+    _, cookie = _login(client)
+    old_sid = UUID(cookie.partition(".")[0])
+    res = client.post(
+        f"{AUTH}/refresh", cookies={COOKIE: cookie}, headers={"X-Requested-With": "XMLHttpRequest"}
+    )
+    assert res.status_code == 200, res.text
+    new_sid = UUID(set_cookie_header(res)[COOKIE].value.partition(".")[0])
+    old = store.sessions[old_sid]
+    assert old.revoked_at is not None and old.replaced_by == new_sid
+    assert store.sessions[new_sid].revoked_at is None

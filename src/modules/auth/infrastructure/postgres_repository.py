@@ -91,21 +91,33 @@ class PostgresRefreshSessionRepository:
         row = await self._session.get(RefreshSessionRow, session_id)
         return _refresh(row) if row else None
 
-    async def is_active(self, session_id: UUID) -> bool:
+    async def is_active(self, session_id: UUID, now: datetime) -> bool:
+        # H6: one query — session live *and* not expired *and* its user still enabled.
         result = await self._session.execute(
-            select(RefreshSessionRow.id).where(
-                RefreshSessionRow.id == session_id, RefreshSessionRow.revoked_at.is_(None)
+            select(RefreshSessionRow.id)
+            .join(UserRow, UserRow.id == RefreshSessionRow.user_id)
+            .where(
+                RefreshSessionRow.id == session_id,
+                RefreshSessionRow.revoked_at.is_(None),
+                RefreshSessionRow.expires_at > now,
+                UserRow.is_active.is_(True),
             )
         )
         return result.scalar_one_or_none() is not None
 
-    async def revoke(
-        self, session_id: UUID, at: datetime, replaced_by: UUID | None = None
-    ) -> None:
-        await self._session.execute(
+    async def revoke(self, session_id: UUID, at: datetime, replaced_by: UUID | None = None) -> int:
+        result = await self._session.execute(
             update(RefreshSessionRow)
             .where(RefreshSessionRow.id == session_id, RefreshSessionRow.revoked_at.is_(None))
             .values(revoked_at=at, replaced_by=replaced_by)
+        )
+        return int(result.rowcount or 0)  # H7: the caller needs to know whether it won
+
+    async def link_replacement(self, session_id: UUID, replaced_by: UUID) -> None:
+        await self._session.execute(
+            update(RefreshSessionRow)
+            .where(RefreshSessionRow.id == session_id)
+            .values(replaced_by=replaced_by)
         )
 
     async def revoke_all_for_user(self, user_id: UUID, at: datetime) -> int:

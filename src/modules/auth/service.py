@@ -139,9 +139,16 @@ class AuthService:
             raise RefreshInvalidError("refresh token invalid")
         if not user.is_active:
             raise UserInactiveError("user account is inactive")
+        # H7: revoke *first* and atomically (``UPDATE … WHERE revoked_at IS NULL``). Two
+        # concurrent refreshes with the same cookie ⇒ exactly one row update; the loser is
+        # treated as reuse (the token was presented twice) and every session is revoked.
+        revoked = await self._sessions.revoke(session.id, now)
+        if revoked != 1:
+            await self._sessions.revoke_all_for_user(session.user_id, now)
+            raise RefreshReuseDetectedError("refresh token reuse detected; all sessions revoked")
         issued = await self._issue(user, client)
         new_sid = UUID(issued.refresh_cookie_value.partition(".")[0])
-        await self._sessions.revoke(session.id, now, replaced_by=new_sid)
+        await self._sessions.link_replacement(session.id, new_sid)
         return issued
 
     # ------------------------------------------------------------------ logout --

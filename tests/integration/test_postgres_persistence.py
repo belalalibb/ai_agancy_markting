@@ -1386,3 +1386,118 @@ def test_h4_i1_concurrent_register_same_email_via_api_is_409_not_500(
 async def _run_sql(engine: AsyncEngine, sql: str, params: dict) -> None:
     async with engine.begin() as conn:
         await conn.execute(text(sql), params)
+
+
+# ======================================================= SPRINT-04.1 Part B
+def test_h6_i1_disabling_user_in_sql_refuses_next_fresh_request(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """H6-I1 — ``UPDATE users SET is_active=false`` ⇒ the very next ``CurrentUserFresh``
+    request (``GET /auth/me``, ``DELETE …/connections/{id}``) is 401 ``session_revoked``."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=1)
+    with TestClient(integration_app) as client:
+        login = client.post(
+            f"{AUTH}/login", json={"email": "nile-owner@example.com", "password": SEED_PASSWORD}
+        )
+        assert login.status_code == 200, login.text
+        owner = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        user_id = UUID(login.json()["user"]["id"])
+        assert client.get(f"{AUTH}/me", headers=owner).status_code == 200
+        cid = _connect(client, owner)["id"]
+
+        _run("UPDATE users SET is_active = false WHERE id = :u", {"u": user_id})
+
+        me = client.get(f"{AUTH}/me", headers=owner)
+        assert me.status_code == 401, me.text
+        assert me.json()["detail"]["error"] == "session_revoked"
+        denied = client.delete(f"{brand_base()}/connections/{cid}", headers=owner)
+        assert denied.status_code == 401
+        assert denied.json()["detail"]["error"] == "session_revoked"
+        # Expired session row (not revoked) is refused the same way.
+        _run("UPDATE users SET is_active = true WHERE id = :u", {"u": user_id})
+        assert client.get(f"{AUTH}/me", headers=owner).status_code == 200
+        sid = UUID(_cookie(login).partition(".")[0])
+        _run(
+            "UPDATE refresh_sessions SET expires_at = now() - interval '1 second' WHERE id = :s",
+            {"s": sid},
+        )
+        expired = client.get(f"{AUTH}/me", headers=owner)
+        assert expired.status_code == 401
+        assert expired.json()["detail"]["error"] == "session_revoked"
+
+    assert _run("SELECT COUNT(*) FROM social_connections", scalar=True) == 1  # nothing deleted
+
+
+def test_h7_i1_concurrent_refresh_with_same_cookie_exactly_one_wins(
+    integration_app: FastAPI,
+) -> None:
+    """H7-I1 — two refreshes with the same cookie through two sessions ⇒ exactly one 200 and
+    one 401; the old session is revoked exactly once; no second session is ever issued."""
+    _seed_fresh()
+    settings = integration_app.state.settings
+    with TestClient(integration_app) as client:
+        login = client.post(
+            f"{AUTH}/login", json={"email": "nile-owner@example.com", "password": SEED_PASSWORD}
+        )
+        assert login.status_code == 200, login.text
+        user_id = UUID(login.json()["user"]["id"])
+        cookie = _cookie(login)
+    # The seed also planted one live session for this user; count the baseline.
+    baseline = _run(LIVE_SESSIONS, {"u": user_id}, scalar=True)
+    assert baseline == 2  # seeded + login
+
+    from src.main import create_app
+
+    async def _race() -> list[int]:
+        # Two independent ASGI apps ⇒ two engines ⇒ two DB sessions racing on one cookie.
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            # A real barrier: both requests are in flight before either can commit.
+            responses = await asyncio.gather(
+                c1.post(f"{AUTH}/refresh", cookies={COOKIE: cookie}, headers=CSRF),
+                c2.post(f"{AUTH}/refresh", cookies={COOKIE: cookie}, headers=CSRF),
+            )
+            codes = [r.status_code for r in responses]
+            losers = [r for r in responses if r.status_code == 401]
+            for r in losers:
+                assert r.json()["detail"]["error"] == "refresh_reuse_detected", r.text
+            return codes
+
+    try:
+        codes = asyncio.run(_race())
+    finally:
+        reset_db_caches()
+    assert sorted(codes) == [200, 401], codes
+    # Directive text: a lost revoke race is *reuse* ⇒ ``revoke_all_for_user``. PostgreSQL row
+    # locking makes the loser's ``UPDATE … WHERE revoked_at IS NULL`` wait for the winner's
+    # commit, so the loser then sees 0 rows, runs ``revoke_all_for_user`` and also revokes
+    # the session the winner just committed ⇒ deterministically **0** live sessions (the
+    # directive's "= 1" expectation is reported as a deviation in §6; a legitimate double
+    # refresh from two tabs therefore logs the user out everywhere — the strict choice).
+    live = _run(LIVE_SESSIONS, {"u": user_id}, scalar=True)
+    print(f"H7-I1 race: codes={sorted(codes)} live_sessions_after={live}")  # noqa: T201
+    assert live == 0, live
+    # Exactly one *new* session was ever issued (the winner's), and it is now revoked too.
+    assert (
+        _run(
+            "SELECT COUNT(*) FROM refresh_sessions WHERE user_id = :u", {"u": user_id}, scalar=True
+        )
+        == baseline + 1
+    )
+    # Old session: revoked exactly once and linked to its replacement by the winner.
+    old_sid = UUID(cookie.partition(".")[0])
+    rows = _rows(
+        "SELECT revoked_at IS NOT NULL, replaced_by IS NOT NULL FROM refresh_sessions "
+        "WHERE id = :s",
+        {"s": old_sid},
+    )
+    assert rows == [(True, True)]
