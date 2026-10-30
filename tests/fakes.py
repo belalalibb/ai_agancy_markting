@@ -363,6 +363,7 @@ class FakeConnectedAccountRepository:
         }
         if granted_scopes is not None:
             update["granted_scopes"] = list(granted_scopes)
+            update["scopes_verified"] = True
         self.rows[account_id] = row.model_copy(update=update)
         return True
 

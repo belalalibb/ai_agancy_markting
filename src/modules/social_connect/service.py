@@ -177,7 +177,9 @@ class MetaConnectService:
                     error_type="OAuthException",
                     http_status=200,
                 )
-        granted_scopes = list(debug.scopes) if debug else []
+        # SPRINT-06 A-1: empty ≠ unknown — scopes are *verified* only when debug_token answered.
+        granted_scopes = list(debug.scopes) if debug is not None else []
+        scopes_verified = debug is not None
         token_expires_at = _expiry_from_debug(debug) if debug else None
 
         pages = await self._client.get_user_pages(long_lived)
@@ -207,6 +209,7 @@ class MetaConnectService:
             encrypted_user_token=self._encryption.encrypt_token(long_lived),
             token_expires_at=token_expires_at,
             granted_scopes=granted_scopes,
+            scopes_verified=scopes_verified,
             status=AccountStatus.ACTIVE,
             connected_at=existing.connected_at if existing else datetime.now(tz=UTC),
             last_synced_at=datetime.now(tz=UTC),
@@ -321,15 +324,21 @@ class MetaConnectService:
         1. ``None`` when the connection is not in this brand (caller ⇒ 404);
         2. actor ≠ ``connected_by_tenant_id`` ⇒ ``NotConnectionOwnerError`` (403);
         3. ``REVOKED`` ⇒ ``ConnectionRevokedError`` (409) — never resurrected;
-        4. ``/debug_token`` (graceful) ⇒ ``token_expires_at`` / ``granted_scopes`` (``None``
-           keeps the stored scopes); ``is_valid == False`` ⇒ ``reauth_required`` out of band
-           + ``MetaTokenExpiredError`` (401 ``reconnect``) — same for a 190 anywhere;
+        3b. ``REAUTH_REQUIRED`` ⇒ ``ReauthRequiredError`` (409 ``reauth_required``) — SPRINT-06
+           A-1: the stored token is already known-bad, so **no Graph call** is made; only a
+           fresh OAuth clears the status;
+        4. ``/debug_token`` (graceful) ⇒ ``token_expires_at`` / ``granted_scopes``: a
+           successful answer is written verbatim — an **empty** scope list is a verified
+           fact (``scopes_verified = True``), not "unknown"; a transient failure (``None``)
+           keeps the stored scopes and flag; ``is_valid == False`` ⇒ ``reauth_required``
+           out of band + ``MetaTokenExpiredError`` (401 ``reconnect``) — same for a 190
+           anywhere;
         5. ``/me/accounts`` ⇒ **merge policy**: a Page that was selected *and* is still
            returned with a token stays selected with the **new** token; a selected Page Meta
            no longer returns is dropped and reported in ``removed_selected_page_ids``;
            unselected Pages keep metadata only; a single Page is auto-selected (B6).
-        ``status`` is left as is (``ACTIVE`` stays ``ACTIVE``; ``REAUTH_REQUIRED`` is only
-        cleared by a fresh OAuth). The user token plaintext lives only inside this method.
+        ``status`` is left as is (``ACTIVE`` stays ``ACTIVE``). The user token plaintext
+        lives only inside this method.
         """
         account = await self._repository.get(brand_id, account_id)
         if account is None:
@@ -338,6 +347,8 @@ class MetaConnectService:
             raise NotConnectionOwnerError()
         if account.status is AccountStatus.REVOKED:
             raise ConnectionRevokedError()
+        if account.status is AccountStatus.REAUTH_REQUIRED:
+            raise ReauthRequiredError()
 
         user_token = self._encryption.decrypt_token(account.encrypted_user_token)
         try:
@@ -376,7 +387,7 @@ class MetaConnectService:
             brand_id,
             account_id,
             token_expires_at=_expiry_from_debug(debug) if debug else account.token_expires_at,
-            granted_scopes=list(debug.scopes) if debug and debug.scopes else None,
+            granted_scopes=list(debug.scopes) if debug is not None else None,
             last_synced_at=now,
         )
         await self._repository.replace_pages(brand_id, account_id, new_pages)

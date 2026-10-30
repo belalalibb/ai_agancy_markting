@@ -76,6 +76,9 @@ class ConnectedAccount(BaseModel):
         default=None, description="NULL means *unknown*, not *never expires* (D-055)."
     )
     granted_scopes: list[str] = Field(default_factory=list)
+    # SPRINT-06 A-1: ``True`` iff ``granted_scopes`` came from a *successful* ``/debug_token``
+    # answer (an empty list is then a verified "no scopes"); ``False`` = unknown/unverified.
+    scopes_verified: bool = False
     status: AccountStatus = AccountStatus.ACTIVE
     connected_at: datetime = Field(default_factory=_utcnow)
     last_synced_at: datetime | None = None

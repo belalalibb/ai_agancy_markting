@@ -494,7 +494,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"  # SPRINT-04
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"  # SPRINT-06
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -899,7 +899,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"  # SPRINT-06 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1788,6 +1788,7 @@ def test_b3_i1_full_path_oauth_select_read_posts_on_pg(
                     "status_type": None,
                     "full_picture": None,
                     "is_published": None,
+                    "attachments": [],  # SPRINT-06 A-3
                 }
             ],
             "next_cursor": "C2",
@@ -1844,3 +1845,46 @@ def test_b4_i1_instagram_media_on_pg(
         assert sel.status_code == 200
         res = client.get(other, headers=owner)
         assert res.status_code == 404 and res.json()["detail"]["error"] == "instagram_not_linked"
+
+
+# ================================================================ SPRINT-06 Part A
+def test_a1_i1_resync_on_reauth_required_row_is_409_and_touches_nothing_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """A1-I1 — a connection already in ``reauth_required`` answers 409 ``reauth_required`` on
+    resync **before any Graph call**; status and Page rows stay exactly as they were, and the
+    ``scopes_verified`` column (migration 0005) round-trips through the repository."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        _select_1001(client, cid, owner)
+        shown = client.get(f"{brand_base()}/connections/{cid}", headers=owner).json()
+        assert shown["scopes_verified"] is True  # debug_token answered during the callback
+        _run(
+            "UPDATE social_connections SET status = 'reauth_required' WHERE id = :cid",
+            {"cid": UUID(cid)},
+        )
+        debug_route = graph_mock.post("/debug_token")
+        debug_route.reset()
+        debug_route.mock(return_value=httpx.Response(200, json=debug_token_payload()))
+        pages_route = graph_mock.get("/me/accounts")
+        pages_route.reset()
+        pages_route.mock(return_value=httpx.Response(200, json=pages_payload(2)))
+        res = client.post(f"{brand_base()}/connections/{cid}/resync", headers=owner)
+        assert res.status_code == 409, res.text
+        assert res.json()["detail"]["error"] == "reauth_required"
+        assert res.json()["detail"]["required_action"] == "reconnect"
+        assert debug_route.called is False
+        assert pages_route.called is False
+    assert _status_of(cid) == "reauth_required"
+    assert _page_rows(cid) == {"1001": (True, True), "1002": (False, False)}
+    assert (
+        _run(
+            "SELECT scopes_verified FROM social_connections WHERE id = :cid",
+            {"cid": UUID(cid)},
+            scalar=True,
+        )
+        is True
+    )

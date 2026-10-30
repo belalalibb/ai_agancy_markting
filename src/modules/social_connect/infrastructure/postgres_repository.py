@@ -48,6 +48,7 @@ class PostgresConnectedAccountRepository:
                 encrypted_user_token=account.encrypted_user_token,
                 token_expires_at=account.token_expires_at,
                 granted_scopes=list(account.granted_scopes),
+                scopes_verified=account.scopes_verified,
                 status=account.status.value,
                 connected_at=account.connected_at,
                 last_synced_at=account.last_synced_at,
@@ -61,6 +62,7 @@ class PostgresConnectedAccountRepository:
                     "encrypted_user_token": account.encrypted_user_token,
                     "token_expires_at": account.token_expires_at,
                     "granted_scopes": list(account.granted_scopes),
+                    "scopes_verified": account.scopes_verified,
                     "status": account.status.value,
                     "last_synced_at": account.last_synced_at,
                     "updated_at": now,
@@ -143,7 +145,9 @@ class PostgresConnectedAccountRepository:
         granted_scopes: list[str] | None,
         last_synced_at: datetime,
     ) -> bool:
-        """SPRINT-05 B2: expiry / scopes / ``last_synced_at`` only — token and status untouched."""
+        """SPRINT-05 B2: expiry / scopes / ``last_synced_at`` only — token and status untouched.
+        SPRINT-06 A-1: a non-``None`` list (``[]`` included) is written and marks the scopes
+        verified; ``None`` leaves both ``granted_scopes`` and ``scopes_verified`` alone."""
         values: dict[str, object] = {
             "token_expires_at": token_expires_at,
             "last_synced_at": last_synced_at,
@@ -151,6 +155,7 @@ class PostgresConnectedAccountRepository:
         }
         if granted_scopes is not None:
             values["granted_scopes"] = list(granted_scopes)
+            values["scopes_verified"] = True
         result = await self._session.execute(
             update(SocialConnectionRow)
             .where(
@@ -231,6 +236,7 @@ def _to_domain(row: SocialConnectionRow) -> ConnectedAccount:
         encrypted_user_token=row.encrypted_user_token,
         token_expires_at=row.token_expires_at,
         granted_scopes=list(row.granted_scopes or []),
+        scopes_verified=bool(row.scopes_verified),
         status=AccountStatus(row.status),
         connected_at=row.connected_at,
         last_synced_at=row.last_synced_at,

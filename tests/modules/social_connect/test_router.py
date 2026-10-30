@@ -33,7 +33,9 @@ from src.modules.social_connect.exceptions import (
     MetaRateLimitError,
     MetaTokenExpiredError,
     MetaTransientError,
+    ReauthRequiredError,
 )
+from src.modules.social_connect.meta_client import POST_FIELDS
 from src.modules.social_connect.router import _to_http
 from src.modules.tenancy.domain.models import GrantRole
 
@@ -409,7 +411,7 @@ def test_callback_permission_error_returns_403(
     )
     res = _callback(client, signer)
     assert res.status_code == 403
-    assert res.json()["detail"]["required_action"] == "reauthorize_with_additional_scopes"
+    assert res.json()["detail"]["required_action"] == "reconnect"  # SPRINT-06 A-2: unified
 
 
 def test_callback_upstream_failure_returns_502(
@@ -418,7 +420,7 @@ def test_callback_upstream_failure_returns_502(
     graph_mock.post("/oauth/access_token").mock(return_value=httpx.Response(503, json={}))
     res = _callback(client, signer)
     assert res.status_code == 502
-    assert res.json()["detail"]["error"] == "MetaTransientError"
+    assert res.json()["detail"]["error"] == "upstream_unavailable"  # A-2: fixed 502 everywhere
 
 
 def test_callback_network_failure_returns_502(
@@ -427,7 +429,7 @@ def test_callback_network_failure_returns_502(
     graph_mock.post("/oauth/access_token").mock(side_effect=httpx.ConnectError("boom"))
     res = _callback(client, signer)
     assert res.status_code == 502
-    assert res.json()["detail"]["error"] == "MetaNetworkError"
+    assert res.json()["detail"]["error"] == "upstream_unavailable"  # A-2: fixed 502 everywhere
 
 
 def test_callback_unknown_graph_error_returns_400(
@@ -1010,11 +1012,7 @@ def test_missing_state_secret_returns_503(
     [
         (MetaTokenExpiredError("expired", code=190), 401, "reconnect"),
         (MetaOAuthError("bad code", code=100), 401, "reconnect"),
-        (
-            MetaPermissionError("(#200) missing", code=200),
-            403,
-            "reauthorize_with_additional_scopes",
-        ),
+        (MetaPermissionError("(#200) missing", code=200), 403, "reconnect"),  # A-2 unified
         (MetaRateLimitError("limit", code=4), 429, "retry_later"),
         (MetaTransientError("oops", http_status=503), 502, None),
         (MetaNetworkError("timeout"), 502, None),
@@ -1542,7 +1540,8 @@ def test_b3_u1_posts_request_uses_bearer_page_token_and_appsecret_proof(
     _assert_bearer_only(req, "PAGE_TOKEN_1001")
     qs = dict(req.url.params)
     assert qs["fields"] == (
-        "id,message,created_time,permalink_url,status_type,full_picture,is_published"
+        "id,message,created_time,permalink_url,status_type,full_picture,is_published,"
+        "attachments{media_type,type,url,media{image{src}}}"
     )
     assert qs["limit"] == "10"
     assert "after" not in qs
@@ -1827,3 +1826,297 @@ def test_b4_media_status_guards_and_190(
     assert route.call_count == 1
     assert _get(client, _media_url(str(uuid4())), OWNER_ID, as_) == 404
     assert _get(client, _media_url(cid), OWNER_ID, as_, limit=101) == 422
+
+
+# ================================================================ SPRINT-06 Part A
+# A1-U1: debug_token answers ``is_valid=true, scopes=[]`` ⇒ the empty list IS persisted
+# (empty ≠ unknown) and ``scopes_verified`` flips to true.
+def test_a1_u1_resync_persists_empty_verified_scope_list(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    assert fake_repo.rows[UUID(cid)].granted_scopes != []
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload(scopes=[]))
+    )
+    _rearmed_pages_route(graph_mock, pages=2)
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    assert res.json()["granted_scopes"] == []
+    assert res.json()["scopes_verified"] is True
+    after = fake_repo.rows[UUID(cid)]
+    assert after.granted_scopes == []
+    assert after.scopes_verified is True
+
+
+# A1-U2: a transient debug_token failure keeps the stored scopes *and* the verified flag.
+def test_a1_u2_resync_debug_token_failure_keeps_old_scopes(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    before = fake_repo.rows[UUID(cid)]
+    assert before.scopes_verified is True and before.granted_scopes
+    graph_mock.post("/debug_token").mock(side_effect=httpx.ConnectTimeout("slow"))
+    _rearmed_pages_route(graph_mock, pages=2)
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    after = fake_repo.rows[UUID(cid)]
+    assert after.granted_scopes == before.granted_scopes
+    assert after.scopes_verified is True
+    assert res.json()["granted_scopes"] == before.granted_scopes
+
+
+# A1-U3: ``scopes_verified`` is exposed with both values — true after a verified callback,
+# false when the callback had to degrade (debug_token unreachable ⇒ scopes unknown).
+@pytest.mark.parametrize(
+    ("debug_response", "expected_verified"),
+    [
+        (httpx.Response(200, json=debug_token_payload()), True),
+        (httpx.Response(500, json={"error": {"message": "down", "code": 2}}), False),
+    ],
+    ids=["verified", "unverified"],
+)
+def test_a1_u3_scopes_verified_exposed_with_both_values(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    debug_response: httpx.Response,
+    expected_verified: bool,
+) -> None:
+    _stub_happy_path(graph_mock, pages=2)
+    graph_mock.post("/debug_token").mock(return_value=debug_response)
+    created = _callback(client, signer)
+    assert created.status_code == 201, created.text
+    assert created.json()["scopes_verified"] is expected_verified
+    assert (created.json()["granted_scopes"] != []) is expected_verified
+    listed = client.get(f"{BASE}/connections", headers=as_(OWNER_ID)).json()
+    assert listed[0]["scopes_verified"] is expected_verified
+    _assert_no_secrets(created.text)
+
+
+# A1-U4: a ``reauth_required`` connection ⇒ 409 ``reauth_required`` with **no** Graph call.
+def test_a1_u4_resync_reauth_required_is_409_without_graph_call(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    fake_repo.rows[UUID(cid)] = fake_repo.rows[UUID(cid)].model_copy(
+        update={"status": AccountStatus.REAUTH_REQUIRED}
+    )
+    debug_route = graph_mock.post("/debug_token")
+    debug_route.reset()
+    debug_route.mock(return_value=httpx.Response(200, json=debug_token_payload()))
+    pages_route = _rearmed_pages_route(graph_mock, pages=2)
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"] == {
+        "error": "reauth_required",
+        "message": ReauthRequiredError().message,
+        "required_action": "reconnect",
+    }
+    assert debug_route.called is False
+    assert pages_route.called is False
+    assert fake_repo.rows[UUID(cid)].status is AccountStatus.REAUTH_REQUIRED
+    assert [p.page_id for p in fake_repo.rows[UUID(cid)].pages if p.is_selected] == ["1001"]
+
+
+# A2-U1: a permission failure yields the single value ``reconnect`` on all four routes that
+# talk to Meta (callback, resync, posts, media), and transient failures the fixed 502 body.
+_PERMISSION_ERROR = {
+    "error": {
+        "message": "(#200) Requires pages_read_engagement",
+        "type": "OAuthException",
+        "code": 200,
+    }
+}
+_FIXED_502 = {"provider": "meta", "error": "upstream_unavailable", "required_action": None}
+
+
+def test_a2_u1_required_action_reconnect_is_uniform_across_meta_routes(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+) -> None:
+    owner = as_(OWNER_ID)
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    actions: dict[str, str] = {}
+    fixed: dict[str, dict] = {}
+
+    # 1) posts / 2) media — Page-token reads.
+    for name, url in (("posts", _posts_url(cid)), ("media", _media_url(cid))):
+        path = "/1001/posts" if name == "posts" else "/17841400000001/media"
+        graph_mock.get(path).mock(return_value=httpx.Response(403, json=_PERMISSION_ERROR))
+        res = client.get(url, headers=owner)
+        assert res.status_code == 403, res.text
+        actions[name] = res.json()["detail"]["required_action"]
+        graph_mock.get(path).mock(return_value=httpx.Response(503, json={"error": {"code": 2}}))
+        fixed[name] = client.get(url, headers=owner).json()["detail"]
+
+    # 3) resync — user-token refresh.
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload())
+    )
+    pages_route = _rearmed_pages_route(graph_mock, pages=2)
+    pages_route.mock(return_value=httpx.Response(403, json=_PERMISSION_ERROR))
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=owner)
+    assert res.status_code == 403, res.text
+    actions["resync"] = res.json()["detail"]["required_action"]
+    pages_route.mock(return_value=httpx.Response(503, json={"error": {"code": 2}}))
+    fixed["resync"] = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=owner).json()[
+        "detail"
+    ]
+
+    # 4) callback — fresh OAuth.
+    _stub_oauth(graph_mock)
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(400, json=_PERMISSION_ERROR)
+    )
+    res = _callback(client, signer)
+    assert res.status_code == 403, res.text
+    actions["callback"] = res.json()["detail"]["required_action"]
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(503, json={"error": {"code": 2}})
+    )
+    fixed["callback"] = _callback(client, signer).json()["detail"]
+
+    assert set(actions) == {"posts", "media", "resync", "callback"}
+    assert set(actions.values()) == {"reconnect"}
+    assert all(body == _FIXED_502 for body in fixed.values()), fixed
+
+
+# A3-U1: contract — the requested *root* fields of ``/{page_id}/posts`` stay inside the Post
+# v26.0 allowlist and none of the fields deprecated in v3.3 is requested at the root.
+_POST_V26_ROOT_ALLOWLIST = frozenset(
+    {
+        "id",
+        "message",
+        "created_time",
+        "updated_time",
+        "permalink_url",
+        "status_type",
+        "full_picture",
+        "is_published",
+        "is_hidden",
+        "is_expired",
+        "from",
+        "attachments",
+        "shares",
+        "privacy",
+        "story",
+        "message_tags",
+        "story_tags",
+        "parent_id",
+        "promotable_id",
+        "icon",
+        "admin_creator",
+        "backdated_time",
+        "scheduled_publish_time",
+        "timeline_visibility",
+        "is_instagram_eligible",
+        "is_eligible_for_promotion",
+        "is_popular",
+        "is_spherical",
+        "multi_share_end_card",
+        "multi_share_optimized",
+        "properties",
+        "actions",
+        "allowed_advertising_objectives",
+        "application",
+        "call_to_action",
+        "can_reply_privately",
+        "child_attachments",
+        "coordinates",
+        "event",
+        "expanded_height",
+        "expanded_width",
+        "feed_targeting",
+        "height",
+        "instagram_eligibility",
+        "place",
+        "subscribed",
+        "target",
+        "targeting",
+        "via",
+        "video_buying_eligibility",
+        "width",
+    }
+)
+_POST_V33_DEPRECATED_ROOT = frozenset(
+    {"caption", "description", "link", "name", "object_id", "picture", "source", "type"}
+)
+
+
+def _root_fields(fields: str) -> list[str]:
+    """Split a Graph ``fields`` expression on top-level commas (``a,b{c,d},e`` ⇒ a, b, e)."""
+    roots: list[str] = []
+    depth = 0
+    current = ""
+    for ch in fields:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            roots.append(current.split("{", 1)[0])
+            current = ""
+            continue
+        current += ch
+    roots.append(current.split("{", 1)[0])
+    return roots
+
+
+def test_a3_u1_post_fields_contract_against_v26_reference() -> None:
+    roots = _root_fields(POST_FIELDS)
+    assert set(roots) <= _POST_V26_ROOT_ALLOWLIST, set(roots) - _POST_V26_ROOT_ALLOWLIST
+    assert not (set(roots) & _POST_V33_DEPRECATED_ROOT)
+    assert "attachments" in roots
+    assert "attachments{media_type,type,url,media{image{src}}}" in POST_FIELDS
+    assert {"status_type", "full_picture"} <= set(roots)
+
+
+def test_a3_posts_response_flattens_attachments(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    payload = _posts_payload(2)
+    payload["data"][0]["attachments"] = {
+        "data": [
+            {
+                "media_type": "photo",
+                "type": "photo",
+                "url": "https://www.facebook.com/photo/?fbid=1",
+                "media": {"image": {"src": "https://scontent.example/1.jpg", "height": 10}},
+                "target": {"id": "ignored"},
+            }
+        ]
+    }
+    graph_mock.get("/1001/posts").mock(return_value=httpx.Response(200, json=payload))
+    res = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    items = res.json()["items"]
+    assert items[0]["attachments"] == [
+        {
+            "media_type": "photo",
+            "type": "photo",
+            "url": "https://www.facebook.com/photo/?fbid=1",
+            "image_src": "https://scontent.example/1.jpg",
+        }
+    ]
+    assert items[1]["attachments"] == []
+    _assert_no_secrets(res.text)

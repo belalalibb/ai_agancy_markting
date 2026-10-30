@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -15,6 +15,7 @@ from pydantic import (
     SecretStr,
     computed_field,
     field_validator,
+    model_validator,
 )
 
 from src.modules.social_connect.domain.models import AccountStatus, ConnectedAccount, PageAsset
@@ -243,6 +244,9 @@ class ConnectedAccountPublic(BaseModel):
         description="When the stored credential expires; null = unknown (D-055).",
     )
     granted_scopes: list[str] = Field(default_factory=list)
+    # SPRINT-06 A-1: ``True`` iff ``granted_scopes`` was confirmed by ``/debug_token``;
+    # ``False`` + ``[]`` means *unknown*, not *no permissions*.
+    scopes_verified: bool = False
     status: str
     # SPRINT-05 B1: derived from ``status`` + ``expires_at`` at render time (visible to all).
     token_health: TokenHealth = "unknown"  # noqa: S105 - health *label*, not a secret
@@ -309,8 +313,37 @@ class ResyncResponse(ConnectedAccountPublic):
         )
 
 
+class PostAttachmentPublic(BaseModel):
+    """SPRINT-06 A-3: one entry of ``attachments{media_type,type,url,media{image{src}}}``.
+
+    ``image_src`` is flattened from ``media.image.src``; every other key Meta returns inside
+    an attachment is ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    media_type: str | None = None
+    type: str | None = None
+    url: str | None = None
+    image_src: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _flatten_media(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "image_src" not in data:
+            media = data.get("media")
+            image = media.get("image") if isinstance(media, dict) else None
+            src = image.get("src") if isinstance(image, dict) else None
+            data = {**data, "image_src": src}
+        return data
+
+
 class PagePostPublic(BaseModel):
-    """B3: one Page post (``GET /{page_id}/posts``) — only the whitelisted fields."""
+    """B3: one Page post (``GET /{page_id}/posts``) — only the whitelisted fields.
+
+    SPRINT-06 A-3: ``attachments`` is flattened from the Graph edge wrapper
+    (``{"attachments": {"data": [...]}}``) into a plain list.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -321,6 +354,16 @@ class PagePostPublic(BaseModel):
     status_type: str | None = None
     full_picture: str | None = None
     is_published: bool | None = None
+    attachments: list[PostAttachmentPublic] = Field(default_factory=list)
+
+    @field_validator("attachments", mode="before")
+    @classmethod
+    def _unwrap_edge(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            return value.get("data") or []
+        return value
 
 
 class InstagramMediaPublic(BaseModel):
