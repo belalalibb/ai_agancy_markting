@@ -1,6 +1,6 @@
 # 🎯 CURRENT DIRECTIVE — التوجيه التنفيذي النشط
 
-> **المصدر الوحيد للمهمة الحالية.** SPRINT-04.1-HOTFIX رُوجع مستقلاً و**قُبل** (`main` @ `32c20cb`؛ التقرير في [`sprints/SPRINT-04.1_REVIEW.md`](./sprints/SPRINT-04.1_REVIEW.md)). هذا التوجيه يفتح **أول قدرة تشغيلية** فوق الربط: قراءة منشورات الصفحات ووسائط Instagram، وإعادة مزامنة الاتصال وصحة التوكن — **بلا تغيير مخطط بيانات**، وبقاعدتين لا تنازل عنهما استُخلصتا من 04.1: **قناة الأسرار** و**جدول الرؤية لكل حقل** (§2-0).
+> **المصدر الوحيد للمهمة الحالية.** SPRINT-05 رُوجع مستقلاً و**قُبل ودُمج** بواسطة المخطط (`main` @ `d026a2e`؛ التقرير في [`sprints/SPRINT-05_REVIEW.md`](./sprints/SPRINT-05_REVIEW.md)). هذا التوجيه يفتح **المحطة M3 — نواة المحتوى والموافقة البشرية** (خريطة المحطات في `WORK_STATE.md` §2-ب): أول جدول أعمال (`content_items`) بدورة حياة محكومة، وبوابة الذكاء الاصطناعي (D-056) خلف واجهة واحدة بمزوّد وهمي قابل للاستبدال — مع الجزء A الإلزامي لإغلاق ما ثبت في مراجعة 05.
 
 ---
 
@@ -8,128 +8,182 @@
 
 | البند | القيمة |
 |---|---|
-| **معرف المهمة** | `SPRINT-05-META-OPERATIONAL-READS` |
-| **النوع** | Part A: تصحيح بروتوكولي إلزامي (A-0, A-1) · Part B: ميزة (قراءة تشغيلية + إعادة مزامنة) |
+| **معرف المهمة** | `SPRINT-06-CONTENT-CORE-AND-APPROVAL` |
+| **النوع** | Part A: تصحيحات إلزامية (A-1..A-3) · Part B: ميزة (وحدة `content` + بوابة `ai_gateway`) · **هجرة واحدة** `0005_content` |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
-| **يبدأ من** | `main` @ `4d84a59` (دمج PR #14 — هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
-| **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-05: Meta operational reads (resync, posts, IG media) + debug_token protocol fix` |
-| **الكوميتات** | **اثنان**: Part A (A-0 + A-1) ثم Part B (B1–B4). كل كوميت يُدفع فوراً. |
-| **تغيير مخطط البيانات** | **لا شيء.** لا هجرة جديدة. `last_synced_at` و`token_expires_at` و`granted_scopes` موجودة منذ 0001. |
-| **الحجم المتوقع** | ~650 سطر كود + ~700 سطر اختبارات |
+| **يبدأ من** | `main` @ *(SHA دمج هذا التوجيه — يُقرأ من WORK_STATE §6)*. أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-06: content core + human approval + AI gateway (D-055/D-056) + SPRINT-05 review fixes` |
+| **الكوميتات** | **ثلاثة**: Part A ⇒ Part B-1 (هجرة + وحدة `content`) ⇒ Part B-2 (`ai_gateway` + التوليد). كل كوميت يُدفع فوراً، **وكل ملف يُدفع فور اكتماله** (`wip:` مسموح ثم يُسحق) |
+| **تبعيات جديدة** | **لا شيء.** LiteLLM Proxy **لا يُثبَّت** في هذا السبرنت — تُبنى واجهته فقط (`AIGateway` Protocol) بمزوّد `FakeProvider` و`HttpOpenAICompatibleProvider` عبر `httpx` القائم؛ تشغيل Proxy حقيقي في SPRINT-07 |
+| **الحجم المتوقع** | ~1100 سطر كود + ~1000 سطر اختبارات |
 | **تاريخ الإصدار** | 2026-10-30 |
 
 ---
 
 ## 0. لماذا؟
 
-1. **A-0 (بروتوكولي، ثبت بنيوياً):** `meta_client.py:185-190` يرسل `POST /debug_token` بجسم `{input_token}` + Bearer. `/debug_token` نقطة **قراءة**؛ Graph يقبل POST على نقاط القراءة فقط مع تجاوز الطريقة `method=GET` في الجسم، وإلا أعاد `(#100) Unsupported post request`. الأسوأ أن `service.py:302-321` (`_inspect_token`) يلتقط أي خطأ غير 190 كـ`WARNING` ويكمل بـ`expires_at=None` و`scopes=[]` — خلل تكوين **يُبتلع بصمت**، فيُحفظ كل اتصال بانتهاء مجهول ونطاقات فارغة. `respx` لا يحاكي هذه القاعدة فمرّت الاختبارات. (مراجعة 04.1 §4.)
-2. **A-1:** قرار المخطط في مراجعة 04.1 §3-ب (هوية Meta مختلفة = اتصال **جديد** لا يرث اختياراً) صحيح في الكود ضمنياً لكنه **غير مثبَّت باختبار**.
-3. **Part B:** الربط وحده لا قيمة تشغيلية له. أقل قدرة مفيدة للعلامة/الوكالة هي: رؤية منشورات الصفحة ووسائط IG المرتبطة، ومعرفة صحة التوكن وتجديد المزامنة قبل انتهاء الـ60 يوماً — وهي الأساس الذي سيبني عليه الجدولة والنشر (FR-E10) والتشخيص (D-055) لاحقاً.
+1. **A-1 (O3، ثبت تجريبياً):** `service.py:379` `granted_scopes=list(debug.scopes) if debug and debug.scopes else None` — النطاقات **الفارغة المؤكَّدة** (المستخدم سحب الصلاحيات) تُعامَل كـ«مجهول» فتبقى القديمة معروضة؛ و`service.py:180` تعكس الخطأ (الفشل يُكتب `[]` كحقيقة). يخالف D-055.
+2. **A-1 (O2، ثبت جزئياً):** `service.py:331-339` `resync` على اتصال `REAUTH_REQUIRED` ينجح بـ200 ويترك الحالة، فتبقى `/posts`/`/media` محجوبة بـ409 — تناقض من زاوية العميل.
+3. **A-2 (سؤال المنفذ 1):** `required_action` له قيمتان (`reconnect` / `reauthorize_with_additional_scopes`) للإجراء العملي نفسه.
+4. **A-3 (O1، لم تثبت لكن وقائي):** `status_type` تراثي؛ `attachments{…}` هو المصدر المعتمد للوسائط منذ v3.3.
+5. **Part B:** المنصة بلا **جدول أعمال**: لا يمكن إنشاء منشور، ولا تمريره للموافقة البشرية (D-055 بند 2 — **كل إجراء خارجي يتطلب موافقة صريحة**)، ولا جدولته. هذه هي نواة دورة المحتوى التي يقف عليها النشر (M4) والمحادثات (M6). وبوابة الذكاء الاصطناعي تُبنى كواجهة واحدة الآن كي لا تتسرب استدعاءات مزوّدين مباشرة إلى الوحدات لاحقاً (D-056).
 
 ---
 
 ## 1. النطاق
 
-**داخل:** A-0، A-1، B1 صحة التوكن المحسوبة، B2 إعادة المزامنة اليدوية، B3 قراءة منشورات الصفحة، B4 قراءة وسائط Instagram؛ اختباراتها؛ تحديث `WORK_STATE.md` §1 و§6 من المنفذ.
-**خارج (ممنوع):** النشر/الجدولة، الرؤى (`/insights` تحتاج `read_insights` — سبرنت لاحق)، أي تخزين للمنشورات/الوسائط (قراءة مباشرة فقط — D-065)، تغيير نطاقات OAuth الافتراضية، أي هجرة، Redis/Temporal/LiteLLM، الملفات المحظورة (`ARCHITECTURE_LOCK.md`, `SESSION_RECOVERY.md`, `imaster_planner.md`, `README.md`, `AI_Marketing_Platform_Hub/**`, `sprints/**`).
+**داخل:** A-1..A-3؛ هجرة `0005_content`؛ وحدة `src/modules/content/` (`content_items` + `content_revisions` + `approval_events`) بدورة الحياة والـAPI؛ وحدة `src/modules/ai_gateway/` (Protocol + Fake + OpenAI-compatible HTTP + سجل استخدام)؛ توليد مسودة نصية عبر البوابة؛ اختباراتها؛ تحديث `WORK_STATE.md` §1/§6 من المنفذ.
+**خارج (ممنوع):** النشر الفعلي إلى Meta (M4)، الجدولة الزمنية التنفيذية/Temporal (M4)، توليد الصور، WhatsApp، الواجهة الأمامية، تثبيت LiteLLM/Redis/Temporal، تغيير نطاقات OAuth، الملفات المحظورة (`ARCHITECTURE_LOCK.md`, `SESSION_RECOVERY.md`, `imaster_planner.md`, `README.md`, `AI_Marketing_Platform_Hub/**`, `sprints/**`).
 
 ---
 
 ## 2. المواصفات
 
-### 2-0. قاعدتان حاكمتان لكل نقطة Graph في هذا السبرنت (درس 04.1 — إلزاميتان)
+### 2-0. القواعد الحاكمة (D-064 / D-055 — إلزامية)
 
-**(أ) قناة الأسرار — جدول إلزامي يُطبَّق حرفياً:**
+**(أ) قناة الأسرار للبوابة:** مفتاح المزوّد (`AI_PROVIDER_API_KEY`, `SecretStr`) يسافر في `Authorization: Bearer` فقط؛ لا يُسجَّل؛ يُضاف نمطه إلى قائمة التنقية (`sk-` بادئة). نصوص المستخدم (prompts) **لا تُسجَّل** على INFO (DEBUG فقط، مقتطعة 200 حرفاً).
 
-| نقطة Graph | الطريقة | ما في الرابط (query) | ما في الرأس | ما في الجسم |
-|---|---|---|---|---|
-| `/debug_token` | `POST` | **لا شيء** | `Authorization: Bearer {app_id}\|{app_secret}` | `input_token`, **`method=GET`** |
-| `/me/accounts` (موجود) | `GET` | `fields`, `appsecret_proof(user_token)`, `limit` | `Authorization: Bearer <user_token>` | — |
-| `/{page_id}/posts` | `GET` | `fields`, `limit`, `after`, `appsecret_proof(page_token)` | `Authorization: Bearer <page_token>` | — |
-| `/{ig_user_id}/media` | `GET` | `fields`, `limit`, `after`, `appsecret_proof(page_token)` | `Authorization: Bearer <page_token>` | — |
+**(ب) جدول الرؤية لكل حقل (وحدة `content`):**
 
-- `appsecret_proof` = HMAC-SHA256(`app_secret`, **التوكن المستخدم في Bearer نفسه**). ليس سراً بذاته لكنه مشتق؛ لا يُسجَّل.
-- `paging.next` الذي يعيده Graph **يحمل `access_token`** — لا يُعاد إلى العميل أبداً ولا يُتبع تلقائياً في B3/B4؛ يُستخرج `paging.cursors.after` فقط.
-- كل اختبار لنقطة جديدة يلتقط الطلب الفعلي عبر `respx` ويؤكد: `"access_token" not in str(request.url)` و`request.headers["authorization"].startswith("Bearer ")`.
+| البيان | OWNER | MANAGER | VIEWER |
+|---|---|---|---|
+| قراءة `content_items` + المراجعات + سجل الموافقات للعلامة | ✅ | ✅ | ✅ |
+| إنشاء/تعديل مسودة (`draft`) | ✅ | ✅ | ❌ 403 `insufficient_role` |
+| إرسال للموافقة (`submit`) | ✅ | ✅ | ❌ |
+| **موافقة/رفض** (`approve`/`reject`) | ✅ | ❌ 403 `approval_requires_owner` | ❌ |
+| جدولة (`schedule`) عنصر `approved` | ✅ | ✅ | ❌ |
+| أرشفة | ✅ | ✅ (مسوداته هو فقط: `created_by_tenant_id` = الفاعل) | ❌ |
+| `generation_log` (تكلفة التوكنات، المزوّد) | ✅ | ✅ | ❌ (الحقل يُحذف من الاستجابة) |
 
-**(ب) جدول الرؤية لكل حقل — من يرى ماذا (يُطبَّق في الـschemas لا في الـrouter):**
+> الموافقة **حق المالك وحده** في هذه المرحلة (الوكالة تقترح، العميل يعتمد — جوهر D-055). الفاعل لا يعتمد مسودته هو إن كان MANAGER؛ OWNER يعتمد أي شيء بما فيه مسوداته (شركة فردية).
 
-| البيان | OWNER العلامة | MANAGER = مالك الاتصال | MANAGER غير مالك | VIEWER |
-|---|---|---|---|---|
-| منشورات/وسائط **الصفحات المختارة** (B3/B4) | ✅ قراءة | ✅ قراءة | ✅ قراءة | ✅ قراءة |
-| أي شيء عن **صفحة غير مختارة** (B3/B4) | ❌ 404 `page_not_selected` | ❌ 404 `page_not_selected` | ❌ 404 | ❌ 404 |
-| `token_health` (B1) | ✅ | ✅ | ✅ | ✅ |
-| إعادة المزامنة (B2) | ❌ 403 `not_connection_owner` (إلا إن كان هو مالك الاتصال) | ✅ | ❌ 403 | ❌ 403 `insufficient_role` |
-| `removed_selected_page_ids` في استجابة B2 | — | ✅ | — | — |
-
-> الصفحة غير المختارة تُعامَل كـ**غير موجودة** للجميع (404 لا 403) حتى لمالك الاتصال — لأن 403 يكشف وجودها لغير المالك، والمالك يراها أصلاً في `pages` بوصفها `is_selected=false`.
+**(ج) Evidence Schema للتوليد (D-055 بند 1):** كل مخرَج توليد يُخزَّن مع `provenance = {"kind": "ai_generated", "provider", "model", "prompt_hash", "generated_at"}`؛ لا يُعرض أي نص مولَّد بوصفه «قياساً» أو «حقيقة».
 
 ---
 
-### Part A — إلزامي قبل أي ميزة
+### Part A — إلزامي قبل أي ميزة (كوميت واحد)
 
-#### A-0. `/debug_token` بتجاوز الطريقة + إنهاء الابتلاع الصامت
-1. `meta_client.debug_token()`: الجسم يصبح `{"input_token": input_token, "method": "GET"}`. لا تغيير على Bearer. **اختبار عقد `A0-U1`**: يلتقط الطلب ويؤكد `request.method == "POST"`، الجسم يحوي `method=GET` و`input_token=…`، والرابط **خالٍ** من `input_token`/`access_token`.
-2. `service._inspect_token()`: يبقى التدهور الرشيق لأخطاء الشبكة/العابرة (`MetaNetworkError`, `MetaTransientError`, `MetaRateLimitError`) على `WARNING`. أما **`MetaGraphError` بكود `100` أو أي `MetaGraphError` عام غير مصنَّف** ⇒ `logger.error("debug_token misconfiguration: …", code, http)` + زيادة عدّاد `src/core/metrics.py::counters["meta_debug_token_failures"]` (قاموس بسيط آمن للخيوط، لا تبعية جديدة) ثم الإكمال بالتدهور نفسه (لا نكسر الربط بسبب خلل مراقبة). **`A0-U2`**: يؤكد مستوى `ERROR` والعدّاد لكود 100، و`WARNING` بلا عدّاد لـ`MetaTransientError`.
-3. غطِّ الفرعين غير المغطيين الوحيدين: `service.py:300` و`tenancy/service.py:62` (**`A0-U3`**, **`A0-U4`**).
+#### A-1. ثلاث حالات لا اثنتان + اتساق `resync`
+1. `service.py:379`: `granted_scopes=list(debug.scopes) if debug is not None else None` — الفارغة **تُكتب**. اختبار **`A1-U1`**: `debug_token` يعيد `is_valid=true, scopes=[]` ⇒ بعد `resync` تصبح `granted_scopes == []`؛ **`A1-U2`**: `debug_token` يفشل (transient) ⇒ تبقى القديمة.
+2. `service.py:180` (`complete_connection`): يبقى `[]` في العمود (NOT NULL) لكن يُضاف حقل محسوب في `ConnectedAccountPublic`: `scopes_verified: bool` = هل جاءت النطاقات من `debug_token` ناجح. لتجنب هجرة: يُشتق من `token_expires_at is not None or granted_scopes != []`… **لا** — هذا تخمين. القرار: **أضف عموداً** `scopes_verified BOOLEAN NOT NULL DEFAULT false` إلى `social_connections` ضمن هجرة `0005` (نفس الهجرة؛ backfill: `true` حيث `granted_scopes <> '[]'`). `resync` و`complete_connection` يكتبانه. **`A1-U3`** يغطي القيمتين.
+3. `resync` على `REAUTH_REQUIRED` ⇒ `ReauthRequiredError` ⇒ **409 `reauth_required`** قبل أي نداء Graph (نفس سلوك B3/B4). حدّث docstring `:331-332`. **`A1-U4`**: `respx` route لم يُستدعَ. **`A1-I1`** على PG: الحالة تبقى `reauth_required` والصفحات لم تُمس.
 
-#### A-1. هوية Meta مختلفة = اتصال جديد
-**`A1-I1`** (PG حقيقية): علامة واحدة، اتصال قائم بـ`provider_user_id="u1"` وصفحتان إحداهما مختارة؛ يجري OAuth جديد على العلامة نفسها بـ`/me` يعيد `id="u2"` ويعيد الصفحتين نفسيهما ⇒ صفّ اتصال **ثانٍ** بـ`u2`، لا صفحة مختارة فيه (إلا إن كانت صفحة واحدة — سياسة B6)، واتصال `u1` لم يتغير (اختياره باقٍ). ثم إعادة OAuth بـ`u1` من مستأجر آخر مخوَّل ⇒ نقل `connected_by_tenant_id` **مع بقاء الاختيار** (تثبيت قرار 04.1 §3-ب) — **`A1-I2`**.
+#### A-2. توحيد `required_action`
+`router.py:493-500`: `MetaPermissionError` ⇒ `"reconnect"` في **كل** المسارات؛ احذف `reauthorize_with_additional_scopes` والمعامل `operational_read` إن لم يعد له استخدام آخر غير 502 الثابت (أبقِ 502 الثابت `{"error":"upstream_unavailable"}` لكل مسارات Meta — توحيد أيضاً). حدّث `test_router.py:402, 1005`. **`A2-U1`** يثبت القيمة الواحدة على 4 مسارات.
+
+#### A-3. `attachments` لمنشورات الصفحة
+`POST_FIELDS` += `attachments{media_type,type,url,media{image{src}}}`؛ `PagePostPublic` += `attachments: list[PostAttachmentPublic]` (`media_type|None, type|None, url|None, image_src|None`) مع تجاهل أي مفتاح آخر. `status_type` و`full_picture` يبقيان. **`A3-U1`** اختبار عقد: قائمة الحقول المطلوبة ⊆ قائمة مسموح بها ثابتة في الاختبار مستقاة من مرجع Post v26.0 (المذكورة في مراجعة 05 §4-O1) ولا تحوي أي حقل من المهملة في v3.3 (`caption, description, link, name, object_id, picture, source, type` — **على مستوى الجذر**؛ داخل `attachments{}` مسموح).
 
 ---
 
-### Part B — القدرة التشغيلية
+### Part B-1 — وحدة `content` + هجرة `0005_content`
 
-#### B1. صحة التوكن المحسوبة (بلا تخزين)
-في `ConnectedAccountPublic` حقل جديد `token_health: Literal["valid","expiring_soon","expired","unknown","reauth_required"]` يُحسب في `from_domain(…, now=…)`:
-- `status == REAUTH_REQUIRED` ⇒ `reauth_required` (له الأولوية).
-- `token_expires_at is None` ⇒ `unknown` (D-055: لا نزعم صلاحية لا نعرفها).
-- `expires_at <= now` ⇒ `expired`؛ `expires_at - now <= 7 أيام` ⇒ `expiring_soon`؛ وإلا `valid`.
-- حقل `last_synced_at` يُكشف كما هو (كان موجوداً في النموذج، تأكد من ظهوره).
-**`B1-U1`** يغطي الحالات الخمس بـ`now` محقون.
+#### B1. مخطط البيانات (هجرة `0005_content`، صعوداً ونزولاً، مُختبَرة على PG)
+```
+content_items
+  id UUID PK
+  brand_id UUID NOT NULL → brands(id) ON DELETE CASCADE
+  created_by_tenant_id UUID NOT NULL → tenants(id) ON DELETE RESTRICT
+  channel VARCHAR(16) NOT NULL CHECK (channel IN ('facebook_page','instagram'))
+  target_page_id VARCHAR(64) NULL            -- Page المختارة؛ يُتحقق عند schedule لا عند draft
+  status VARCHAR(24) NOT NULL CHECK (status IN ('draft','pending_approval','approved','rejected','scheduled','archived'))
+  current_revision_id UUID NULL → content_revisions(id) (FK تُضاف بعد إنشاء الجدولين)
+  scheduled_for TIMESTAMPTZ NULL             -- CHECK: (status='scheduled') = (scheduled_for IS NOT NULL)
+  created_at / updated_at TIMESTAMPTZ NOT NULL
+  INDEX (brand_id, status), INDEX (brand_id, scheduled_for) WHERE status='scheduled'
 
-#### B2. إعادة المزامنة اليدوية — `POST /api/v1/brands/{brand_id}/social/meta/connections/{connection_id}/resync` ⇒ `200 ConnectedAccountPublic` + `removed_selected_page_ids`
-1. `CurrentUserFresh`؛ `_authorise(CONNECTION_WRITE_ROLES)`؛ ثم **مالك الاتصال فقط** (`NotConnectionOwnerError` ⇒ 403) — قبل أي نداء Graph.
-2. الخدمة `resync(brand_id, account_id, *, actor_tenant_id)`:
-   - فكّ `encrypted_user_token` (داخل الخدمة فقط؛ لا يغادرها).
-   - `debug_token(user_token)` عبر `_inspect_token` ⇒ تحديث `token_expires_at` و`granted_scopes` (إن عاد `None` تبقى القيم القديمة). `is_valid == False` أو 190 ⇒ `status_marker.mark_out_of_band(REAUTH_REQUIRED)` ثم ارفع ⇒ **401 `required_action: reconnect`** (نفس مسار H3 — **`B2-I1`** يثبت بقاء العلامة بعد الـrollback).
-   - `get_user_pages(user_token)` ⇒ قائمة Meta الحالية. **سياسة الدمج:** الاختيار يُحفظ لكل `page_id` كان مختاراً **وما زال** يعود من Meta بتوكن؛ توكنات الصفحات المختارة **تُستبدل** بالجديدة (مشفَّرة)؛ صفحة كانت مختارة ولم تعد تعود ⇒ تُحذف مع البقية (`replace_pages` بالجملة) وتُدرج في `removed_selected_page_ids` + `logger.warning` بالمعرّفات فقط؛ صفحة غير مختارة ⇒ بيانات وصفية بلا توكن (ثابت B6). حالة الصفحة الواحدة ⇒ تُختار تلقائياً (B6).
-   - `last_synced_at = now`؛ `status = ACTIVE` إن كان `ACTIVE` أصلاً (لا تُعيد اتصالاً `REVOKED` إلى الحياة — 409 `connection_revoked`).
-   - أضف إلى `ConnectedAccountRepository` ما يلزم فقط (مرشَّح: `update_token_metadata(brand_id, account_id, *, token_expires_at, granted_scopes, last_synced_at)`) في الـProtocol + PG + Fake.
-3. **اختبارات:** `B2-U1` الحفاظ على الاختيار واستبدال التوكن؛ `B2-U2` صفحة مختارة اختفت ⇒ `removed_selected_page_ids` وبلا توكن يتيم؛ `B2-U3` غير المالك 403 بلا نداء Graph (`respx` route `.called is False`)؛ `B2-U4` `REVOKED` ⇒ 409؛ `B2-I1` (أعلاه)؛ `B2-I2` على PG: ثابت `CHECK (selected ⇒ token)` لا يُخرق بعد المزامنة.
+content_revisions
+  id UUID PK
+  item_id UUID NOT NULL → content_items(id) ON DELETE CASCADE
+  revision_no INT NOT NULL, UNIQUE (item_id, revision_no)
+  body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 5000)
+  media_refs JSONB NOT NULL DEFAULT '[]'      -- روابط فقط؛ لا رفع ملفات في هذا السبرنت
+  provenance JSONB NOT NULL                   -- {"kind":"human"} أو {"kind":"ai_generated",...} (2-0-ج)
+  created_by_tenant_id UUID NOT NULL → tenants(id)
+  created_at TIMESTAMPTZ NOT NULL
 
-#### B3. منشورات الصفحة — `GET /api/v1/brands/{brand_id}/social/meta/connections/{connection_id}/pages/{page_id}/posts?limit=25&after=`
-1. `CurrentUser` (stateless يكفي للقراءة) ⇒ `_authorise` بأي دور (`OWNER|MANAGER|VIEWER`).
-2. الخدمة: الصفحة يجب أن تكون **مختارة وبتوكن** وإلا `PageNotSelectedError` ⇒ **404 `page_not_selected`**. `status == REAUTH_REQUIRED` ⇒ **409 `reauth_required`** بلا نداء Graph. `REVOKED` ⇒ 409 `connection_revoked`.
-3. `meta_client.get_page_posts(page_token, page_id, *, limit, after)` ⇒ `GET /{page_id}/posts` بـ`fields=id,message,created_time,permalink_url,status_type,full_picture,is_published`، `limit` (افتراضي 25، أقصى 100 — `Query(ge=1, le=100)`)، `after` اختياري (نص ≤ 512 حرفاً، يُمرَّر كما هو). Bearer + `appsecret_proof` حسب 2-0(أ).
-4. الاستجابة `PagePostsPage`: `items: list[PagePostPublic]` (`id, message|None, created_time, permalink_url|None, status_type|None, full_picture|None, is_published|None`)، `next_cursor: str|None` (= `paging.cursors.after` فقط إن وُجد `paging.next`)، `has_more: bool`. **لا `paging.next`، لا توكن، لا رابط Graph خام.**
-5. 190 أثناء القراءة ⇒ `mark_out_of_band(REAUTH_REQUIRED)` ⇒ 401 reconnect. `MetaPermissionError` ⇒ 403 `required_action: reconnect`. `MetaRateLimitError` ⇒ 429 + `Retry-After`. العابرة/الشبكية ⇒ 502 بلا تفاصيل.
-6. **اختبارات:** `B3-U1` الطلب الفعلي: Bearer، `appsecret_proof` للتوكن الصحيح (أعد حساب HMAC في الاختبار)، لا سر في الرابط؛ `B3-U2` التصفح: `next_cursor` من `cursors.after` و`paging.next` غائب عن الاستجابة وعن أي سجل؛ `B3-U3` صفحة غير مختارة ⇒ 404 لمالك الاتصال **ولغيره** بالنص نفسه؛ `B3-U4` VIEWER يقرأ 200؛ `B3-U5` `REAUTH_REQUIRED` ⇒ 409 و`respx` لم يُستدعَ؛ `B3-U6` 190 ⇒ 401 والعلامة كُتبت عبر الـmarker؛ `B3-U7` `limit=101` ⇒ 422؛ `B3-I1` على PG: المسار كاملاً من OAuth ⇒ اختيار ⇒ قراءة منشورات بالصفحة المختارة.
+approval_events
+  id UUID PK
+  item_id UUID NOT NULL → content_items(id) ON DELETE CASCADE
+  revision_id UUID NOT NULL → content_revisions(id)
+  action VARCHAR(16) NOT NULL CHECK (action IN ('submitted','approved','rejected','withdrawn'))
+  actor_tenant_id UUID NOT NULL → tenants(id)
+  actor_user_id UUID NOT NULL → users(id)
+  note TEXT NULL CHECK (length(note) <= 1000)
+  created_at TIMESTAMPTZ NOT NULL
+  INDEX (item_id, created_at)
 
-#### B4. وسائط Instagram — `GET …/connections/{connection_id}/pages/{page_id}/instagram/media?limit=25&after=`
-1. نفس التفويض والشروط في B3، زائد: الصفحة بلا `instagram` ⇒ **404 `instagram_not_linked`**.
-2. `meta_client.get_instagram_media(page_token, ig_user_id, *, limit, after)` ⇒ `GET /{ig_user_id}/media` بـ`fields=id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count` (كلها ضمن `instagram_basic`). توكن **الصفحة** المرتبطة هو المستخدم (IG Graph API).
-3. الاستجابة `InstagramMediaPage`: `items: list[InstagramMediaPublic]` (`id, caption|None, media_type, media_url|None, thumbnail_url|None, permalink|None, timestamp, like_count|None, comments_count|None`)، `next_cursor`, `has_more` — نفس قواعد B3.
-4. **اختبارات:** `B4-U1` الطلب الفعلي (Bearer/proof/لا سر)؛ `B4-U2` بلا IG ⇒ 404 `instagram_not_linked`؛ `B4-U3` تصفح؛ `B4-U4` `MetaPermissionError` ⇒ 403 reconnect؛ `B4-I1` على PG.
+social_connections += scopes_verified BOOLEAN NOT NULL DEFAULT false   (A-1)
+```
+**`B1-M1`** اختبار هجرة: upgrade ⇒ إدراج بيانات حدية (نص 5000 حرف، `status='scheduled'` بلا `scheduled_for` ⇒ يفشل CHECK) ⇒ downgrade ⇒ upgrade.
 
-#### B5. ضوابط مشتركة
-- كل توكن صفحة يُفكّ تشفيره في الخدمة لحظة الاستخدام ولا يُحفظ في متغير يتجاوز نطاق الاستدعاء؛ لا يظهر في أي `repr`/سجل/استثناء (`SecretRedactingFilter` يبقى على الجذر).
-- أضف `"input_token"` و`"method"` إلى قائمة التنقية `_URL_SECRET_PARAMS` إن لم تكن (الأول موجود).
-- وثّق في docstring كل نقطة Graph جديدة: الطريقة، الحد الأقصى لـ`limit`، النطاق المطلوب، وما يحمله `paging.next`.
+#### B2. دورة الحياة (آلة حالات صريحة في `domain/lifecycle.py` — نقية، بلا I/O)
+```
+draft ──submit──▶ pending_approval ──approve──▶ approved ──schedule──▶ scheduled
+  ▲                     │  │                        │                      │
+  │◀──────withdraw──────┘  └──reject──▶ rejected ───┘(edit ⇒ new revision ⇒ draft)
+  │                                                                        │
+  └──────────── edit على approved/scheduled ⇒ مراجعة جديدة ⇒ draft ◀───────┘ (unschedule)
+أي حالة غير archived ──archive──▶ archived (نهائية)
+```
+- كل انتقال دالة `transition(item, action, *, actor_role, actor_tenant_id, now) -> ContentItem | LifecycleError` بجدول مسموح ثابت؛ **`B2-U1`** يختبر **كل** خلية في مصفوفة (حالة × إجراء) — 6 حالات × 7 إجراءات = 42 حالة، كلها مسماة.
+- **تعديل الجسم** بعد `pending_approval` أو بعده ⇒ مراجعة جديدة + العودة إلى `draft` + حدث `withdrawn` تلقائي (الموافقة تخص مراجعة بعينها — `approval_events.revision_id`). **`B2-U2`**.
+- `approve`/`reject`: OWNER فقط (2-0-ب)؛ `reject` يتطلب `note` (≥ 3 أحرف) ⇒ 422 بدونه. **`B2-U3`**.
+- `schedule(scheduled_for)`: الحالة `approved`؛ `scheduled_for > now + 5 دقائق` وإلا 422 `schedule_too_soon`؛ `target_page_id` **يجب** أن يكون صفحة **مختارة بتوكن** في اتصال `active` للعلامة نفسها (استعلام عبر `ConnectedAccountRepository.list_by_brand`) وإلا 422 `target_page_not_selected`؛ للقناة `instagram` يجب أن تكون للصفحة `instagram` مرتبط وإلا 422 `instagram_not_linked`. **`B2-U4`**, **`B2-I1`** على PG.
+- **لا تنفيذ للجدولة** في هذا السبرنت: `scheduled` حالة انتظار؛ المنفّذ الفعلي في M4.
+
+#### B3. الـAPI (`/api/v1/brands/{brand_id}/content/...`، `CurrentUserFresh` للكتابة، `CurrentUser` للقراءة، `_authorise` بنمط social_connect)
+| الطريقة | المسار | الدور | الاستجابة |
+|---|---|---|---|
+| `POST` | `/items` | OWNER/MANAGER | 201 `ContentItemPublic` (مسودة + مراجعة 1، `provenance={"kind":"human"}`) |
+| `GET` | `/items?status=&limit=&cursor=` | الكل | قائمة مرقّمة (keyset على `(created_at, id)`؛ `limit ≤ 100`) |
+| `GET` | `/items/{id}` | الكل | `ContentItemPublic` + `revisions` (آخر 20) + `approval_events` |
+| `PUT` | `/items/{id}/body` | OWNER/MANAGER | 200 — مراجعة جديدة (B2) |
+| `POST` | `/items/{id}/submit` · `/withdraw` · `/approve` · `/reject` · `/schedule` · `/unschedule` · `/archive` | حسب 2-0-ب | 200 `ContentItemPublic`؛ انتقال غير مسموح ⇒ **409 `invalid_transition`** بجسم `{from, action}` |
+| `POST` | `/items/{id}/generate` | OWNER/MANAGER | 200 — مراجعة جديدة مولَّدة (Part B-2) |
+- التزامن: كل انتقال يُنفَّذ بـ`UPDATE … WHERE id=… AND status=<expected>` ويفحص `rowcount == 1` وإلا 409 (لا قفل تشاؤمي). **`B3-I1`** على PG: `asyncio.gather(approve, reject)` على العنصر نفسه ⇒ بالضبط واحد 200 وواحد 409.
+- **`B3-U1..U6`**: الأدوار والرؤية لكل صف في 2-0-ب (بما فيها حذف `generation_log` لـVIEWER)؛ **`B3-U7`**: عزل العلامات (عنصر علامة أخرى ⇒ 404 `content_not_found`).
+
+---
+
+### Part B-2 — بوابة الذكاء الاصطناعي `src/modules/ai_gateway/` (D-056 — الواجهة الآن، LiteLLM لاحقاً)
+
+#### B4. الواجهة
+```python
+class AIGateway(Protocol):
+    async def complete(self, req: CompletionRequest) -> CompletionResult: ...
+# CompletionRequest: purpose: Literal["content_draft"], system: str, user: str, max_tokens: int (≤ 2000), temperature: float (0..1), brand_id, tenant_id
+# CompletionResult: text: str, provider: str, model: str, prompt_tokens: int|None, completion_tokens: int|None, latency_ms: int, finish_reason: str|None
+```
+- `FakeProvider` (حتمي: يعيد قالباً من الطلب؛ يُستخدم في الاختبارات وفي التشغيل حين `AI_PROVIDER=fake`).
+- `HttpOpenAICompatibleProvider`: `POST {AI_PROVIDER_BASE_URL}/chat/completions` (متوافق مع LiteLLM Proxy وOpenAI وOllama) عبر `httpx.AsyncClient` المشترك؛ Bearer من `AI_PROVIDER_API_KEY`؛ مهلة 30 ث؛ **لا إعادة محاولة على 4xx**؛ إعادة واحدة على 5xx/timeout؛ 429 ⇒ `AIRateLimitedError` (⇒ 429 + `Retry-After`)؛ أي خطأ آخر ⇒ `AIUpstreamError` ⇒ 502 ثابت `{"error":"ai_upstream_unavailable"}`.
+- الإعدادات: `AI_PROVIDER` (`fake|openai_compatible`، افتراضي `fake`)، `AI_PROVIDER_BASE_URL`، `AI_PROVIDER_API_KEY` (`SecretStr`)، `AI_DEFAULT_MODEL`. غياب المفتاح مع `openai_compatible` ⇒ 503 عند الاستدعاء (نمط `get_encryption_service`).
+- **`B4-U1`** اختبار عقد يلتقط الطلب: Bearer موجود، المفتاح غير موجود في الرابط ولا في السجل (نفس تجربة 04.1)؛ **`B4-U2`** 429/5xx/timeout؛ **`B4-U3`** `FakeProvider` حتمي.
+
+#### B5. التوليد — `POST /items/{id}/generate` بجسم `{brief: str (10..2000), tone: Literal["professional","friendly","promotional"] = "professional", language: Literal["ar","en"] = "ar"}`
+1. الحالة يجب أن تكون `draft` أو `rejected` (وإلا 409 `invalid_transition`).
+2. `system` ثابت في `prompts.py` (عربي أولاً؛ يذكر القناة وحدّ 2200 حرفاً لـIG / 5000 لـFB؛ يمنع ادعاءات أرقام غير معطاة في الـbrief — D-055).
+3. الناتج ⇒ مراجعة جديدة بـ`provenance={"kind":"ai_generated","provider","model","prompt_hash": sha256(system+user)[:16],"generated_at"}` والعنصر يعود/يبقى `draft`.
+4. سجل استخدام `ai_usage_log` **ليس جدولاً جديداً** في هذا السبرنت — يُكتب كـ`logger.info` منظَّم (`brand_id, tenant_id, provider, model, prompt_tokens, completion_tokens, latency_ms`) + عدّادات `counters["ai_completions"]`/`["ai_failures"]`. (جدول التكلفة في M7.)
+5. حدّ معدل: `RateLimiter` القائم — 20 توليداً/ساعة لكل علامة ⇒ 429. **`B5-U1..U4`**: المسار السعيد (Fake)، الحالة الخاطئة، الحدّ، `provenance` الصحيح؛ **`B5-I1`** على PG.
+
+### B6. ضوابط مشتركة
+- لا نص مستخدم/مولَّد في سجلات INFO؛ `SecretRedactingFilter` يبقى؛ `sk-[A-Za-z0-9]{8,}` يُضاف إلى التنقية.
+- كل استثناء جديد له `error` ثابت (snake_case) موثَّق في docstring المسار.
+- وثّق في docstring كل مسار: الأدوار، الانتقالات، أكواد الخطأ.
 
 ---
 
 ## 3. معايير القبول
 
 - [ ] CI خضراء (الفحوص الخمسة) على الـPR.
-- [ ] 0 فشل؛ تغطية ≥ 95% (الهدف الفعلي: لا تراجع عن 99%)؛ `ruff check` + `ruff format --check` نظيفان.
-- [ ] `grep -n '"method"' src/modules/social_connect/meta_client.py` يُظهر `"method": "GET"` داخل `data=` لـ`/debug_token`.
-- [ ] `grep -rn "paging.next\|paging\[\"next\"\]" src/modules/social_connect/schemas.py src/modules/social_connect/router.py` ⇒ فارغ (لا يُعاد إلى العميل).
-- [ ] `grep -n "params=" src/modules/social_connect/meta_client.py | grep -i "token\|secret" | grep -v appsecret_proof` ⇒ فارغ.
-- [ ] الاختبارات بالأسماء: `A0-U1..U4`, `A1-I1`, `A1-I2`, `B1-U1`, `B2-U1..U4`, `B2-I1`, `B2-I2`, `B3-U1..U7`, `B3-I1`, `B4-U1..U4`, `B4-I1` — موجودة وناجحة على PG حقيقية.
-- [ ] لا هجرة جديدة؛ `alembic/versions/` يحوي 0001–0004 فقط.
-- [ ] كوميتان فوق `main`؛ لا ملف محظور مُسّ؛ لا تبعية جديدة في `pyproject.toml`.
-- [ ] §6 أدناه مملوء بالسطر؛ `WORK_STATE.md` §1 ⇒ `SPRINT_05_DELIVERED_AWAITING_REVIEW`.
+- [ ] 0 فشل؛ تغطية ≥ 95% (لا تراجع عن 99%)؛ `ruff check` + `ruff format --check` نظيفان.
+- [ ] `grep -n "if debug and debug.scopes" src` ⇒ فارغ؛ `grep -rn "reauthorize_with_additional_scopes" src` ⇒ فارغ.
+- [ ] `alembic/versions/` = 0001–**0005**؛ `0005` تمرّ صعوداً ونزولاً على PG (**`B1-M1`**).
+- [ ] الاختبارات بالأسماء: `A1-U1..U4`, `A1-I1`, `A2-U1`, `A3-U1`, `B1-M1`, `B2-U1..U4`, `B2-I1`, `B3-U1..U7`, `B3-I1`, `B4-U1..U3`, `B5-U1..U4`, `B5-I1` — موجودة وناجحة على PG حقيقية.
+- [ ] `B2-U1` يغطي 42 خلية مسماة (parametrize).
+- [ ] لا تبعية جديدة في `pyproject.toml`؛ ثلاثة كوميتات فوق `main`؛ لا ملف محظور مُسّ.
+- [ ] §6 مملوء بالسطر؛ `WORK_STATE.md` §1 ⇒ `SPRINT_06_DELIVERED_AWAITING_REVIEW`.
 
 ---
 
@@ -142,9 +196,7 @@ export TEST_DATABASE_URL=postgresql+asyncpg://aigos@localhost:5433/ai_growth_os_
 export AUTH_JWT_SECRET=$(python -c "import secrets;print(secrets.token_urlsafe(48))")
 ruff check src tests alembic scripts && ruff format --check src tests alembic scripts
 pytest --cov=src --cov-fail-under=95
-grep -n '"method"' src/modules/social_connect/meta_client.py
-grep -rn 'paging.next' src/modules/social_connect/schemas.py src/modules/social_connect/router.py
-grep -n "params=" src/modules/social_connect/meta_client.py | grep -i "token\|secret" | grep -v appsecret_proof
+grep -rn "if debug and debug.scopes\|reauthorize_with_additional_scopes" src
 ls alembic/versions/
 ```
 
@@ -152,41 +204,34 @@ ls alembic/versions/
 
 ## 5. التزامات المنفذ
 
-1. **Part A** كوميت: `fix(meta): SPRINT-05 Part A — debug_token method=GET override + visible misconfiguration (A-0), new-identity/ownership-transfer selection tests (A-1)` ⇒ ادفع ⇒ افتح الـPR بالعنوان في بطاقة المهمة.
-2. **Part B** كوميت: `feat(social): SPRINT-05 Part B — token_health (B1), manual resync (B2), page posts (B3), Instagram media (B4) — read-through, Bearer-only, selected pages only` ⇒ ادفع.
-3. املأ §6 بالسطر، وحدّث `WORK_STATE.md` (§1 ⇒ `SPRINT_05_DELIVERED_AWAITING_REVIEW`؛ سطر جديد في §6 أعلى الجدول). عند التسليم اكتب حرفياً: **«PR #N جاهز لمراجعة المخطط»**. **لا تدمج** (D-063).
-4. أي بند لا يمكن تنفيذه كما حُدد ⇒ **لا تُعِد سراً إلى الرابط ولا تُعِد `paging.next` إلى العميل** تحت أي ذريعة؛ وثّق الانحراف بالسطر والسبب في §6.
-5. إن رفض Graph (في بيئة حقيقية إن توفرت) أي حقل من `fields` المذكورة ⇒ احذف الحقل، اجعله `None` في الـschema، ووثّق.
+1. **Part A** كوميت: `fix(meta): SPRINT-06 Part A — empty≠unknown scopes + scopes_verified (A-1), resync 409 on reauth_required (A-1), unified required_action=reconnect (A-2), post attachments (A-3)` ⇒ ادفع ⇒ افتح الـPR.
+2. **Part B-1** كوميت: `feat(content): SPRINT-06 Part B-1 — migration 0005, content_items/revisions/approval_events, explicit lifecycle (42-cell matrix), owner-only approval (D-055), optimistic transitions` ⇒ ادفع.
+3. **Part B-2** كوميت: `feat(ai_gateway): SPRINT-06 Part B-2 — AIGateway protocol, Fake + OpenAI-compatible providers (D-056), /generate with provenance, rate limit` ⇒ ادفع.
+4. **ادفع بعد كل ملف** (`wip:` ثم سحق إلى الكوميتات الثلاثة قبل التسليم) — درس انحراف 7 في SPRINT-05.
+5. املأ §6 بالسطر؛ `WORK_STATE.md` (§1 ⇒ `SPRINT_06_DELIVERED_AWAITING_REVIEW`؛ سطر جديد أعلى §6). عند التسليم اكتب حرفياً: **«PR #N جاهز لمراجعة المخطط»**. **لا تدمج** (D-063).
+6. أي بند متعذر ⇒ وثّق الانحراف بالسطر والسبب؛ **لا** تُضعف جدول الرؤية (2-0-ب) ولا قاعدة «الموافقة للمالك فقط» تحت أي ذريعة — هذه قرارات مالك.
 
 ---
 
 ## 6. تقرير المنفذ (يملؤه المنفذ)
 
-- **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي — السبب:` — كل بنود A-0/A-1/B1–B5 منفَّذة؛ لا هجرة، لا تغيير مخطط، لا اعتمادية جديدة (`git diff origin/main -- pyproject.toml requirements.txt` فارغ)؛ `alembic/versions/` = 0001–0004 فقط؛ لا ملف محظور مُسّ.
-- **Commit SHA Part A:** `faac70a` — **Part B:** `1b6e3d1` — **docs:** `6a4c363` (+ هذا الكوميت الذي يسجّل نتيجة CI)
-- **PR:** #16 https://github.com/belalalibb/ai_agancy_markting/pull/16 — **CI:** **خضراء 10/10** على `6a4c363` (lint / unit / integration / secrets / licenses × push + PR؛ Checks API `success`). محلياً: `ruff check` + `ruff format --check` نظيفان؛ pytest كامل على PG 17 حقيقي أخضر.
-- **الاختبارات:** وحدة 490 / تكامل 33 / الكل **523 passed, 0 failed** — **التغطية:** **99%** (`--cov-fail-under=95`؛ 3 أسطر فقط غير مغطاة: `exceptions.py:118` دفاعي قديم، `postgres_repository.py:162` فرع `granted_scopes=None` على PG، `service.py:596` فرع `cursors.after` غير نصّي).
-- **A-0:** سطر `"method": "GET"` في `meta_client.py`: **208** (`data={"input_token": input_token, "method": "GET"}`؛ `_URL_SECRET_PARAMS` += `input_token`, `method` سطر 58–60) ؛ سطر `logger.error` + العدّاد: **`service.py:520`** (`counters.increment("meta_debug_token_failures")`) + **521** (`logger.error("debug_token misconfiguration: …")`)؛ العدّاد في ملف جديد `src/core/metrics.py` (`Counters` آمن للخيوط + `counters` singleton؛ اختباراته `tests/core/test_metrics.py`). WARNING محفوظ لـ `MetaNetworkError`/`MetaTransientError`/`MetaRateLimitError` (سطر 510–518). اختبارات: A0-U1 `test_meta_client.py:459`؛ A0-U2 (×3: code 100 / transient / generic) `test_service.py:458,494,521`؛ A0-U3 `test_service.py:539` (فرع `service.py:300` القديم = fallback في `_mark_reauth_required`)؛ A0-U4 `tenancy/test_router.py:289`. A-1: A1-I1 `test_postgres_persistence.py:1531`، A1-I2 `:1578`.
-- **B3/B4: أسطر `headers=`/`params=` للنقطتين الجديدتين:** `get_page_posts` `meta_client.py:276` ⇒ `params=params` **306** / `headers=_bearer(page_access_token)` **307**؛ `get_instagram_media` `:310` ⇒ `params=params` **338** / `headers=` **339**. `params` يحوي فقط `fields`, `limit` (1..100)، `after` (اختياري)، `appsecret_proof` (HMAC-SHA256 لتوكن الصفحة). المسارات: `router.py:401` (posts) و`:436` (media)؛ `Query(ge=1, le=100)` + `after` ≤512 عبر `LimitQuery`/`AfterQuery`. الترقيم: `service.py:586 _cursor()` يستخرج `paging.cursors.after` فقط عندما يوجد `paging.next`؛ `paging.next` لا يُعاد ولا يُسجَّل ولا يُتبَع (`grep paging.next schemas.py router.py` فارغ).
-- **B2: سياسة الدمج كما نُفّذت (سطر):** `service.py:315 resync()` — get ⇒ مالك الاتصال (`NotConnectionOwnerError`→403) ⇒ `REVOKED` (`ConnectionRevokedError`→409) ⇒ فك تشفير توكن المستخدم (نطاق الدالة فقط) ⇒ `_inspect_token` (`is_valid=False` ⇒ `mark_out_of_band(REAUTH_REQUIRED)` + 401 `reconnect`) ⇒ `get_user_pages` ⇒ **الدمج سطر 360–364**: المختارة سابقاً والعائدة بتوكن تبقى مختارة بتوكن **جديد** مشفَّر (`_apply_selection_policy` يعيد استخدام B6؛ صفحة وحيدة ⇒ مختارة تلقائياً)؛ المختارة المختفية ⇒ `removed_selected_page_ids` + `logger.warning` (ids فقط)؛ غير المختارة ⇒ بيانات بلا توكن ⇒ `update_token_metadata` (سطر 375؛ `granted_scopes=None` يحفظ القديمة) ⇒ `replace_pages` بالجملة (سطر 382). الحالة لا تُلمَس (ACTIVE تبقى ACTIVE؛ REAUTH_REQUIRED لا تُنعَش إلا بـ OAuth). المسار `router.py:363` (`CurrentUserFresh`, `CONNECTION_WRITE_ROLES`). الاستجابة `ResyncResponse(ConnectedAccountPublic)` + `removed_selected_page_ids` (`schemas.py:290`). المستودع: `update_token_metadata` في Protocol `repository.py:51` / PG `postgres_repository.py:137` / Fake `tests/fakes.py:347`.
-- **B1:** `compute_token_health` `schemas.py:29` (أولوية `reauth_required` ⇒ `unknown` ⇒ `expired` ⇒ `expiring_soon` ≤7 أيام ⇒ `valid`)، الحقل `token_health` `:248`، `from_domain(…, now=…)` قابل للحقن؛ `last_synced_at` مُعرَّض. B1-U1 `test_schemas.py:306` (5 حالات) + `:322`.
+- **حالة التنفيذ:** `[ ] مكتمل` / `[ ] جزئي — السبب:`
+- **Commit SHA Part A:** — **B-1:** — **B-2:** — **docs:**
+- **PR:** #— — **CI:**
+- **الاختبارات:** وحدة — / تكامل — / الكل — — **التغطية:** —%
+- **A-1:** أسطر `granted_scopes`/`scopes_verified`/`ReauthRequiredError` في `resync`: —
+- **B1:** `0005` upgrade/downgrade على PG: — ؛ CHECKs: —
+- **B2:** مصفوفة 42 خلية — ملف/سطر: —
+- **B3-I1:** نتيجة سباق approve/reject على PG: —
+- **B4-U1:** التقاط الطلب (Bearer/لا مفتاح في الرابط/السجل): —
 - **انحرافات (بالسطر والسبب):**
-  1. `router.py:504 _to_http(exc, *, operational_read=False)`: في B3/B4 فقط `MetaPermissionError` ⇒ `required_action: "reconnect"` (B3-5) وtransient/network ⇒ 502 بجسم ثابت `{"error":"upstream_unavailable"}` بلا `code/message` (B3-5 «لا تفاصيل»). مسارات 02/03/04.1 القديمة تُبقي `reauthorize_with_additional_scopes` كي لا تنكسر عقودها واختباراتها (test_router.py:402, 1005). التوحيد إلى `reconnect` تغيير سطر واحد إن أراده المخطط.
-  2. رسالة ERROR في A-0 صيغت `(graph code %s, http %s)` بدل `code=%s` لأن `SecretRedactingFilter` (04.1) يحجب نمط `code=…` فتصير `code=***` وغير قابلة للقراءة.
-  3. حرّاس Zero-Secret (`test_schemas.py:_ALLOWED_LABEL_FIELDS`، `test_router.py:SECRET_PATTERNS` `(?!_health)` و`allowed`، `test_postgres_persistence.py:613`) وُسِّعت لقبول `token_health` حصراً مع التحقق أنه `Literal` مغلق بالقيم الخمس — الاسم مفروض بالتوجيه.
-  4. B3-U7 وُسّع ليشمل `limit=0` و`after` بطول 513 ⇒ 422. B2-U3 يغطي الحالتين معاً (OWNER غير مالك ⇒ `not_connection_owner`؛ VIEWER ⇒ `insufficient_role`) مع `route.called is False` لـ`/me/accounts` و`/debug_token`.
-  5. `test_openapi_lists_exactly_the_brand_scoped_meta_routes` و`PROTECTED_ROUTE_COUNT` 15⇒18 حُدِّثا للمسارات الثلاثة.
-  6. اختبار 02 القديم `test_complete_connection_debug_token_failure_keeps_identity_from_me` (code 100) حُدِّث ليتوقع «debug_token misconfiguration» (ERROR) بدل «debug_token failed» (WARNING) — هذا جوهر A-0.
-  7. بيئة التنفيذ أُعيد ضبطها 4 مرات خلال هذا السبرنت (ضاع عمل غير مدفوع مرتين وأُعيد)؛ لذلك دُفعت checkpoints `wip` كثيرة ثم سُحقت إلى الكوميتين المفروضين (§5) قبل التسليم.
 - **أسئلة:**
-  1. هل يُوحَّد `required_action` لـ `MetaPermissionError` إلى `reconnect` في كل المسارات (select/callback أيضاً) في سبرنت لاحق؟
-  2. B2: عند تدهور `debug_token` (WARNING) نحفظ `token_expires_at`/`granted_scopes` القديمة ونحدّث `last_synced_at` — مقبول؟ أم يُفضَّل رفض المزامنة حين يتعذر التحقق؟
-  3. `counters` داخل العملية فقط؛ هل يُضاف `/metrics` أو تصدير في سبرنت لاحق؟
 
 ---
 
 ## 7. ما ينتظر المالك
 
-1. 🔑 **تدوير توكن GitHub — الطلب الخامس.** التوكن الحالي ظهر في المحادثة في كل دور؛ يُعدّ **مكشوفاً**. يُدوَّر الآن ويُرسل الجديد مرة واحدة فقط.
-2. 🛡️ حماية `main`: الفحوص الخمسة إلزامية + منع الدفع المباشر. (ملاحظة: PR #13 دُمج يدوياً قبل مراجعة المخطط — D-063 تقول إن المخطط يدمج بعد المراجعة؛ لا ضرر هذه المرة لأن المراجعة اللاحقة أثبتت السلامة.)
-3. قرار منتظر لسبرنت لاحق (ليس الآن): إضافة `read_insights` إلى نطاقات OAuth الافتراضية (يغيّر شاشة الموافقة ويتطلب إعادة ربط الاتصالات القائمة).
+1. 🔑 **تدوير توكن GitHub — الطلب السادس.** التوكن ظهر في المحادثة مجدداً؛ يُعدّ مكشوفاً.
+2. 🛡️ حماية `main` بالفحوص الخمسة + منع الدفع المباشر.
+3. **قرار مطلوب قبل M4 (لا الآن):** مزوّد الذكاء الاصطناعي الفعلي الأول خلف البوابة (مفتاح OpenAI-compatible أو تشغيل LiteLLM Proxy محلياً) — السبرنت الحالي يعمل بـ`AI_PROVIDER=fake`.
+4. **قرار مطلوب قبل M6:** حساب WhatsApp Business (Cloud API) ورقم اختبار.
