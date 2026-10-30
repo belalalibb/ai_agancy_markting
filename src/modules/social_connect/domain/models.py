@@ -48,18 +48,26 @@ class PageAsset(BaseModel):
     page_name: str
     category: str | None = None
     tasks: list[str] = Field(default_factory=list)
-    # ``None`` = no Page token was granted (never an empty-string ciphertext).
+    # ``None`` = no Page token stored (never an empty-string ciphertext).
     encrypted_page_token: str | None = Field(default=None, repr=False)
     instagram: InstagramAsset | None = None
+    # SPRINT-03 B6: explicit selection. Invariant: ``is_selected ⇒ token IS NOT NULL`` (DB
+    # CHECK) and ``NOT is_selected ⇒ token IS NULL`` (enforced by the service).
+    is_selected: bool = False
 
 
 class ConnectedAccount(BaseModel):
-    """Aggregate root: one provider user connected to one tenant."""
+    """Aggregate root: one provider user connected to one *brand* (SPRINT-03 B2).
+
+    ``connected_by_tenant_id`` records who performed the OAuth (the brand owner or an
+    agency with a grant); it drives the B8 purge when a grant is revoked.
+    """
 
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
     id: UUID = Field(default_factory=uuid4)
-    tenant_id: str = Field(..., min_length=1, max_length=64)
+    brand_id: UUID
+    connected_by_tenant_id: UUID
     provider: Provider = Provider.META
     provider_user_id: str = Field(..., min_length=1, max_length=64)
     provider_user_name: str | None = None
@@ -73,3 +81,7 @@ class ConnectedAccount(BaseModel):
     last_synced_at: datetime | None = None
     updated_at: datetime = Field(default_factory=_utcnow)
     pages: list[PageAsset] = Field(default_factory=list)
+
+    def violates_selection_invariant(self) -> list[str]:
+        """Page ids with ``is_selected=False`` but a stored token (must always be empty)."""
+        return [p.page_id for p in self.pages if not p.is_selected and p.encrypted_page_token]

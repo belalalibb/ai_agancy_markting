@@ -1,12 +1,17 @@
-"""HTTP routes for the Meta connector (``/api/v1/social/meta/*``) — SPRINT-02 §5-D.
+"""HTTP routes for the Meta connector — brand-scoped (SPRINT-03 B9).
 
-| Method | Path                       | Purpose                                   |
-|--------|----------------------------|-------------------------------------------|
-| POST   | /connections/start         | issue signed ``state`` + Facebook Login URL |
-| GET    | /callback                  | Meta redirect: complete flow and persist  |
-| GET    | /connections               | list a tenant's connected accounts        |
-| GET    | /connections/{id}          | one connected account                     |
-| DELETE | /connections/{id}          | disconnect (DB only)                      |
+| Method | Path                                                        | Role           |
+|--------|-------------------------------------------------------------|----------------|
+| POST   | /brands/{brand_id}/social/meta/connections/start            | OWNER/MANAGER  |
+| GET    | /social/meta/callback?code&state                            | from ``state`` |
+| GET    | /brands/{brand_id}/social/meta/connections?tenant_id=       | any role       |
+| GET    | /brands/{brand_id}/social/meta/connections/{id}?tenant_id=  | any role       |
+| PUT    | /brands/{brand_id}/social/meta/connections/{id}/pages/selection | OWNER/MANAGER |
+| DELETE | /brands/{brand_id}/social/meta/connections/{id}?tenant_id=  | OWNER/MANAGER  |
+
+The callback is *not* brand-bound in its path (Meta's registered redirect URI is fixed);
+``(tenant_id, brand_id)`` come from the signed ``state`` and are authorised **before any
+Graph call** — a revoked grant yields 404/403 with no Graph request and no row (B-U7).
 
 No response ever carries a token — raw, encrypted or masked (Zero-Secret).
 """
@@ -42,6 +47,7 @@ from src.modules.social_connect.exceptions import (
     MetaRateLimitError,
     MetaTokenExpiredError,
     MetaTransientError,
+    UnknownPageIdsError,
 )
 from src.modules.social_connect.infrastructure.postgres_repository import (
     PostgresConnectedAccountRepository,
@@ -51,13 +57,22 @@ from src.modules.social_connect.schemas import (
     ConnectedAccountPublic,
     ConnectionStartRequest,
     MetaAuthorizeUrlResponse,
+    PageSelectionRequest,
 )
 from src.modules.social_connect.service import MetaConnectService
+from src.modules.tenancy.dependencies import ActorTenantId, get_brand_access_resolver
+from src.modules.tenancy.domain.access import (
+    CONNECTION_WRITE_ROLES,
+    READ_ROLES,
+    BrandAccessResolver,
+    BrandRole,
+)
+from src.modules.tenancy.exceptions import BrandNotFoundError, InsufficientRoleError, TenancyError
+from src.modules.tenancy.router import to_http as tenancy_to_http
 
-router = APIRouter(prefix="/social/meta", tags=["Social Connect — Meta"])
+router = APIRouter(tags=["Social Connect — Meta"])
 
-# TEMPORARY until auth module: tenant is an explicit query parameter on read routes.
-TenantQuery = Annotated[str, Query(min_length=1, max_length=64, description="Tenant id")]
+BRAND_PREFIX = "/brands/{brand_id}/social/meta"
 
 
 # ------------------------------------------------------------ dependencies --
@@ -117,27 +132,50 @@ def get_meta_service(
     )
 
 
+Service = Annotated[MetaConnectService, Depends(get_meta_service)]
+Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
+
+
+async def _authorise(
+    resolver: BrandAccessResolver, tenant_id: UUID, brand_id: UUID, allowed: frozenset[BrandRole]
+) -> BrandRole:
+    """B5 policy: no access ⇒ 404 ``brand_not_found``; wrong role ⇒ 403 ``insufficient_role``."""
+    try:
+        role = await resolver.resolve(tenant_id, brand_id)
+        if role is None:
+            raise BrandNotFoundError()
+        if role not in allowed:
+            raise InsufficientRoleError(f"role {role.value!r} may not perform this action")
+    except TenancyError as exc:
+        raise tenancy_to_http(exc) from exc
+    return role
+
+
 # ----------------------------------------------------------------- routes --
 @router.post(
-    "/connections/start",
+    f"{BRAND_PREFIX}/connections/start",
     response_model=MetaAuthorizeUrlResponse,
-    summary="Start connecting a Meta account (signed state + Facebook Login URL)",
+    summary="Start connecting a Meta account to a brand (signed state + Facebook Login URL)",
 )
-def start_connection(
+async def start_connection(
+    brand_id: UUID,
     payload: ConnectionStartRequest,
-    service: Annotated[MetaConnectService, Depends(get_meta_service)],
+    service: Service,
+    resolver: Resolver,
 ) -> MetaAuthorizeUrlResponse:
-    return service.start_connection(payload.tenant_id)
+    await _authorise(resolver, payload.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    return service.start_connection(payload.tenant_id, brand_id)
 
 
 @router.get(
-    "/callback",
+    "/social/meta/callback",
     response_model=ConnectedAccountPublic,
     status_code=status.HTTP_201_CREATED,
     summary="OAuth redirect target: complete the flow and persist the connection",
 )
 async def oauth_callback(
-    service: Annotated[MetaConnectService, Depends(get_meta_service)],
+    service: Service,
+    resolver: Resolver,
     code: Annotated[str | None, Query()] = None,
     state: Annotated[str | None, Query()] = None,
     error: Annotated[str | None, Query()] = None,
@@ -159,57 +197,98 @@ async def oauth_callback(
             detail={"error": {"type": "missing_parameters", "message": "code and state required"}},
         )
     try:
-        account = await service.complete_connection(state=state, code=code)
+        tenant_id, brand_id = service.verify_state(state)
     except InvalidOAuthStateError as exc:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             detail={"error": {"type": "invalid_oauth_state", "message": str(exc)}},
         ) from exc
+    # B9: authorise BEFORE any Graph call — a grant revoked between start and callback
+    # yields 404/403 with no provider traffic and no row.
+    await _authorise(resolver, tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        account = await service.complete_connection(tenant_id, brand_id, code=code)
     except MetaGraphError as exc:
         raise _to_http(exc) from exc
     return ConnectedAccountPublic.from_domain(account)
 
 
 @router.get(
-    "/connections",
+    f"{BRAND_PREFIX}/connections",
     response_model=list[ConnectedAccountPublic],
-    summary="List a tenant's connected Meta accounts (no tokens)",
+    summary="List a brand's connected Meta accounts (no tokens)",
 )
 async def list_connections(
-    tenant_id: TenantQuery,
-    service: Annotated[MetaConnectService, Depends(get_meta_service)],
+    brand_id: UUID, tenant_id: ActorTenantId, service: Service, resolver: Resolver
 ) -> list[ConnectedAccountPublic]:
-    accounts = await service.list_connections(tenant_id)
+    await _authorise(resolver, tenant_id, brand_id, READ_ROLES)
+    accounts = await service.list_connections(brand_id)
     return [ConnectedAccountPublic.from_domain(account) for account in accounts]
 
 
 @router.get(
-    "/connections/{connection_id}",
+    f"{BRAND_PREFIX}/connections/{{connection_id}}",
     response_model=ConnectedAccountPublic,
     summary="Get one connected Meta account (no tokens)",
 )
 async def get_connection(
+    brand_id: UUID,
     connection_id: UUID,
-    tenant_id: TenantQuery,
-    service: Annotated[MetaConnectService, Depends(get_meta_service)],
+    tenant_id: ActorTenantId,
+    service: Service,
+    resolver: Resolver,
 ) -> ConnectedAccountPublic:
-    account = await service.get_connection(tenant_id, connection_id)
+    await _authorise(resolver, tenant_id, brand_id, READ_ROLES)
+    account = await service.get_connection(brand_id, connection_id)
+    if account is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Connection not found.")
+    return ConnectedAccountPublic.from_domain(account)
+
+
+@router.put(
+    f"{BRAND_PREFIX}/connections/{{connection_id}}/pages/selection",
+    response_model=ConnectedAccountPublic,
+    summary="Select which Facebook Pages this brand acts on (stores tokens only for them)",
+    responses={
+        422: {"description": "unknown_page_ids — none of the requested changes were applied"}
+    },
+)
+async def select_pages(
+    brand_id: UUID,
+    connection_id: UUID,
+    payload: PageSelectionRequest,
+    service: Service,
+    resolver: Resolver,
+) -> ConnectedAccountPublic:
+    await _authorise(resolver, payload.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        account = await service.select_pages(brand_id, connection_id, payload.page_ids)
+    except UnknownPageIdsError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"error": "unknown_page_ids", "page_ids": exc.page_ids},
+        ) from exc
+    except MetaGraphError as exc:
+        raise _to_http(exc) from exc
     if account is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Connection not found.")
     return ConnectedAccountPublic.from_domain(account)
 
 
 @router.delete(
-    "/connections/{connection_id}",
+    f"{BRAND_PREFIX}/connections/{{connection_id}}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Disconnect a Meta account (removes stored tokens and pages)",
 )
 async def disconnect(
+    brand_id: UUID,
     connection_id: UUID,
-    tenant_id: TenantQuery,
-    service: Annotated[MetaConnectService, Depends(get_meta_service)],
+    tenant_id: ActorTenantId,
+    service: Service,
+    resolver: Resolver,
 ) -> Response:
-    deleted = await service.disconnect(tenant_id, connection_id)
+    await _authorise(resolver, tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    deleted = await service.disconnect(brand_id, connection_id)
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Connection not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

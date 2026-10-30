@@ -33,7 +33,14 @@ if not TEST_DATABASE_URL:
     pytest.skip("integration DB not configured (set TEST_DATABASE_URL)", allow_module_level=True)
 
 ROOT = Path(__file__).resolve().parents[2]
-TABLES = ("social_connection_pages", "social_connections")
+# Truncation order is irrelevant with CASCADE, but listed children-first for readability.
+TABLES = (
+    "social_connection_pages",
+    "social_connections",
+    "brand_access_grants",
+    "brands",
+    "tenants",
+)
 
 
 def alembic_config(url: str) -> Config:
@@ -111,3 +118,38 @@ def integration_app(
 @pytest.fixture
 def integration_encryption(encryption: TokenEncryptionService) -> TokenEncryptionService:
     return encryption
+
+
+# ------------------------------------------------------------- tenancy seed --
+async def seed_tenancy(session: AsyncSession) -> None:
+    """Insert the SPRINT-03 test world (same ids as ``tests.conftest``) and commit.
+
+    tenants: OWNER (nile-owner), AGENCY (agency), STRANGER (stranger);
+    brands : BRAND (nile-coffee) and BRAND2 (cairo-dental), both owned by OWNER.
+    """
+    from tests.conftest import AGENCY_ID, BRAND2_ID, BRAND_ID, OWNER_ID, STRANGER_ID
+
+    await session.execute(
+        text(
+            "INSERT INTO tenants (id, slug, name) VALUES "
+            "(:owner, 'nile-owner', 'Nile Owner'), "
+            "(:agency, 'agency', 'Agency'), "
+            "(:stranger, 'stranger', 'Stranger')"
+        ),
+        {"owner": OWNER_ID, "agency": AGENCY_ID, "stranger": STRANGER_ID},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO brands (id, owner_tenant_id, slug, name) VALUES "
+            "(:b1, :owner, 'nile-coffee', 'Nile Coffee'), "
+            "(:b2, :owner, 'cairo-dental', 'Cairo Dental')"
+        ),
+        {"b1": BRAND_ID, "b2": BRAND2_ID, "owner": OWNER_ID},
+    )
+    await session.commit()
+
+
+@pytest.fixture
+async def seeded_session(session: AsyncSession) -> AsyncSession:
+    await seed_tenancy(session)
+    return session

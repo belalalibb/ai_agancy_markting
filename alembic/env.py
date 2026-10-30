@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from src.core.config import Settings
 from src.core.database import Base
 from src.modules.social_connect.infrastructure import orm as _social_connect_orm  # noqa: F401
+from src.modules.tenancy.infrastructure import orm as _tenancy_orm  # noqa: F401
 
 config = context.config
 # Programmatic callers (tests) pass ``config.attributes["configure_logger"] = False`` so
