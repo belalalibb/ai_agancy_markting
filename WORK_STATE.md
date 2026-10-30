@@ -9,9 +9,9 @@
 ## 1. ملخص الحالة العامة للمشروع (Project Snapshot)
 
 - **اسم المشروع:** AI Marketing Platform (AI Growth OS / BrandMind AI / QEVION)
-- **الحالة الإجمالية:** `SPRINT_04_ACCEPTED_CONDITIONAL__HOTFIX_04_1_ISSUED`
-- **آخر تحديث للمؤشر:** 2026-10-30 — المخطط راجع **SPRINT-04** مستقلاً (PG 17.11؛ 434 اختباراً، 99%؛ CI خضراء) **وتحقق بالسطر من 8 ملاحظات رقابية خارجية — كلها ثابتة** (اثنتان P0 موروثتان من SPRINT-03: تسريب صفحات عملاء الوكالة/اختطاف الاختيار، وأسرار Graph في query params تُسجَّل في `httpx` — أُثبتت تجريبياً). القرار: **قبول مشروط** ⇒ PR #11 دُمج (`6f263ac`) لأنه يُغلق فجوة الهوية ولا يُدخل الـP0، **ولا بناء فوقه قبل `SPRINT-04.1-HOTFIX`** (H1–H8).
-- **المرحلة الحالية:** Phase 1 — تصحيح أمني إلزامي (SPRINT-04.1) قبل أي ميزة: عزل بيانات عملاء الوكالة، أسرار Graph خارج الروابط، كوكي Refresh صالح للمتصفحات
+- **الحالة الإجمالية:** `SPRINT_04_1_DELIVERED_AWAITING_REVIEW`
+- **آخر تحديث للمؤشر:** 2026-10-30 — المنفذ سلّم **SPRINT-04.1-HOTFIX** على PR **#13** (https://github.com/belalalibb/ai_agancy_markting/pull/13) بكوميتين فوق `main`: Part A `51ac0fe` (H1–H4) وPart B `1b7a046` (H5–H8) + كوميت وثائق. **474 اختباراً ناجحاً** (447 وحدة + 27 تكامل على PG 17)، تغطية **99.57%**، ruff نظيف، كل greps القبول نظيفة. انحراف واحد يستحق قرار المخطط: سباق H7-I1 ينتهي بـ**0** جلسات حية (لا 1) لأن الخاسر يُعامل كإعادة استخدام ⇒ `revoke_all`. التفاصيل في `CURRENT_DIRECTIVE.md` §6.
+- **المرحلة الحالية:** Phase 1 — SPRINT-04.1 (التصحيح الأمني) **مُسلَّم بانتظار مراجعة المخطط**؛ بعد الاعتماد: SPRINT-05
 - **الفرع المعتمد المستقر:** `main`
 - **فرع التطوير المستمر:** `work/implementation`
 - **المرجع المعرفي المعتمد:** مجلد `AI_Marketing_Platform_Hub/` (57 وثيقة تخصصية)
@@ -40,7 +40,7 @@
 
 - **معرف المهمة:** `SPRINT-04.1-HOTFIX`
 - **وثيقة التوجيه المعتمدة (المصدر الوحيد):** [`CURRENT_DIRECTIVE.md`](./CURRENT_DIRECTIVE.md)
-- **حالة المهمة:** `READY_FOR_EXECUTION` — تبدأ من `main` (التوجيه مدموج)؛ المنفذ يفتح **PR #12**.
+- **حالة المهمة:** `DELIVERED_AWAITING_REVIEW` — PR **#13** (الرقم #12 استهلكه PR المخطط): Part A `51ac0fe`، Part B `1b7a046`، وثائق فوقهما. تقرير المنفذ الكامل (14 انحرافاً موثقاً + 3 أسئلة) في `CURRENT_DIRECTIVE.md` §6.
 - **الهدف:** إغلاق 8 ثغرات مُثبتة بالسطر — **Part A (موروث من 03):** H1 عزل صفحات الوكالة + ملكية الاتصال (`connected_by_tenant_id`) 🔴P0؛ H2 أسرار Graph من `params` إلى `Authorization: Bearer`/POST form + كبح `httpx` + مرشّح تنقيح + لا `{exc}` في 502 🔴P0؛ H3 `set_status(REAUTH_REQUIRED)` خارج معاملة الطلب + صفحة بلا توكن ⇒ 422؛ H4 فحص https/مضيف لـ`paging.next` + `ON CONFLICT DO NOTHING RETURNING` بدل 500. **Part B (عيوب 04):** H5 `__Secure-refresh` بدل `__Host-` (يكسر الدخول في المتصفحات) 🔴؛ H6 `CurrentUserFresh` يفحص `expires_at` + `users.is_active` و`GET /auth/me` عليه؛ H7 إبطال قبل إصدار + `rowcount == 1`؛ H8 سقف ذاكرة للمحدِّد.
 - **خارج النطاق:** أي ميزة. Redis. تغيير مخطط البيانات.
 - **السبرنت السابق:** `SPRINT-04-AUTH-AND-ACTOR-IDENTITY` — **مقبول مشروطاً ودُمج** (PR #11 ⇒ `6f263ac`) — [`sprints/SPRINT-04_REVIEW.md`](./sprints/SPRINT-04_REVIEW.md).
@@ -52,12 +52,12 @@
 ## 4. معايير القبول للمهمة الحالية (Acceptance Criteria)
 
 الكاملة في **§3 من `CURRENT_DIRECTIVE.md`**. ملخصها:
-- [ ] CI خضراء على PR #12؛ 0 فشل؛ تغطية ≥ 95%؛ ruff نظيف.
-- [ ] لا سر Graph في `params=` (أسطر `headers=`/`data=` مذكورة في §6)؛ تجربة `httpx` INFO تُظهر `client_secret in log: False`.
-- [ ] `grep "__Host-" src` فارغ؛ حارس H5-U1 موجود.
-- [ ] H1-I1, H3-I1, H4-I1, H6-I1, H7-I1 موجودة وناجحة على PG.
-- [ ] `grep 'f".*{exc}' meta_client.py` فارغ.
-- [ ] كوميتان فوق `main`؛ لا ملف محظور مُسّ.
+- [~] CI على PR #13 — تُتحقق بعد دفع كوميت الوثائق (محلياً: 0 فشل؛ تغطية 99.57%؛ ruff نظيف).
+- [x] لا سر Graph في `params=` (أسطر `data=`/`headers=` مذكورة في §6)؛ `test_root_handler_sees_redacted_httpx_line_even_at_info` يعيد تجربة المخطط ⇒ `client_secret in log: False`.
+- [x] `grep "__Host-" src` ⇒ لا كود، فقط تعليقات توضيحية في docstring (`config.py:153-156`, `auth/router.py:14`) تشرح لماذا لا يُستخدم؛ حارس H5-U1 موجود (`test_h5_u1_cookie_prefix_guard_on_every_set_cookie`).
+- [x] H1-I1, H3-I1, H4-I1 (×2), H6-I1, H7-I1 موجودة بالاسم وناجحة على PG 17.
+- [x] `grep 'f".*{exc}' meta_client.py` فارغ.
+- [x] كوميتان فوق `main` (`51ac0fe`, `1b7a046`) + كوميت وثائق؛ لا ملف محظور مُسّ.
 
 ---
 
@@ -65,10 +65,9 @@
 
 | الترتيب | الدور | الخطوة |
 |---|---|---|
-| 1 | **المالك** | 🔑 **تدوير توكن GitHub (الطلب الثالث — إلزامي قبل SPRINT-05)**. 🛡️ حماية `main` بالفحوص الخمسة. |
-| 2 | **المالك** | يأمر المنفذ: *«نفذ التوجيه الموجود في الريبو»*. |
-| 3 | **المنفذ** | `merge --ff-only origin/main` ⇒ Part A (H1–H4) كوميت + دفع + PR #12 ⇒ Part B (H5–H8) كوميت + دفع ⇒ §6 ⇒ هذا الملف ⇒ *«PR #12 جاهز لمراجعة المخطط»*. |
-| 4 | **المخطط** | مراجعة 04.1 على PG حقيقية + **إعادة تجربة تسريب `httpx` بنفسه** + سباق H7-I1 ⇒ يدمج PR #12 بنفسه ⇒ يحدّث `SECURITY_BASELINE` §2 و`KNOWN_ISSUES` ⇒ يكتب SPRINT-05 ويدمج توجيهه. |
+| 1 | **المخطط** | مراجعة **PR #13** على PG حقيقية + إعادة تجربة تسريب `httpx` بنفسه + سباق H7-I1 (يُتوقع `[200, 401]` و**0** جلسات حية — انظر §6 من التوجيه، انحراف 1) ⇒ قرار H7 (صارم 0 أم متسامح 1) ⇒ يدمج PR #13 بنفسه ⇒ يحدّث `SECURITY_BASELINE` §2 و`KNOWN_ISSUES` ⇒ يكتب SPRINT-05 ويدمج توجيهه. |
+| 2 | **المالك** | 🔑 **تدوير توكن GitHub (الطلب الرابع — إلزامي قبل SPRINT-05)**. 🛡️ حماية `main` بالفحوص الخمسة. |
+| 3 | **المنفذ** | ينتظر «تابع» أو تعليقات المراجعة على PR #13. لا يدمج. |
 
 > **ثلاث قواعد:** (1) لا يبدأ المنفذ قبل دمج توجيه المخطط في `main`. (2) المخطط يفرّع `genspark_ai_developer` من `main` **فقط**. (3) **المالك لا يدمج يدوياً** — المخطط يدمج توجيهاته فوراً وPRs المنفذ بعد الاعتماد؛ المنفذ لا يدمج أبداً.
 
@@ -80,6 +79,7 @@
 
 | التاريخ | الوكيل | الفرع | الكوميت | ما تم تأكيده | الخطوة التالية |
 |---|---|---|---|---|---|
+| 2026-10-30 | المنفذ | `work/implementation` → PR [#13](https://github.com/belalalibb/ai_agancy_markting/pull/13) | `51ac0fe` (Part A) / `1b7a046` (Part B) / كوميت التوثيق فوقهما | SPRINT-04.1-HOTFIX مُسلَّم. **Part A:** H1 `ConnectedAccountPublic.from_domain(…, viewer_tenant_id)` يُخفي الصفحات غير المختارة عن غير صاحب الاتصال + `is_connection_owner`؛ `select_pages` لصاحب الاتصال فقط (403 `not_connection_owner` قبل أي نداء Graph)؛ `disconnect` لمالك العلامة أو صاحب الاتصال؛ إعادة الربط بفاعل مختلف تنقل الملكية. H2 `POST` بجسم form لـ`/oauth/access_token` و`/debug_token`، `Authorization: Bearer` لـ`/me` و`/me/accounts`، تنقية `paging.next`، لا `{exc}` في 502؛ `src/core/logging.py` (`httpx`/`httpcore` ⇒ WARNING + `SecretRedactingFilter` على الجذر). H3 `StatusMarker` Protocol + `PostgresStatusMarker` بمعاملة مستقلة؛ صفحة بلا توكن ⇒ 422 `page_not_selectable`. H4 فحص https/مضيف لـ`paging.next`؛ `INSERT … ON CONFLICT DO NOTHING RETURNING id` في tenancy/auth ⇒ 409 بدل 500. **Part B:** H5 `__Secure-refresh` + حارس H5-U1؛ H6 `is_active(sid, now)` بـ`JOIN users` + `/auth/me` على `CurrentUserFresh`؛ H7 إبطال أولاً بـ`rowcount` + `link_replacement`؛ H8 محدِّد بسقف 10k مفتاح + مسح كسول. **الأرقام:** 447 + 27 = **474 ناجحاً**، 0 فشل، **99.57%**، ruff نظيف، greps القبول نظيفة، H7-I1 `[200, 401]` حتمياً. ساندبوكس أُعيد ≥4 مرات؛ 6 checkpoints WIP سُحقت في الكوميتين. 14 انحرافاً موثقاً + 3 أسئلة في §6. | مراجعة المخطط لـ PR #13 ⇒ قرار H7 ⇒ دمج ⇒ المالك يدوّر التوكن ⇒ SPRINT-05. |
 | 2026-10-30 | المخطط | `genspark_ai_developer` → PR #13 | `709ffad` | مراجعة SPRINT-04 @ `0db7828`: 434 اختباراً/99%/CI خضراء/greps نظيفة ⇒ **8 ملاحظات رقابية خارجية تُحقق منها المخطط بالسطر — كلها ثابتة**؛ S03-2 أُثبتت تجريبياً (سجل `httpx` INFO طبع `client_secret=` و`access_token=`). **قبول مشروط** ⇒ PR #11 دُمج `6f263ac`. أُصدر **SPRINT-04.1-HOTFIX** (H1–H8، كوميتان، لا ميزات) مع إقرار أن S03-1/S03-2 ثغرتا توجيه المخطط. | المالك: تدوير التوكن + إطلاق المنفذ ⇒ PR #12. |
 | 2026-10-30 | المنفذ | `work/implementation` → PR [#11](https://github.com/belalalibb/ai_agancy_markting/pull/11) | `b2bd3ad` (Part A) / `b0a4ccf` (Part B) / كوميت التوثيق فوقهما | SPRINT-04 مُسلَّم. **Part A (auth):** هجرة `0004` (`users` بـ `uq_users_email_lower` + `tenant_id` UNIQUE؛ `refresh_sessions` بـ `token_hash` sha256 و`replaced_by` و`ip INET`)، Argon2id خلف `PasswordHasher` Protocol مع `DUMMY_HASH` وإعادة التجزئة، JWT HS256 (`sub/tid/sid/iat/exp=iat+900/iss/aud=api/jti`، `algorithms=["HS256"]`، سر ≥32 بايت إلزامي خارج development)، كوكي `__Host-refresh` HttpOnly SameSite=Strict Path=/api/v1/auth مع دوران وكشف إعادة الاستخدام (إبطال كل الجلسات)، CSRF، محدِّد معدل in-memory خلف `RateLimiter` Protocol، مسارات `register/login/refresh/logout/logout-all/me`، `bearerAuth` في OpenAPI، `CurrentUser`/`CurrentUserFresh`. **Part B (الهوية):** `ActorTenantId` من JWT، حذف `tenant_id` من كل الأجسام/الاستعلامات، حذف `POST /tenants`، `CurrentUserFresh` على المسارات الهدّامة، claim `u` في state، حارس B-U1 على **15** مساراً، حارس Zero-Secret موسَّع. **الأرقام:** 413 + 21 = **434 ناجحاً**، 0 فشل، **99%**، ruff نظيف، تراخيص 39/0، 0004 صعود/نزول/صعود على PG 17. CI خضراء على `b0a4ccf` (push + PR). ساندبوكس أُعيد ≥15 مرة؛ gitleaks أجبر على إعادة بناء Part A. 12 انحرافاً + 4 أسئلة في §7. | مراجعة المخطط لـ PR #11 ⇒ دمجه ⇒ المالك يدوّر التوكن ⇒ SPRINT-05. |
 | 2026-10-30 | المخطط | `genspark_ai_developer` → PR #10 | `76ab3d8` | دورة انتظار (المنفذ لم يسلّم SPRINT-04 بعد؛ `work/implementation` @ `2b1e1fe`). أُنجز البند المؤجل على المخطط: **مزامنة Hub docs** — `DECISION_LOG` (D-056…D-063)، `SECURITY_BASELINE` (استثناء D-058، مواصفة JWT/Refresh، جدول حالة التنفيذ)، `DATA_AND_INTEGRATIONS` (المخطط الفعلي حتى 0003)، `DEFERRED_DECISIONS` (tenant_members، التفويض الفرعي، AES-256-GCM)، `CHANGELOG` (المحطة 7). `verify_hub.py` ناجح. | المالك: تدوير التوكن + إطلاق المنفذ على SPRINT-04. |

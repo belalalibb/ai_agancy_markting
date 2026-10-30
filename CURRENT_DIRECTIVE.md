@@ -10,7 +10,7 @@
 |---|---|
 | **معرف المهمة** | `SPRINT-04.1-HOTFIX` |
 | **النوع** | تصحيح أمني — **لا ميزات** |
-| **الحالة** | `READY_FOR_EXECUTION` |
+| **الحالة** | `DELIVERED_AWAITING_REVIEW` — PR #13 (Part A `51ac0fe`, Part B `1b7a046`) |
 | **يبدأ من** | `main` @ `6f263ac` (مدموج). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
 | **الفرع المستهدف** | `work/implementation` ⇒ **PR #12** إلى `main` |
 | **الكوميتات** | **اثنان**: Part A = H1–H4 (P0 + الفخاخ الموروثة من 03)، Part B = H5–H8 (عيوب 04). كل كوميت يُدفع فوراً |
@@ -140,14 +140,39 @@ grep -n "__Host-" -r src; grep -n 'f".*{exc}' src/modules/social_connect/meta_cl
 
 ## 6. تقرير المنفذ (يملؤه المنفذ)
 
-- **حالة التنفيذ:** `[ ] مكتمل` / `[ ] جزئي — السبب:`
-- **Commit SHA Part A:** `…` — **Part B:** `…` — **docs:** `…`
-- **PR #12:** … — **CI:** …
-- **الاختبارات:** وحدة … / تكامل … / الكل … — **التغطية:** …%
-- **H2: أسطر `headers=`/`data=` التي تحمل الأسرار، وأي مسار Graph احتاج POST بدل Bearer:** …
-- **H7-I1: نتيجة السباق على PG:** …
-- **انحرافات (بالسطر والسبب):** …
-- **أسئلة:** …
+- **حالة التنفيذ:** `[x] مكتمل` — H1–H8 كلها منفَّذة مع اختباراتها؛ لا ميزة، لا تغيير مخطط بيانات، لا ملف محظور مُسّ.
+- **Commit SHA Part A:** `51ac0fe` — **Part B:** `1b7a046` — **docs:** (هذا الكوميت — يُسجَّل في WORK_STATE §6)
+- **PR:** **#13** https://github.com/belalalibb/ai_agancy_markting/pull/13 — الرقم #12 كان مستهلَكاً بـPR المخطط نفسه (مراجعة 04 + هذا التوجيه)، فأُنشئ PR #13 بالعنوان المطلوب `SPRINT-04.1: security hotfix (8 verified findings)`. — **CI:** يُتحقق بعد دفع كوميت الوثائق (الحالة تُذكر في WORK_STATE §6).
+- **الاختبارات:** وحدة **447** / تكامل **27** / الكل **474 passed** (محلياً PG 17 + pgvector) — **التغطية:** **99.57%** (البوابة 95). `ruff check` + `ruff format --check` نظيفان.
+- **H2: أسطر `headers=`/`data=` التي تحمل الأسرار (`meta_client.py` @ `1b7a046`):**
+  - `:146-151` `data={client_id, client_secret, redirect_uri, code}` ⇒ `POST /oauth/access_token` (تبادل الكود)
+  - `:166-171` `data={grant_type, client_id, client_secret, fb_exchange_token}` ⇒ `POST /oauth/access_token` (long-lived)
+  - `:188` `data={"input_token": …}` + `:189` `headers=_bearer(app_token)` ⇒ `POST /debug_token` (كما نصّ التوجيه: Bearer للـapp token وجسم form للـinput_token)
+  - `:212` `headers=_bearer(user_access_token)` ⇒ `GET /me` (الرابط يحمل `fields` و`appsecret_proof` فقط)
+  - `get_user_pages`: `headers=_bearer(user_access_token)` لكل قفزة؛ `paging.next` يُنقّى من `access_token`/`appsecret_proof` اللذين يعيدهما Meta في الرابط ثم يُعاد إلحاق `appsecret_proof` فقط (`_trusted_pagination_url`).
+  - `grep -n '"access_token"\|"client_secret"\|"input_token"' meta_client.py` ⇒ `:57` (قائمة التنقية)، `:148/:169/:188` داخل `data=`، `:153/:175` قراءة من **الاستجابة** (`_require_str`). **لا `params=` يحمل سراً.**
+  - لم يحتج أي مسار إلى تراجع عن Bearer؛ لم يُعَد أي سر إلى الرابط.
+  - تجربة المخطط (`httpx` على INFO صراحةً مع مسجّل جذر): `tests/core/test_logging.py::test_root_handler_sees_redacted_httpx_line_even_at_info` ⇒ `client_secret in log: False` (يظهر `client_secret=***`). والسطر الأصلي لم يعد يحوي السر أصلاً لأن الطلب POST بجسم.
+- **H7-I1: نتيجة السباق على PG:** `asyncio.gather` لطلبي refresh بنفس الكوكي عبر تطبيقين/محركين مستقلين ⇒ **بالضبط `[200, 401]`** في 4/4 تشغيلات، الخاسر يعيد `refresh_reuse_detected`، الجلسة القديمة مُبطَلة مرة واحدة و`replaced_by` مربوط. **لكن** `live_sessions_after = 0` لا 1 — انظر الانحراف 1.
+- **انحرافات (بالسطر والسبب):**
+  1. **H7-I1 — عدد الجلسات الحية بعد السباق = 0 لا 1.** التوجيه (§2 H7) يأمر بمعاملة `revoked != 1` كإعادة استخدام ⇒ `revoke_all_for_user`. على PG يحجب قفل الصف `UPDATE … WHERE revoked_at IS NULL` الخاسر حتى يلتزم الفائز، فيرى الخاسر 0 صفوف **بعد** أن أُدرجت جلسة الفائز الجديدة، ويُبطلها معها. النتيجة حتمية (0) وأشدّ أماناً (توكن قُدّم مرتين ⇒ خروج من كل مكان)؛ الاختبار يثبت `== 0` + «لم تُصدر سوى جلسة جديدة واحدة». إن أراد المخطط «= 1» (تسامح مع التحديث المزدوج من تبويبين) يلزم تغيير السياسة: الخاسر يعيد 401 **بلا** `revoke_all` — قرار تصميمي أتركه له.
+  2. **رقم الـPR:** #13 بدل #12 (السبب أعلاه).
+  3. **H3 — `StatusMarker` قابل للحقن اختيارياً:** `MetaConnectService(status_marker=None)` يسقط إلى `set_status` في جلسة الطلب (السلوك القديم) كي تبقى الخدمة قابلة للبناء مستقلة في اختبارات الخدمة؛ الـrouter يحقن `PostgresStatusMarker` دائماً، وconftest يحقن `FakeStatusMarker`. `PostgresStatusMarker` يستخدم `get_session_factory()` (الـlru_cache) — يحترم `reset_db_caches()` في التكامل.
+  4. **H1 — `disconnect` تحتاج الدور:** `service.disconnect(brand_id, account_id, *, actor_tenant_id, actor_role)`؛ `_authorise` في الـrouter تعيد الدور ويُمرَّر. اختبار `test_list_get_disconnect_are_brand_scoped` عُدّل لتمرير OWNER.
+  5. **H1 — `ConnectedAccountPublic.from_domain` صارت تتطلب `viewer_tenant_id` (keyword-only)**؛ الاستدعاء الوحيد خارج الـrouter كان في `tests/modules/social_connect/test_schemas.py` وعُدّل.
+  6. **H2 — تنقية `paging.next`:** إضافة غير مطلوبة نصاً: Meta يعيد `access_token` داخل `paging.next`؛ لولا التنقية لعاد السر إلى الرابط عبر الباب الخلفي. `httpx` **يستبدل** query الرابط عند تمرير `params=`، لذا أُعيد إلحاق `appsecret_proof` داخل الرابط المنقّى نفسه لا عبر `params`.
+  7. **H2 — مرشّح التنقيح مركّب على الجذر وعلى كل handler للجذر وعلى `httpx`/`httpcore` نفسها:** مرشّحات الجذر لا ترى سجلات الأبناء المنتشرة (propagated) إلا عبر handlers؛ لذلك يُركَّب على الثلاثة. يُعيد كتابة `record.msg` ويُفرّغ `record.args` حتى لا يعيد أي formatter لاحق تركيب السر.
+  8. **H4 — `IntegrityError` للتزاحم على `grant`:** اختبار تكامل قائم (`test_grant_partial_unique_index_allows_regrant_after_revoke`) كان يتوقع `IntegrityError`؛ عُدّل ليتوقع `GrantAlreadyActiveError` بلا `rollback` (السلوك المقصود من H4).
+  9. **H4 — `PostgresBrandAccessGrantRepository.add` تعيد `grant.model_copy(id=inserted)`** بدل إعادة القراءة (لا أعمدة server-default في الجدول)؛ `tenants/brands/users` تُعاد قراءتها بـ`session.get` بعد `RETURNING id` لالتقاط `created_at/updated_at`.
+  10. **H6 — `is_active(session_id, now)`:** `now` يُمرَّر من الـdependency (`datetime.now(UTC)`) لا `now()` في SQL، للاتساق مع `RefreshSession.is_expired(now)` وقابلية الاختبار؛ الاستعلام واحد (`JOIN users`). في الـFake: مستخدم غير موجود في المخزن (فاعل مؤقت في اختبارات tenancy) يُعدّ نشطاً — في PG الـJOIN يحسم.
+  11. **H6 — `test_me_inactive_or_deleted_user_403` → 401 `session_revoked`:** بعد نقل `/auth/me` إلى `CurrentUserFresh` يُرفض المستخدم المعطَّل عند بوابة الهوية (401) قبل الوصول إلى `service.me` (403). حذف صف المستخدم كلياً يبقى 403 (الـFake لا يملك JOIN).
+  12. **H7 — `link_replacement(session_id, replaced_by)`** أُضيفت إلى `RefreshSessionRepository` (Protocol + PG + Fake) لأن معرّف الجلسة الجديدة لا يُعرف إلا بعد الإبطال الذرّي؛ `revoke()` تعيد `int` الآن (كانت `None`).
+  13. **H8 — بنية واحدة `OrderedDict[(bucket,key) → _Entry]`** بدل ثلاثة قواميس؛ `_failures` تُحذف مع المفتاح عند الخمول (نافذة فارغة + لا فشل + انتهاء الحظر)؛ المسح كل 256 عملية + طرد الأقدم عند تجاوز `max_keys=10_000`؛ خاصيّتا `tracked_keys`/`sweep_now()` للرصد والاختبار.
+  14. **بوابة الرخص محلياً:** `scripts/check_licenses.py` يُظهر `soxr (LGPL-2.1)` القادم من `librosa` **المثبّت مسبقاً في صورة الـsandbox** لا من `pyproject.toml` (لم يتغير). CI تستخدم venv نظيفاً (D-054) فلا تتأثر.
+- **أسئلة:**
+  1. H7: اعتماد «0 جلسات حية» (الصارم) أم تعديل السياسة إلى «401 بلا revoke_all للخاسر» للتسامح مع التبويبين؟
+  2. H1-3 نقل الملكية عند إعادة الربط: هل يُراد أيضاً **مسح اختيار** الصفحات السابق عند انتقال الملكية بين مستأجرين مختلفين (حالياً يُحفَظ الاختيار بحسب سياسة B6 مع نقل `connected_by_tenant_id`)؟
+  3. تدوير توكن GitHub — ما زال مُرسَلاً في المحادثة في كل دور؛ التذكير الرابع.
 
 ---
 
