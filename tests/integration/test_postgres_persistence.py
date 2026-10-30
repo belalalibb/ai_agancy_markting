@@ -38,6 +38,7 @@ from src.modules.social_connect.infrastructure.postgres_repository import (
 )
 from src.modules.tenancy.domain.access import BrandRole
 from src.modules.tenancy.domain.models import BrandAccessGrant, GrantRole
+from src.modules.tenancy.exceptions import GrantAlreadyActiveError
 from src.modules.tenancy.infrastructure.postgres_repository import (
     PostgresBrandAccessGrantRepository,
     PostgresBrandAccessResolver,
@@ -157,16 +158,16 @@ def _seed_fresh() -> None:
 
 
 def _mock_graph(graph_mock: respx.MockRouter, *, pages: int = 2, user_id: str = "90001") -> None:
-    graph_mock.get("/oauth/access_token", params={"grant_type": "fb_exchange_token"}).mock(
-        return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944))
-    )
-    graph_mock.get("/oauth/access_token").mock(
+    graph_mock.post(
+        "/oauth/access_token", data__contains={"grant_type": "fb_exchange_token"}
+    ).mock(return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944)))
+    graph_mock.post("/oauth/access_token").mock(
         return_value=httpx.Response(200, json=token_payload("SHORT_LIVED", 5000))
     )
     graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
         return_value=httpx.Response(200, json=me_payload(user_id=user_id))
     )
-    graph_mock.get("/debug_token").mock(
+    graph_mock.post("/debug_token").mock(
         return_value=httpx.Response(200, json=debug_token_payload(user_id=user_id))
     )
     graph_mock.get("/me/accounts").mock(
@@ -546,9 +547,10 @@ async def test_grant_partial_unique_index_allows_regrant_after_revoke(
     await seeded_session.commit()
     assert await resolver.resolve(AGENCY_ID, BRAND_ID) is BrandRole.MANAGER
 
-    with pytest.raises(IntegrityError):
+    # H4: the partial unique index fires ⇒ domain 409, and the transaction stays usable
+    # (no rollback needed — ON CONFLICT DO NOTHING is not an error for PostgreSQL).
+    with pytest.raises(GrantAlreadyActiveError):
         await grants.add(_grant(GrantRole.VIEWER))
-    await seeded_session.rollback()
 
     assert await grants.revoke(BRAND_ID, first.id) is not None
     await seeded_session.commit()
@@ -717,7 +719,7 @@ def test_revoke_grant_purges_agency_connections_via_api(
         graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
             return_value=httpx.Response(200, json=me_payload(user_id="90002", name="Agency"))
         )
-        graph_mock.get("/debug_token").mock(
+        graph_mock.post("/debug_token").mock(
             return_value=httpx.Response(200, json=debug_token_payload(user_id="90002"))
         )
         state = client.post(f"{brand_base()}/connections/start", headers=agency).json()["state"]
@@ -1122,3 +1124,265 @@ def test_health_ready_live_200(integration_app: FastAPI) -> None:
         assert res.status_code == 200, res.text
         assert res.json() == {"status": "ready", "database": "ok"}
         assert client.get("/health").status_code == 200
+
+
+# ======================================================= SPRINT-04.1 Part A
+def _grant_agency(client: TestClient, owner: dict[str, str], role: str = "manager") -> None:
+    res = client.post(
+        f"{API}/brands/{BRAND_ID}/grants",
+        json={"grantee_tenant_id": str(AGENCY_ID), "role": role},
+        headers=owner,
+    )
+    assert res.status_code == 201, res.text
+
+
+def _connect(client: TestClient, headers: dict[str, str]) -> dict:
+    state = client.post(f"{brand_base()}/connections/start", headers=headers).json()["state"]
+    res = client.get(CALLBACK, params={"code": "CODE", "state": state})
+    assert res.status_code == 201, res.text
+    return res.json()
+
+
+def test_h1_i1_agency_pages_isolated_from_brand_owner_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """H1-I1 — agency with 3 client Pages connects brand A; the owner of A never sees the
+    unselected ones and cannot hijack a selection; exactly one Page token ends up stored."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=3, user_id="90002")
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    agency = integration_headers(settings, AGENCY_ID)
+
+    with TestClient(integration_app) as client:
+        _grant_agency(client, owner)
+        created = _connect(client, agency)
+        cid = created["id"]
+        assert created["connected_by_tenant_id"] == str(AGENCY_ID)
+        assert created["is_connection_owner"] is True and len(created["pages"]) == 3
+
+        # Owner sees 0 Pages before any selection.
+        seen = client.get(f"{brand_base()}/connections/{cid}", headers=owner)
+        assert seen.status_code == 200
+        assert seen.json()["pages"] == [] and seen.json()["is_connection_owner"] is False
+        assert "Giza Gym" not in seen.text and "Cairo Dental" not in seen.text
+
+        # Agency selects one Page.
+        sel = client.put(
+            f"{brand_base()}/connections/{cid}/pages/selection",
+            json={"page_ids": ["1002"]},
+            headers=agency,
+        )
+        assert sel.status_code == 200, sel.text
+
+        # Owner now sees exactly that Page.
+        seen = client.get(f"{brand_base()}/connections/{cid}", headers=owner).json()
+        assert [p["page_id"] for p in seen["pages"]] == ["1002"]
+        listed = client.get(f"{brand_base()}/connections", headers=owner).json()
+        assert [p["page_id"] for p in listed[0]["pages"]] == ["1002"]
+
+        # Owner tries to select another Page ⇒ 403, nothing changes.
+        hijack = client.put(
+            f"{brand_base()}/connections/{cid}/pages/selection",
+            json={"page_ids": ["1001", "1003"]},
+            headers=owner,
+        )
+        assert hijack.status_code == 403, hijack.text
+        assert hijack.json()["detail"]["error"] == "not_connection_owner"
+
+    assert (
+        _run(
+            "SELECT count(*) FROM social_connection_pages "
+            "WHERE connection_id = :cid AND encrypted_page_token IS NOT NULL",
+            {"cid": UUID(cid)},
+            scalar=True,
+        )
+        == 1
+    )
+    assert (
+        _run(
+            "SELECT page_id FROM social_connection_pages "
+            "WHERE connection_id = :cid AND is_selected",
+            {"cid": UUID(cid)},
+            scalar=True,
+        )
+        == "1002"
+    )
+
+
+def _status_of(cid: str) -> object:
+    return _run(
+        "SELECT status FROM social_connections WHERE id = :cid", {"cid": UUID(cid)}, scalar=True
+    )
+
+
+def test_h3_i1_expired_token_during_selection_persists_reauth_required_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """H3-I1 — 401 **and** ``status = 'reauth_required'`` survives the request rollback."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=3)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        assert (
+            _run(
+                "SELECT status FROM social_connections WHERE id = :cid",
+                {"cid": UUID(cid)},
+                scalar=True,
+            )
+            == "active"
+        )
+        graph_mock.get("/me/accounts").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "Error validating access token: Session has expired",
+                        "type": "OAuthException",
+                        "code": 190,
+                        "error_subcode": 463,
+                    }
+                },
+            )
+        )
+        res = client.put(
+            f"{brand_base()}/connections/{cid}/pages/selection",
+            json={"page_ids": ["1001"]},
+            headers=owner,
+        )
+        assert res.status_code == 401, res.text
+        assert res.json()["detail"]["required_action"] == "reconnect"
+
+        # Visible through the API in a *new* request …
+        again = client.get(f"{brand_base()}/connections/{cid}", headers=owner)
+        assert again.json()["status"] == "reauth_required"
+
+    # … and really committed in the database after the request is over.
+    assert (
+        _run(
+            "SELECT status FROM social_connections WHERE id = :cid",
+            {"cid": UUID(cid)},
+            scalar=True,
+        )
+        == "reauth_required"
+    )
+
+
+def test_h4_i1_concurrent_inserts_with_same_slug_yield_one_201_and_one_409(
+    engine: AsyncEngine,
+) -> None:
+    """H4-I1 — two sessions race on ``brands.uq_brands_owner_slug`` ⇒ 201 + 409, never 500."""
+    del engine  # fixture used for its TRUNCATE side effect only
+    _seed_fresh()
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.modules.tenancy.domain.models import Brand, Tenant
+    from src.modules.tenancy.exceptions import BrandSlugTakenError, TenantSlugTakenError
+    from src.modules.tenancy.infrastructure.postgres_repository import PostgresTenantRepository
+
+    async def _race_brands() -> list[object]:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        maker = async_sessionmaker(eng, expire_on_commit=False)
+
+        async def _insert(name: str) -> object:
+            async with maker() as session, session.begin():
+                try:
+                    brand = await PostgresBrandRepository(session).add(
+                        Brand(owner_tenant_id=OWNER_ID, slug="raced-slug", name=name)
+                    )
+                except BrandSlugTakenError as exc:
+                    return exc
+                return brand
+
+        try:
+            # Both sessions open their transaction first, then insert "at the same time":
+            # the loser blocks on the unique index until the winner commits, then its
+            # ON CONFLICT DO NOTHING returns no row ⇒ domain 409, no IntegrityError.
+            return list(await asyncio.gather(_insert("one"), _insert("two")))
+        finally:
+            await eng.dispose()
+
+    results = asyncio.run(_race_brands())
+    kinds = sorted(type(r).__name__ for r in results)
+    assert kinds == ["Brand", "BrandSlugTakenError"], results
+    assert not any(isinstance(r, IntegrityError) for r in results)
+    assert _run("SELECT count(*) FROM brands WHERE slug = 'raced-slug'", scalar=True) == 1
+
+    async def _race_tenants() -> list[object]:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        maker = async_sessionmaker(eng, expire_on_commit=False)
+
+        async def _insert(name: str) -> object:
+            async with maker() as session, session.begin():
+                try:
+                    return await PostgresTenantRepository(session).add(
+                        Tenant(slug="raced-tenant", name=name)
+                    )
+                except TenantSlugTakenError as exc:
+                    return exc
+
+        try:
+            return list(await asyncio.gather(_insert("a"), _insert("b")))
+        finally:
+            await eng.dispose()
+
+    results = asyncio.run(_race_tenants())
+    assert sorted(type(r).__name__ for r in results) == ["Tenant", "TenantSlugTakenError"]
+
+
+def test_h4_i1_concurrent_register_same_email_via_api_is_409_not_500(
+    integration_app: FastAPI,
+) -> None:
+    """H4-I1 (API) — two sessions insert the same e-mail: one user row, one 409."""
+    _seed_fresh()
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.modules.auth.domain.models import User
+    from src.modules.auth.exceptions import EmailTakenError
+    from src.modules.auth.infrastructure.postgres_repository import PostgresUserRepository
+
+    async def _race() -> list[object]:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        maker = async_sessionmaker(eng, expire_on_commit=False)
+
+        async def _insert(tenant: UUID, email: str) -> object:
+            async with maker() as session, session.begin():
+                try:
+                    return await PostgresUserRepository(session).add(
+                        User(tenant_id=tenant, email=email, password_hash="$argon2id$x")
+                    )
+                except EmailTakenError as exc:
+                    return exc
+
+        try:
+            # Different tenants (users.tenant_id is unique too), same e-mail in two cases.
+            await asyncio.gather(
+                *[
+                    _run_sql(
+                        eng,
+                        "INSERT INTO tenants (id, slug, name) VALUES (:id, :s, :n)",
+                        {"id": tid, "s": f"t-{i}", "n": f"T{i}"},
+                    )
+                    for i, tid in enumerate((t1, t2))
+                ]
+            )
+            return list(
+                await asyncio.gather(
+                    _insert(t1, "Race@Example.com"), _insert(t2, "race@example.com")
+                )
+            )
+        finally:
+            await eng.dispose()
+
+    t1, t2 = uuid4(), uuid4()
+    results = asyncio.run(_race())
+    assert sorted(type(r).__name__ for r in results) == ["EmailTakenError", "User"], results
+    assert (
+        _run("SELECT count(*) FROM users WHERE lower(email) = 'race@example.com'", scalar=True)
+        == 1
+    )
+
+
+async def _run_sql(engine: AsyncEngine, sql: str, params: dict) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text(sql), params)

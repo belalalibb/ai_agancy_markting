@@ -10,8 +10,11 @@ use ``CurrentUserFresh`` — a logged-out session is refused immediately.
 | GET    | /social/meta/callback?code&state (top-level)  | signed ``state`` only |
 | GET    | …/connections                                 | Bearer, any role      |
 | GET    | …/connections/{id}                            | Bearer, any role      |
-| PUT    | …/connections/{id}/pages/selection            | fresh, OWNER/MANAGER  |
-| DELETE | …/connections/{id}                            | fresh, OWNER/MANAGER  |
+| PUT    | …/connections/{id}/pages/selection            | fresh, connection owner |
+| DELETE | …/connections/{id}                            | fresh, OWNER or conn. owner |
+
+H1 (SPRINT-04.1): unselected Pages are shown only to the connection owner
+(``ConnectedAccountPublic.from_domain(..., viewer_tenant_id=actor.tenant_id)``).
 
 The callback is **unauthenticated by design** (B3): Meta redirects the browser there without
 our Bearer token, so ``(tenant_id, brand_id)`` come from the HMAC-signed ``state`` issued to
@@ -45,6 +48,7 @@ from src.core.security import (
 )
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
+from src.modules.social_connect.domain.status_marker import StatusMarker
 from src.modules.social_connect.exceptions import (
     MetaGraphError,
     MetaNetworkError,
@@ -53,11 +57,14 @@ from src.modules.social_connect.exceptions import (
     MetaRateLimitError,
     MetaTokenExpiredError,
     MetaTransientError,
+    NotConnectionOwnerError,
+    PageNotSelectableError,
     UnknownPageIdsError,
 )
 from src.modules.social_connect.infrastructure.postgres_repository import (
     PostgresConnectedAccountRepository,
 )
+from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
 from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.social_connect.schemas import (
     ConnectedAccountPublic,
@@ -122,12 +129,18 @@ def get_repository(
     return PostgresConnectedAccountRepository(session)
 
 
+def get_status_marker() -> StatusMarker:
+    """H3: writes ``reauth_required`` in its own transaction (tests override with a fake)."""
+    return PostgresStatusMarker()
+
+
 def get_meta_service(
     client: Annotated[MetaGraphClient, Depends(get_meta_client)],
     encryption: Annotated[TokenEncryptionService, Depends(get_encryption_service)],
     repository: Annotated[ConnectedAccountRepository, Depends(get_repository)],
     state_signer: Annotated[OAuthStateSigner, Depends(get_state_signer)],
     settings: Annotated[Settings, Depends(get_settings)],
+    status_marker: Annotated[StatusMarker, Depends(get_status_marker)],
 ) -> MetaConnectService:
     return MetaConnectService(
         client=client,
@@ -135,6 +148,7 @@ def get_meta_service(
         repository=repository,
         state_signer=state_signer,
         settings=settings,
+        status_marker=status_marker,
     )
 
 
@@ -219,7 +233,7 @@ async def oauth_callback(
         account = await service.complete_connection(tenant_id, brand_id, code=code)
     except MetaGraphError as exc:
         raise _to_http(exc) from exc
-    return ConnectedAccountPublic.from_domain(account)
+    return ConnectedAccountPublic.from_domain(account, viewer_tenant_id=tenant_id)
 
 
 @router.get(
@@ -232,7 +246,10 @@ async def list_connections(
 ) -> list[ConnectedAccountPublic]:
     await _authorise(resolver, tenant_id, brand_id, READ_ROLES)
     accounts = await service.list_connections(brand_id)
-    return [ConnectedAccountPublic.from_domain(account) for account in accounts]
+    return [
+        ConnectedAccountPublic.from_domain(account, viewer_tenant_id=tenant_id)
+        for account in accounts
+    ]
 
 
 @router.get(
@@ -251,7 +268,7 @@ async def get_connection(
     account = await service.get_connection(brand_id, connection_id)
     if account is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Connection not found.")
-    return ConnectedAccountPublic.from_domain(account)
+    return ConnectedAccountPublic.from_domain(account, viewer_tenant_id=tenant_id)
 
 
 @router.put(
@@ -259,7 +276,8 @@ async def get_connection(
     response_model=ConnectedAccountPublic,
     summary="Select which Facebook Pages this brand acts on (stores tokens only for them)",
     responses={
-        422: {"description": "unknown_page_ids — none of the requested changes were applied"}
+        403: {"description": "not_connection_owner — only the connecting tenant may select"},
+        422: {"description": "unknown_page_ids / page_not_selectable — nothing was applied"},
     },
 )
 async def select_pages(
@@ -272,17 +290,26 @@ async def select_pages(
 ) -> ConnectedAccountPublic:
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     try:
-        account = await service.select_pages(brand_id, connection_id, payload.page_ids)
+        account = await service.select_pages(
+            brand_id, connection_id, payload.page_ids, actor_tenant_id=actor.tenant_id
+        )
+    except NotConnectionOwnerError as exc:
+        raise _not_owner(exc) from exc
     except UnknownPageIdsError as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"error": "unknown_page_ids", "page_ids": exc.page_ids},
         ) from exc
+    except PageNotSelectableError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"error": "page_not_selectable", "page_ids": exc.page_ids},
+        ) from exc
     except MetaGraphError as exc:
         raise _to_http(exc) from exc
     if account is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Connection not found.")
-    return ConnectedAccountPublic.from_domain(account)
+    return ConnectedAccountPublic.from_domain(account, viewer_tenant_id=actor.tenant_id)
 
 
 @router.delete(
@@ -297,14 +324,25 @@ async def disconnect(
     service: Service,
     resolver: Resolver,
 ) -> Response:
-    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
-    deleted = await service.disconnect(brand_id, connection_id)
+    role = await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        deleted = await service.disconnect(
+            brand_id, connection_id, actor_tenant_id=actor.tenant_id, actor_role=role
+        )
+    except NotConnectionOwnerError as exc:
+        raise _not_owner(exc) from exc
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Connection not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------- error mapping --
+def _not_owner(exc: NotConnectionOwnerError) -> HTTPException:
+    return HTTPException(
+        status.HTTP_403_FORBIDDEN, detail={"error": exc.error, "message": exc.message}
+    )
+
+
 def _required_action(exc: MetaGraphError) -> str | None:
     """Tell the client what to do next (machine-readable, see SPRINT-01 review §5)."""
     if isinstance(exc, MetaRateLimitError):

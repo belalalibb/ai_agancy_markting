@@ -32,6 +32,7 @@ from tests.fakes import (
     FakePasswordHasher,
     FakeRateLimiter,
     FakeRefreshSessionRepository,
+    FakeStatusMarker,
     FakeStore,
     FakeTenantRepository,
     FakeUserRepository,
@@ -106,6 +107,11 @@ async def meta_client(settings: Settings) -> AsyncIterator[MetaGraphClient]:
 def store() -> FakeStore:
     """One in-memory world (tenants, brands, grants, connections) per test."""
     return FakeStore()
+
+
+@pytest.fixture
+def status_marker(store: FakeStore) -> FakeStatusMarker:
+    return FakeStatusMarker(store)
 
 
 @pytest.fixture
@@ -212,6 +218,7 @@ def app(
     settings: Settings,
     store: FakeStore,
     fake_repo: FakeConnectedAccountRepository,
+    status_marker: FakeStatusMarker,
     hasher: FakePasswordHasher,
     limiter: FakeRateLimiter,
 ) -> FastAPI:
@@ -223,7 +230,7 @@ def app(
         get_refresh_session_repository,
         get_user_repository,
     )
-    from src.modules.social_connect.router import get_repository
+    from src.modules.social_connect.router import get_repository, get_status_marker
     from src.modules.tenancy.dependencies import (
         get_brand_access_resolver,
         get_brand_repository,
@@ -234,6 +241,7 @@ def app(
     seed_world(store)
     application = create_app(settings)
     application.dependency_overrides[get_repository] = lambda: fake_repo
+    application.dependency_overrides[get_status_marker] = lambda: status_marker
     application.dependency_overrides[get_user_repository] = lambda: FakeUserRepository(store)
     application.dependency_overrides[get_refresh_session_repository] = lambda: (
         FakeRefreshSessionRepository(store)

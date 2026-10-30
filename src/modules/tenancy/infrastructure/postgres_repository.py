@@ -2,6 +2,11 @@
 
 Never commits: the request-scoped ``get_db_session`` owns the transaction, so e.g.
 "revoke grant + delete grantee connections" (B8) is atomic.
+
+SPRINT-04.1 H4: every ``add`` is ``INSERT … ON CONFLICT DO NOTHING RETURNING id``. The
+service's existence pre-checks are not atomic under concurrency; when the unique constraint
+fires the repository raises the *domain* error (409) instead of letting ``IntegrityError``
+surface as a 500. No ``rollback`` is needed — a no-op insert leaves the transaction healthy.
 """
 
 from __future__ import annotations
@@ -10,10 +15,16 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.modules.tenancy.domain.access import BrandRole
 from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole, Tenant
+from src.modules.tenancy.exceptions import (
+    BrandSlugTakenError,
+    GrantAlreadyActiveError,
+    TenantSlugTakenError,
+)
 from src.modules.tenancy.infrastructure.orm import BrandAccessGrantRow, BrandRow, TenantRow
 
 
@@ -22,10 +33,18 @@ class PostgresTenantRepository:
         self._session = session
 
     async def add(self, tenant: Tenant) -> Tenant:
-        row = TenantRow(id=tenant.id, slug=tenant.slug, name=tenant.name)
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+        stmt = (
+            pg_insert(TenantRow)
+            .values(id=tenant.id, slug=tenant.slug, name=tenant.name)
+            .on_conflict_do_nothing()
+            .returning(TenantRow.id)
+        )
+        inserted = (await self._session.execute(stmt)).scalar_one_or_none()
+        if inserted is None:
+            raise TenantSlugTakenError(f"tenant slug {tenant.slug!r} is already taken")
+        row = await self._session.get(TenantRow, inserted)
+        if row is None:  # pragma: no cover - the row was just inserted in this transaction
+            raise RuntimeError("inserted tenant vanished within the transaction")
         return _tenant(row)
 
     async def get(self, tenant_id: UUID) -> Tenant | None:
@@ -44,12 +63,23 @@ class PostgresBrandRepository:
         self._session = session
 
     async def add(self, brand: Brand) -> Brand:
-        row = BrandRow(
-            id=brand.id, owner_tenant_id=brand.owner_tenant_id, slug=brand.slug, name=brand.name
+        stmt = (
+            pg_insert(BrandRow)
+            .values(
+                id=brand.id,
+                owner_tenant_id=brand.owner_tenant_id,
+                slug=brand.slug,
+                name=brand.name,
+            )
+            .on_conflict_do_nothing()
+            .returning(BrandRow.id)
         )
-        self._session.add(row)
-        await self._session.flush()
-        await self._session.refresh(row)
+        inserted = (await self._session.execute(stmt)).scalar_one_or_none()
+        if inserted is None:
+            raise BrandSlugTakenError(f"brand slug {brand.slug!r} already exists for this tenant")
+        row = await self._session.get(BrandRow, inserted)
+        if row is None:  # pragma: no cover - the row was just inserted in this transaction
+            raise RuntimeError("inserted brand vanished within the transaction")
         return _brand(row)
 
     async def get(self, brand_id: UUID) -> Brand | None:
@@ -93,18 +123,24 @@ class PostgresBrandAccessGrantRepository:
         self._session = session
 
     async def add(self, grant: BrandAccessGrant) -> BrandAccessGrant:
-        row = BrandAccessGrantRow(
-            id=grant.id,
-            brand_id=grant.brand_id,
-            grantee_tenant_id=grant.grantee_tenant_id,
-            role=grant.role.value,
-            granted_by_tenant_id=grant.granted_by_tenant_id,
-            granted_at=grant.granted_at,
-            revoked_at=grant.revoked_at,
+        stmt = (
+            pg_insert(BrandAccessGrantRow)
+            .values(
+                id=grant.id,
+                brand_id=grant.brand_id,
+                grantee_tenant_id=grant.grantee_tenant_id,
+                role=grant.role.value,
+                granted_by_tenant_id=grant.granted_by_tenant_id,
+                granted_at=grant.granted_at,
+                revoked_at=grant.revoked_at,
+            )
+            .on_conflict_do_nothing()  # partial unique index: one *active* grant per grantee
+            .returning(BrandAccessGrantRow.id)
         )
-        self._session.add(row)
-        await self._session.flush()
-        return _grant(row)
+        inserted = (await self._session.execute(stmt)).scalar_one_or_none()
+        if inserted is None:
+            raise GrantAlreadyActiveError()
+        return grant.model_copy(update={"id": inserted})
 
     async def get(self, brand_id: UUID, grant_id: UUID) -> BrandAccessGrant | None:
         row = (

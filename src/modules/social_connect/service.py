@@ -9,8 +9,18 @@ Responsibilities
    user as ``/me``) → list Pages (+ IG accounts) → apply the **page selection policy**
    (B6) → encrypt → persist. No derived / fallback identity (SPRINT-02.1 F3).
 3. ``select_pages``        — B6 explicit selection: re-fetch Pages, store tokens only for the
-   selected ones, wipe tokens of deselected ones.
-4. ``list/get/disconnect`` — brand-scoped reads/deletes through the repository.
+   selected ones, wipe tokens of deselected ones. **Connection owner only** (H1).
+4. ``list/get/disconnect`` — brand-scoped reads/deletes through the repository; ``disconnect``
+   is allowed to the connection owner **or** the brand OWNER (H1).
+
+Ownership (SPRINT-04.1 H1): the Pages Meta returns belong to the *person* who ran OAuth,
+not to the brand. Unselected Pages are therefore visible only to ``connected_by_tenant_id``
+(filtering happens in ``ConnectedAccountPublic.from_domain``); only that tenant may change
+the selection. A reconnect by a different tenant transfers ownership to the reconnecting
+tenant (they now own the token).
+
+Status persistence (H3): ``reauth_required`` is written through an out-of-band
+``StatusMarker`` because the request transaction is rolled back when we re-raise.
 
 Page selection policy (B6 + owner note on reconnect):
 * exactly one Page returned ⇒ stored **selected** with its token (no mixing possible);
@@ -46,11 +56,14 @@ from src.modules.social_connect.domain.models import (
     Provider,
 )
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
+from src.modules.social_connect.domain.status_marker import StatusMarker
 from src.modules.social_connect.exceptions import (
     MetaGraphError,
     MetaTokenExpiredError,
     MetaTokenForeignAppError,
     MetaTokenInvalidError,
+    NotConnectionOwnerError,
+    PageNotSelectableError,
     UnknownPageIdsError,
 )
 from src.modules.social_connect.meta_client import MetaGraphClient
@@ -59,6 +72,7 @@ from src.modules.social_connect.schemas import (
     MetaDebugTokenInfo,
     MetaPageInfo,
 )
+from src.modules.tenancy.domain.access import BrandRole
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +91,16 @@ class MetaConnectService:
         repository: ConnectedAccountRepository,
         state_signer: OAuthStateSigner,
         settings: Settings,
+        status_marker: StatusMarker | None = None,
     ) -> None:
         self._client = client
         self._encryption = encryption
         self._repository = repository
         self._state_signer = state_signer
         self._settings = settings
+        # H3: ``None`` ⇒ fall back to the (rollback-prone) request session. Production and
+        # the contract suite always inject one; the fallback keeps the bare service usable.
+        self._status_marker = status_marker
 
     # ------------------------------------------------------------- start ---
     def start_connection(
@@ -148,6 +166,15 @@ class MetaConnectService:
             {p.page_id for p in existing.pages if p.is_selected} if existing is not None else set()
         )
         page_assets = self._apply_selection_policy(pages, keep_selected)
+        if existing is not None and existing.connected_by_tenant_id != tenant_id:
+            # H1 (3): whoever re-ran OAuth holds the new token ⇒ becomes the connection owner.
+            logger.info(
+                "meta connection ownership transferred: brand=%s connection=%s from=%s to=%s",
+                brand_id,
+                existing.id,
+                existing.connected_by_tenant_id,
+                tenant_id,
+            )
 
         account = ConnectedAccount(
             brand_id=brand_id,
@@ -176,25 +203,35 @@ class MetaConnectService:
 
     # --------------------------------------------------------- selection ---
     async def select_pages(
-        self, brand_id: UUID, account_id: UUID, page_ids: Iterable[str]
+        self,
+        brand_id: UUID,
+        account_id: UUID,
+        page_ids: Iterable[str],
+        *,
+        actor_tenant_id: UUID,
     ) -> ConnectedAccount | None:
         """B6: make exactly ``page_ids`` the selected Pages of the connection.
 
+        * actor is not ``connected_by_tenant_id`` ⇒ ``NotConnectionOwnerError`` (403, H1) —
+          checked **before** any Graph call;
         * unknown ids ⇒ ``UnknownPageIdsError`` and **no** DB change;
+        * requested Page without a Page token ⇒ ``PageNotSelectableError`` (422, H3);
         * expired user token (190) ⇒ ``MetaTokenExpiredError`` after marking the
-          connection ``reauth_required`` (caller maps to 401);
+          connection ``reauth_required`` out of band (caller maps to 401);
         * returns ``None`` when the connection does not exist in this brand.
         """
         account = await self._repository.get(brand_id, account_id)
         if account is None:
             return None
+        if account.connected_by_tenant_id != actor_tenant_id:
+            raise NotConnectionOwnerError()
         requested = list(dict.fromkeys(page_ids))
 
         user_token = self._encryption.decrypt_token(account.encrypted_user_token)
         try:
             fresh = await self._client.get_user_pages(user_token)
         except MetaTokenExpiredError:
-            await self._repository.set_status(brand_id, account_id, AccountStatus.REAUTH_REQUIRED)
+            await self._mark_reauth_required(brand_id, account_id)
             raise
         finally:
             del user_token
@@ -203,6 +240,11 @@ class MetaConnectService:
         unknown = [pid for pid in requested if pid not in known]
         if unknown:
             raise UnknownPageIdsError(unknown)
+        tokenless = [
+            p.page_id for p in fresh if p.page_id in requested and p.page_access_token is None
+        ]
+        if tokenless:
+            raise PageNotSelectableError(tokenless)
 
         new_pages = [self._to_page_asset(p, selected=p.page_id in requested) for p in fresh]
         _assert_invariant(new_pages)
@@ -223,8 +265,24 @@ class MetaConnectService:
     async def get_connection(self, brand_id: UUID, account_id: UUID) -> ConnectedAccount | None:
         return await self._repository.get(brand_id, account_id)
 
-    async def disconnect(self, brand_id: UUID, account_id: UUID) -> bool:
-        """Remove the stored connection (DB only — no Meta call in this sprint)."""
+    async def disconnect(
+        self,
+        brand_id: UUID,
+        account_id: UUID,
+        *,
+        actor_tenant_id: UUID,
+        actor_role: BrandRole,
+    ) -> bool:
+        """Remove the stored connection (DB only — no Meta call in this sprint).
+
+        H1: allowed to the brand OWNER (may evict an agency) and to the connection owner;
+        a MANAGER may only remove connections it made itself ⇒ ``NotConnectionOwnerError``.
+        """
+        account = await self._repository.get(brand_id, account_id)
+        if account is None:
+            return False
+        if actor_role != BrandRole.OWNER and account.connected_by_tenant_id != actor_tenant_id:
+            raise NotConnectionOwnerError()
         return await self._repository.delete(brand_id, account_id)
 
     def decrypt_stored_token(self, encrypted_token: str) -> str:
@@ -232,6 +290,15 @@ class MetaConnectService:
         return self._encryption.decrypt_token(encrypted_token)
 
     # ----------------------------------------------------------- helpers ---
+    async def _mark_reauth_required(self, brand_id: UUID, account_id: UUID) -> None:
+        """H3: persist ``reauth_required`` so it survives the request's rollback."""
+        if self._status_marker is not None:
+            await self._status_marker.mark_out_of_band(
+                brand_id, account_id, AccountStatus.REAUTH_REQUIRED
+            )
+        else:  # no marker wired (bare service): best effort in the caller's session
+            await self._repository.set_status(brand_id, account_id, AccountStatus.REAUTH_REQUIRED)
+
     async def _inspect_token(self, long_lived: str) -> MetaDebugTokenInfo | None:
         """``/debug_token`` with graceful degradation (SPRINT-02 §5-C step 3).
 

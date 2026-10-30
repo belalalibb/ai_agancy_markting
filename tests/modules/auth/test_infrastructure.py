@@ -11,6 +11,7 @@ from src.modules.auth.domain.hashing import PasswordHasher
 from src.modules.auth.domain.models import RefreshSession, User
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.auth.domain.repository import RefreshSessionRepository, UserRepository
+from src.modules.auth.exceptions import EmailTakenError
 from src.modules.auth.infrastructure.argon2_hasher import DUMMY_HASH, Argon2PasswordHasher
 from src.modules.auth.infrastructure.orm import RefreshSessionRow, UserRow
 from src.modules.auth.infrastructure.postgres_repository import (
@@ -152,16 +153,28 @@ def test_protocol_conformance() -> None:
 
 
 async def test_user_repository_add_get_lookup_and_updates() -> None:
-    session = StubSession([StubResult(scalar=_user_row()), StubResult(scalar=None)])
-    _patch_add_defaults(session)
+    session = StubSession(
+        [
+            StubResult(scalar=OWNER_USER_ID),  # add ⇒ RETURNING id
+            StubResult(scalar=None),  # add (conflict on lower(email) / tenant_id)
+            StubResult(scalar=_user_row()),  # get_by_email
+            StubResult(scalar=None),  # get_by_email (missing)
+        ]
+    )
     repo = PostgresUserRepository(session)  # type: ignore[arg-type]
 
+    session.identity[(UserRow, OWNER_USER_ID)] = _user_row()
     stored = await repo.add(
         User(id=OWNER_USER_ID, tenant_id=OWNER_ID, email="x@y.z", password_hash="$argon2id$h")
     )
     assert stored.id == OWNER_USER_ID and stored.is_active is True
-    assert session.flush_count == 1 and len(session.refreshed) == 1
+    sql = compiled(session.executed[0][0])
+    assert sql.startswith("INSERT INTO users") and "ON CONFLICT DO NOTHING" in sql  # H4
+    assert session.flush_count == 0 and session.added == []
+    with pytest.raises(EmailTakenError):
+        await repo.add(User(tenant_id=OWNER_ID, email="X@y.z", password_hash="$argon2id$h"))
 
+    del session.identity[(UserRow, OWNER_USER_ID)]
     assert await repo.get(OWNER_USER_ID) is None
     session.identity[(UserRow, OWNER_USER_ID)] = _user_row()
     got = await repo.get(OWNER_USER_ID)
@@ -169,7 +182,7 @@ async def test_user_repository_add_get_lookup_and_updates() -> None:
 
     found = await repo.get_by_email("  NILE-owner@EXAMPLE.com ")
     assert found is not None and found.id == OWNER_USER_ID
-    sql = compiled(session.executed[0][0])
+    sql = compiled(session.executed[2][0])
     assert "lower(users.email)" in sql
     assert await repo.get_by_email("missing@example.com") is None
 

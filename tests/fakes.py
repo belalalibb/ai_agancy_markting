@@ -333,6 +333,22 @@ class FakeConnectedAccountRepository:
         return True
 
 
+class FakeStatusMarker:
+    """H3: records out-of-band status writes and applies them to the shared store."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+        self.calls: list[tuple[UUID, UUID, AccountStatus]] = []
+
+    async def mark_out_of_band(
+        self, brand_id: UUID, account_id: UUID, status: AccountStatus
+    ) -> bool:
+        self.calls.append((brand_id, account_id, status))
+        return await FakeConnectedAccountRepository(self._s).set_status(
+            brand_id, account_id, status
+        )
+
+
 # ------------------------------------------------------------ stub session --
 class StubResult:
     """Minimal stand-in for a SQLAlchemy ``Result`` (unit tests of the Postgres repos)."""
