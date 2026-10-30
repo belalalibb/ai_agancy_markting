@@ -11,7 +11,7 @@
 | **معرف المهمة** | `SPRINT-07-SCHEDULING-AND-PUBLISHING` |
 | **النوع** | Part A: تصحيحات إلزامية (A-1..A-6) · Part B-0: عقد المزوّد (بلا سلوك جديد للمستخدم) · Part B-1/B-2: ميزة M4 (جدولة + نشر Meta) · **هجرة واحدة** `0006_publishing` |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
-| **يبدأ من** | `main` بعد دمج PR هذا التوجيه (SHA في `WORK_STATE.md` §6). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **يبدأ من** | `main` @ `8361c22` (دمج PR #20 — هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
 | **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-07: scheduling + Meta publishing (M4) + provider contract (D-067/D-068) + SPRINT-06 review fixes` |
 | **الكوميتات** | **أربعة**: Part A ⇒ Part B-0 ⇒ Part B-1 (هجرة + دورة الحياة الموسَّعة + مستودع المهام) ⇒ Part B-2 (الناشر + العامل + API). كل كوميت يُدفع فوراً، **وكل ملف يُدفع فور اكتماله** (`wip:` مسموح ثم يُسحق) |
 | **تبعيات جديدة** | **لا شيء.** لا Temporal، لا Redis، لا LiteLLM. العامل حلقة `asyncio` داخل العملية فوق PostgreSQL (`FOR UPDATE SKIP LOCKED`) خلف `Scheduler` Protocol — قرار `REPOSITORY_EVALUATIONS.md` §5-هـ |
