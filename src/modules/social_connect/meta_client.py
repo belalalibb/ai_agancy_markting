@@ -60,7 +60,13 @@ _URL_SECRET_PARAMS: frozenset[str] = frozenset(
 )
 
 # SPRINT-05 B3/B4: operational reads of a selected Page / its Instagram account.
-POST_FIELDS = "id,message,created_time,permalink_url,status_type,full_picture,is_published"
+# SPRINT-06 A-3: ``attachments{...}`` is a nested field expansion (allowed by the Post v26.0
+# reference); none of the v3.3-deprecated *root* fields (caption/description/link/name/
+# object_id/picture/source/type) is requested — see test A3-U1.
+POST_FIELDS = (
+    "id,message,created_time,permalink_url,status_type,full_picture,is_published,"
+    "attachments{media_type,type,url,media{image{src}}}"
+)
 IG_MEDIA_FIELDS = (
     "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count"
 )

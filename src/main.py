@@ -22,6 +22,7 @@ from src.core import database
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
+from src.modules.content import router as content_router
 from src.modules.social_connect import router as social_connect_router
 from src.modules.tenancy import router as tenancy_router
 
@@ -60,7 +61,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Module 1: Social Connect (Meta Graph API for Facebook & Instagram, "
             "persisted in PostgreSQL). Module 2: Tenancy (tenants, brands, access grants). "
             "Module 3: Auth (Argon2id passwords, HS256 access JWT, rotating HttpOnly "
-            "refresh cookie). All non-auth routes require `Authorization: Bearer <JWT>`."
+            "refresh cookie). Module 4: Content (drafts, revisions, owner-only human approval, "
+            "scheduling — D-055). All non-auth routes require `Authorization: Bearer <JWT>`."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -73,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(auth_router)
     api_v1.include_router(tenancy_router)
     api_v1.include_router(social_connect_router)
+    api_v1.include_router(content_router)
     app.include_router(api_v1)
 
     @app.get("/health", tags=["System"], summary="Liveness probe")

@@ -367,7 +367,7 @@ _NOT_FOUND = "Connection not found."
     responses={
         401: {"description": "token invalid/expired — connection marked reauth_required"},
         403: {"description": "not_connection_owner / insufficient_role"},
-        409: {"description": "connection_revoked — reconnect instead"},
+        409: {"description": "connection_revoked / reauth_required — reconnect instead"},
     },
 )
 async def resync_connection(
@@ -379,13 +379,15 @@ async def resync_connection(
 ) -> ResyncResponse:
     """B2: merge policy — selected Pages still returned keep their selection with a fresh
     token; selected Pages that vanished are dropped and listed in
-    ``removed_selected_page_ids``. Owner-only, checked before any Graph call."""
+    ``removed_selected_page_ids``. Owner-only, checked before any Graph call.
+    SPRINT-06 A-1: a ``reauth_required`` connection answers 409 ``reauth_required`` without
+    touching Meta — only a fresh OAuth can clear that status."""
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     try:
         result = await service.resync(brand_id, connection_id, actor_tenant_id=actor.tenant_id)
     except NotConnectionOwnerError as exc:
         raise _not_owner(exc) from exc
-    except ConnectionRevokedError as exc:
+    except (ConnectionRevokedError, ReauthRequiredError) as exc:
         raise _conflict(exc) from exc
     except MetaGraphError as exc:
         raise _to_http(exc) from exc
@@ -427,7 +429,7 @@ async def get_page_posts(
     except (ReauthRequiredError, ConnectionRevokedError) as exc:
         raise _conflict(exc) from exc
     except MetaGraphError as exc:
-        raise _to_http(exc, operational_read=True) from exc
+        raise _to_http(exc) from exc
     if page is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
     return page
@@ -462,7 +464,7 @@ async def get_instagram_media(
     except (ReauthRequiredError, ConnectionRevokedError) as exc:
         raise _conflict(exc) from exc
     except MetaGraphError as exc:
-        raise _to_http(exc, operational_read=True) from exc
+        raise _to_http(exc) from exc
     if page is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
     return page
@@ -491,24 +493,27 @@ def _not_owner(exc: NotConnectionOwnerError) -> HTTPException:
 
 
 def _required_action(exc: MetaGraphError) -> str | None:
-    """Tell the client what to do next (machine-readable, see SPRINT-01 review §5)."""
+    """Tell the client what to do next (machine-readable, see SPRINT-01 review §5).
+
+    SPRINT-06 A-2: a permission failure (missing scope / Page role) is resolved the same way
+    everywhere — the user re-runs OAuth, i.e. ``reconnect``. There is no separate
+    "add scopes" action: the authorize URL always requests the full scope set.
+    """
     if isinstance(exc, MetaRateLimitError):
         return "retry_later"
-    if isinstance(exc, MetaTokenExpiredError | MetaOAuthError):
+    if isinstance(exc, MetaTokenExpiredError | MetaOAuthError | MetaPermissionError):
         return "reconnect"
-    if isinstance(exc, MetaPermissionError):
-        return "reauthorize_with_additional_scopes"
     return None
 
 
-def _to_http(exc: MetaGraphError, *, operational_read: bool = False) -> HTTPException:
-    """``operational_read`` (SPRINT-05 B3/B4): a Page-token permission failure means the
-    stored grant is insufficient ⇒ ``required_action: reconnect``; transient/network errors
-    carry no provider details (502 without ``code``/``message`` leakage)."""
+def _to_http(exc: MetaGraphError) -> HTTPException:
+    """Map a provider failure to HTTP — identical for **every** Meta route (SPRINT-06 A-2).
+
+    Transient/network errors never leak provider details: fixed 502
+    ``{"provider": "meta", "error": "upstream_unavailable", "required_action": null}``.
+    """
     action = _required_action(exc)
-    if operational_read and isinstance(exc, MetaPermissionError):
-        action = "reconnect"
-    if operational_read and isinstance(exc, MetaTransientError | MetaNetworkError):
+    if isinstance(exc, MetaTransientError | MetaNetworkError):
         return HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             detail={"provider": "meta", "error": "upstream_unavailable", "required_action": None},
@@ -533,6 +538,4 @@ def _to_http(exc: MetaGraphError, *, operational_read: bool = False) -> HTTPExce
         return HTTPException(status.HTTP_401_UNAUTHORIZED, detail=detail)
     if isinstance(exc, MetaPermissionError):
         return HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
-    if isinstance(exc, MetaTransientError | MetaNetworkError):
-        return HTTPException(status.HTTP_502_BAD_GATEWAY, detail=detail)
     return HTTPException(status.HTTP_400_BAD_REQUEST, detail=detail)

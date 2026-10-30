@@ -363,6 +363,7 @@ class FakeConnectedAccountRepository:
         }
         if granted_scopes is not None:
             update["granted_scopes"] = list(granted_scopes)
+            update["scopes_verified"] = True
         self.rows[account_id] = row.model_copy(update=update)
         return True
 
@@ -457,3 +458,86 @@ def compiled(statement: object) -> str:
     from sqlalchemy.dialects import postgresql
 
     return str(statement.compile(dialect=postgresql.dialect()))  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------------------------ content --
+class FakeContentRepository:
+    """In-memory :class:`ContentRepository` (SPRINT-06). ``compare_and_set_status`` mirrors the
+    PG ``UPDATE … WHERE status = :expected`` semantics so the service's optimistic path is
+    exercised without a database."""
+
+    def __init__(self) -> None:
+        from src.modules.content.domain.models import (
+            ApprovalEvent,
+            ContentItem,
+            ContentRevision,
+        )
+
+        self.items: dict[UUID, ContentItem] = {}
+        self.revisions: dict[UUID, list[ContentRevision]] = {}
+        self.events: dict[UUID, list[ApprovalEvent]] = {}
+
+    async def create_item(self, item, revision):  # noqa: ANN001, ANN201
+        self.items[item.id] = item
+        self.revisions[item.id] = []
+        self.events[item.id] = []
+        await self.add_revision(revision)
+        return self.items[item.id]
+
+    async def get_item(self, brand_id: UUID, item_id: UUID):  # noqa: ANN201
+        item = self.items.get(item_id)
+        return item if item is not None and item.brand_id == brand_id else None
+
+    async def list_items(self, brand_id: UUID, *, status, limit: int, cursor):  # noqa: ANN001, ANN201
+        rows = [i for i in self.items.values() if i.brand_id == brand_id]
+        if status is not None:
+            rows = [i for i in rows if i.status is status]
+        rows.sort(key=lambda i: (i.created_at, i.id), reverse=True)
+        if cursor is not None:
+            rows = [i for i in rows if (i.created_at, i.id) < cursor]
+        return rows[: limit + 1]
+
+    async def next_revision_no(self, item_id: UUID) -> int:
+        return len(self.revisions.get(item_id, [])) + 1
+
+    async def add_revision(self, revision):  # noqa: ANN001, ANN201
+        self.revisions.setdefault(revision.item_id, []).append(revision)
+        item = self.items[revision.item_id]
+        self.items[item.id] = item.model_copy(
+            update={"current_revision_id": revision.id, "updated_at": revision.created_at}
+        )
+        return revision
+
+    async def list_revisions(self, item_id: UUID, *, limit: int):  # noqa: ANN201
+        return sorted(self.revisions.get(item_id, []), key=lambda r: r.revision_no, reverse=True)[
+            :limit
+        ]
+
+    async def add_event(self, event):  # noqa: ANN001, ANN201
+        self.events.setdefault(event.item_id, []).append(event)
+        return event
+
+    async def list_events(self, item_id: UUID):  # noqa: ANN201
+        return sorted(self.events.get(item_id, []), key=lambda e: e.created_at)
+
+    async def set_target_page(self, item_id: UUID, target_page_id: str | None) -> None:
+        self.items[item_id] = self.items[item_id].model_copy(
+            update={"target_page_id": target_page_id}
+        )
+
+    async def compare_and_set_status(
+        self,
+        item_id: UUID,
+        *,
+        expected,
+        new,
+        scheduled_for,
+        updated_at,  # noqa: ANN001
+    ) -> bool:
+        item = self.items.get(item_id)
+        if item is None or item.status is not expected:
+            return False
+        self.items[item_id] = item.model_copy(
+            update={"status": new, "scheduled_for": scheduled_for, "updated_at": updated_at}
+        )
+        return True

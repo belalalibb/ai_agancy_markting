@@ -59,5 +59,7 @@ class ConnectedAccountRepository(Protocol):
     ) -> bool:
         """SPRINT-05 B2 (resync): refresh expiry / scopes / ``last_synced_at`` of the stored
         user token **without** touching the ciphertext, the status or the Pages.
-        ``granted_scopes=None`` keeps the stored scopes. ``False`` when not found."""
+        ``granted_scopes=None`` keeps the stored scopes **and** ``scopes_verified``
+        (unknown ≠ empty — SPRINT-06 A-1); a list (even ``[]``) is written verbatim and sets
+        ``scopes_verified = True``. ``False`` when not found."""
         ...

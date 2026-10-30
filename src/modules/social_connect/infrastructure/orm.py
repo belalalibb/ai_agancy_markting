@@ -55,6 +55,10 @@ class SocialConnectionRow(Base):
     granted_scopes: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )
+    # SPRINT-06 A-1 (migration 0005): scopes came from a successful ``/debug_token``.
+    scopes_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     connected_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     last_synced_at: Mapped[datetime | None] = mapped_column(
