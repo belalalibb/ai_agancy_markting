@@ -8,14 +8,16 @@ numeric claims (prices, percentages, dates, counts) that are absent from the bri
 from __future__ import annotations
 
 import hashlib
-from typing import Literal
+from typing import Final, Literal
 
-from src.modules.content.domain.models import Channel
+from src.modules.content.domain.models import CHANNEL_LIMITS, Channel
 
 Tone = Literal["professional", "friendly", "promotional"]
 Language = Literal["ar", "en"]
 
-CHANNEL_LIMITS: dict[Channel, int] = {Channel.INSTAGRAM: 2200, Channel.FACEBOOK_PAGE: 5000}
+# SPRINT-07 A-6 (D-069): bump whenever the templates below change so prompt quality can be
+# compared across versions; stored as a **public** provenance field next to ``prompt_hash``.
+PROMPT_VERSION: Final = "content_draft@1"
 _CHANNEL_LABEL = {Channel.INSTAGRAM: "Instagram", Channel.FACEBOOK_PAGE: "Facebook Page"}
 _TONE_AR = {"professional": "مهنية", "friendly": "ودودة", "promotional": "ترويجية"}
 

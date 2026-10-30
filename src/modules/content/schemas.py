@@ -1,7 +1,13 @@
-"""Public request/response schemas of ``content`` (SPRINT-06 B3).
+"""Public request/response schemas of ``content`` (SPRINT-06 B3, SPRINT-07 A-1/A-4).
 
 Zero-Secret by construction: nothing here ever carries a token. ``ContentItemPublic`` is
 the same for every role; the detail view adds revisions (last 20) and the approval log.
+
+SPRINT-07 A-1 (D-066): ``ContentRevisionPublic.provenance`` is projected onto
+:data:`PUBLIC_PROVENANCE_KEYS` (``kind``, ``generated_at``, ``prompt_version``) for every
+role. The private fields (provider/model/prompt_hash/tokens/latency/credential_mode/
+truncated) surface **only** through ``ContentItemDetailWithUsage.generation_log`` (A-4),
+the model returned to OWNER/MANAGER; VIEWER receives ``ContentItemDetail`` without the key.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from src.modules.content.domain.models import (
     ApprovalEvent,
     ContentItem,
     ContentRevision,
+    public_provenance,
 )
 
 ChannelLiteral = Literal["facebook_page", "instagram"]
@@ -80,7 +87,9 @@ class ContentRevisionPublic(BaseModel):
 
     @classmethod
     def from_domain(cls, revision: ContentRevision) -> ContentRevisionPublic:
-        return cls.model_validate(revision.model_dump(exclude={"item_id"}))
+        data = revision.model_dump(exclude={"item_id"})
+        data["provenance"] = public_provenance(revision.provenance)  # A-1
+        return cls.model_validate(data)
 
 
 class ApprovalEventPublic(BaseModel):
@@ -120,11 +129,38 @@ class ContentItemPublic(BaseModel):
 
 
 class ContentItemDetail(ContentItemPublic):
+    """Detail view for **every** role (no ``generation_log`` key at all — A-4)."""
+
     revisions: list[ContentRevisionPublic] = Field(default_factory=list)
     approval_events: list[ApprovalEventPublic] = Field(default_factory=list)
-    # SPRINT-06 B-2: token usage of the AI generations behind this item — OWNER/MANAGER only;
-    # the router strips the field for VIEWER (visibility table §2-0 b).
-    generation_log: list[dict[str, Any]] | None = None
+
+
+class GenerationLogEntry(BaseModel):
+    """One AI generation behind the item — the **private** provenance fields (A-1/A-4)."""
+
+    revision_no: int
+    generated_at: datetime | None = None
+    prompt_version: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    prompt_hash: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    latency_ms: int | None = None
+    credential_mode: str | None = None
+    truncated: bool = False
+
+    @classmethod
+    def from_revision(cls, revision: ContentRevision) -> GenerationLogEntry:
+        known = set(cls.model_fields) - {"revision_no"}
+        data = {k: v for k, v in revision.provenance.items() if k in known}
+        return cls.model_validate({**data, "revision_no": revision.revision_no})
+
+
+class ContentItemDetailWithUsage(ContentItemDetail):
+    """Detail view for OWNER/MANAGER: adds the generation log (visibility table §2-0 b)."""
+
+    generation_log: list[GenerationLogEntry] = Field(default_factory=list)
 
 
 class ContentItemPage(BaseModel):

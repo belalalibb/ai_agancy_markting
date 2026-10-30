@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from src.modules.content.domain.models import ContentStatus
 from src.modules.social_connect.domain.models import (
@@ -129,9 +130,11 @@ def test_b3_u1_create_validates_body_and_channel(client: TestClient, as_: Header
         ).status_code
         == 422
     )
+    # SPRINT-07 A-2: the 5000 cap is the schema ceiling; the channel limit is enforced in the
+    # service (Instagram 2200 ⇒ 422 body_too_long, Facebook 5000 ⇒ 201).
     assert (
         client.post(
-            f"{BASE}/items", json={"channel": "instagram", "body": "x" * 5000}, headers=owner
+            f"{BASE}/items", json={"channel": "facebook_page", "body": "x" * 5000}, headers=owner
         ).status_code
         == 201
     )
@@ -359,52 +362,224 @@ def test_b3_u5_manager_archives_only_own_items(
 
 
 # ------------------------------------------------------ B3-U6 generation_log visibility --
-def test_b3_u6_generation_log_removed_for_viewer(
-    client: TestClient, store: FakeStore, as_: Headers, content_repo: FakeContentRepository
-) -> None:
-    from src.modules.content.domain.models import ContentRevision
+AI_PROVENANCE = {
+    "kind": "ai_generated",
+    "generated_at": "2026-10-30T12:00:00+00:00",
+    "prompt_version": "content_draft@1",
+    "provider": "fake",
+    "model": "fake-1",
+    "prompt_hash": "abcd1234abcd1234",
+    "prompt_tokens": 12,
+    "completion_tokens": 30,
+    "latency_ms": 7,
+    "credential_mode": "platform",
+    "truncated": False,
+}
+PRIVATE_KEYS = {
+    "provider",
+    "model",
+    "prompt_hash",
+    "prompt_tokens",
+    "completion_tokens",
+    "latency_ms",
+}
 
-    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
-    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
-    item_id = _create(client, as_(OWNER_ID))["id"]
-    # Simulate an AI revision (Part B-2 writes exactly this shape).
+
+def _add_ai_revision(content_repo: FakeContentRepository, item_id: str, **extra: object) -> None:
     import asyncio
+    from datetime import UTC, datetime
 
     asyncio.run(
         content_repo.add_revision(
-            ContentRevision(
-                item_id=UUID(item_id),
-                revision_no=2,
-                body="AI text",
-                provenance={
-                    "kind": "ai_generated",
-                    "provider": "fake",
-                    "model": "fake-1",
-                    "prompt_hash": "abcd1234abcd1234",
-                    "generated_at": "2026-10-30T12:00:00+00:00",
-                    "prompt_tokens": 12,
-                    "completion_tokens": 30,
-                },
-                created_by_tenant_id=OWNER_ID,
-            )
+            UUID(item_id),
+            body="AI text",
+            provenance={**AI_PROVENANCE, **extra},
+            created_by_tenant_id=OWNER_ID,
+            created_at=datetime.now(tz=UTC),
         )
     )
+
+
+def _walk_keys(node: object) -> set[str]:
+    """Every dict key anywhere in a JSON document (recursive)."""
+    keys: set[str] = set()
+    if isinstance(node, dict):
+        for k, v in node.items():
+            keys.add(k)
+            keys |= _walk_keys(v)
+    elif isinstance(node, list):
+        for v in node:
+            keys |= _walk_keys(v)
+    return keys
+
+
+def test_b3_u6_generation_log_removed_for_viewer(
+    client: TestClient, store: FakeStore, as_: Headers, content_repo: FakeContentRepository
+) -> None:
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    item_id = _create(client, as_(OWNER_ID))["id"]
+    _add_ai_revision(content_repo, item_id)
     for tenant in (OWNER_ID, AGENCY_ID):
         body = client.get(f"{BASE}/items/{item_id}", headers=as_(tenant)).json()
         assert body["generation_log"] == [
             {
+                "revision_no": 2,
+                "generated_at": "2026-10-30T12:00:00Z",
+                "prompt_version": "content_draft@1",
                 "provider": "fake",
                 "model": "fake-1",
                 "prompt_hash": "abcd1234abcd1234",
-                "generated_at": "2026-10-30T12:00:00+00:00",
                 "prompt_tokens": 12,
                 "completion_tokens": 30,
-                "revision_no": 2,
+                "latency_ms": 7,
+                "credential_mode": "platform",
+                "truncated": False,
             }
         ]
     viewer_body = client.get(f"{BASE}/items/{item_id}", headers=as_(STRANGER_ID)).json()
     assert "generation_log" not in viewer_body
     assert viewer_body["revisions"][0]["provenance"]["kind"] == "ai_generated"  # evidence stays
+
+
+# ------------------------------------------------- SPRINT-07 A1-U1 / A1-U2 (D-066) ------------
+def test_a1_u1_viewer_response_has_no_private_provenance_key_anywhere(
+    client: TestClient, store: FakeStore, as_: Headers, content_repo: FakeContentRepository
+) -> None:
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    item_id = _create(client, as_(OWNER_ID))["id"]
+    _add_ai_revision(content_repo, item_id)
+    body = client.get(f"{BASE}/items/{item_id}", headers=as_(STRANGER_ID)).json()
+    assert _walk_keys(body) & PRIVATE_KEYS == set()
+    assert body["revisions"][0]["provenance"] == {
+        "kind": "ai_generated",
+        "generated_at": "2026-10-30T12:00:00+00:00",
+        "prompt_version": "content_draft@1",
+    }
+    # the list endpoint carries no provenance at all
+    listing = client.get(f"{BASE}/items", headers=as_(STRANGER_ID)).json()
+    assert _walk_keys(listing) & PRIVATE_KEYS == set()
+
+
+def test_a1_u2_owner_sees_private_fields_only_in_generation_log(
+    client: TestClient, as_: Headers, content_repo: FakeContentRepository
+) -> None:
+    item_id = _create(client, as_(OWNER_ID))["id"]
+    _add_ai_revision(content_repo, item_id)
+    body = client.get(f"{BASE}/items/{item_id}", headers=as_(OWNER_ID)).json()
+    for rev in body["revisions"]:
+        assert set(rev["provenance"]) <= {"kind", "generated_at", "prompt_version"}
+    assert PRIVATE_KEYS <= set(body["generation_log"][0])
+
+
+# ------------------------------------------------------- SPRINT-07 A2-U1 / A2-U2 ------------
+@pytest.mark.parametrize(
+    ("channel", "length", "expected"),
+    [
+        ("instagram", 2201, 422),
+        ("instagram", 2200, 201),
+        ("facebook_page", 5000, 201),
+    ],
+    ids=["ig-2201-rejected", "ig-2200-ok", "fb-5000-ok"],
+)
+def test_a2_u1_channel_limit_enforced_on_create_and_update(
+    client: TestClient, as_: Headers, channel: str, length: int, expected: int
+) -> None:
+    owner = as_(OWNER_ID)
+    created = client.post(
+        f"{BASE}/items", json={"channel": channel, "body": "x" * length}, headers=owner
+    )
+    assert created.status_code == expected
+    if expected == 422:
+        assert created.json()["detail"] == {
+            "error": "body_too_long",
+            "message": f"body of {length} chars exceeds the {channel} limit of 2200",
+            "channel": channel,
+            "limit": 2200,
+            "length": length,
+        }
+    item_id = _create(client, owner, channel=channel)["id"]
+    updated = client.put(
+        f"{BASE}/items/{item_id}/body", json={"body": "y" * length}, headers=owner
+    )
+    assert updated.status_code == (200 if expected == 201 else 422)
+    if expected == 422:
+        assert updated.json()["detail"]["error"] == "body_too_long"
+
+
+def test_a2_u2_generate_truncates_to_channel_limit_and_records_it(
+    client: TestClient, app: FastAPI, as_: Headers
+) -> None:
+    from src.modules.ai_gateway.dependencies import get_ai_gateway
+    from src.modules.ai_gateway.gateway import CompletionResult
+
+    class LongProvider:
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            return CompletionResult(
+                text="ن" * 2300,
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                prompt_tokens=5,
+                completion_tokens=9,
+            )
+
+    app.dependency_overrides[get_ai_gateway] = lambda: LongProvider()
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner, channel="instagram")["id"]
+    assert _generate(client, owner, item_id).status_code == 200
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert len(detail["revisions"][0]["body"]) == 2200
+    assert detail["generation_log"][0]["truncated"] is True
+    assert "truncated" not in detail["revisions"][0]["provenance"]  # private field
+
+
+# ---------------------------------------------------------------- SPRINT-07 A4-U1 ------------
+def test_a4_u1_viewer_detail_keeps_null_fields_and_lacks_generation_log_key(
+    client: TestClient, store: FakeStore, as_: Headers
+) -> None:
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    item_id = _create(client, as_(OWNER_ID), target_page_id=None)["id"]
+    body = client.get(f"{BASE}/items/{item_id}", headers=as_(STRANGER_ID)).json()
+    assert "target_page_id" in body and body["target_page_id"] is None
+    assert "scheduled_for" in body and body["scheduled_for"] is None
+    assert "generation_log" not in body
+    owner_body = client.get(f"{BASE}/items/{item_id}", headers=as_(OWNER_ID)).json()
+    assert owner_body["generation_log"] == []  # no AI revision yet — empty list, not absent
+    assert owner_body["scheduled_for"] is None
+
+
+# ---------------------------------------------------------------- SPRINT-07 A5-U1 ------------
+@pytest.mark.parametrize(("used", "expected"), [(199_900, 200), (200_000, 429)])
+def test_a5_u1_daily_token_budget(
+    client: TestClient, as_: Headers, content_repo: FakeContentRepository, used: int, expected: int
+) -> None:
+    content_repo.token_usage_override = used
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner)["id"]
+    response = _generate(client, owner, item_id)
+    assert response.status_code == expected
+    if expected == 429:
+        detail = response.json()["detail"]
+        assert detail["error"] == "generation_budget_exceeded"
+        assert detail["budget"] == 200_000
+        assert detail["used"] == 200_000
+        assert 1 <= detail["resets_in_seconds"] <= 86_400
+        assert response.headers["Retry-After"] == str(detail["resets_in_seconds"])
+
+
+# ---------------------------------------------------------------- SPRINT-07 A6-U1 ------------
+def test_a6_u1_prompt_version_is_public_for_every_role(
+    client: TestClient, store: FakeStore, as_: Headers
+) -> None:
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner)["id"]
+    assert _generate(client, owner, item_id).status_code == 200
+    for tenant in (OWNER_ID, AGENCY_ID, STRANGER_ID):
+        body = client.get(f"{BASE}/items/{item_id}", headers=as_(tenant)).json()
+        assert body["revisions"][0]["provenance"]["prompt_version"] == "content_draft@1"
 
 
 # --------------------------------------------------------------- B3-U7 brand isolation --

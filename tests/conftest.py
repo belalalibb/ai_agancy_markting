@@ -250,7 +250,16 @@ def app(
     application = create_app(settings)
     application.dependency_overrides[get_repository] = lambda: fake_repo
     application.dependency_overrides[get_status_marker] = lambda: status_marker
-    application.dependency_overrides[get_content_repository] = lambda: content_repo
+
+    def _content_repo_unit_of_work():  # noqa: ANN202
+        # A-3: the PG session releases row locks on commit/rollback; the fake releases its
+        # per-item asyncio.Lock when the request's dependency scope closes.
+        try:
+            yield content_repo
+        finally:
+            content_repo.release_locks()
+
+    application.dependency_overrides[get_content_repository] = _content_repo_unit_of_work
     application.dependency_overrides[get_user_repository] = lambda: FakeUserRepository(store)
     application.dependency_overrides[get_refresh_session_repository] = lambda: (
         FakeRefreshSessionRepository(store)

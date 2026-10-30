@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.modules.content.domain.models import ContentStatus
+from src.modules.content.domain.models import Channel, ContentStatus
 
 
 class ContentError(Exception):
@@ -75,6 +75,32 @@ class InstagramNotLinkedError(ContentError):
 
     error = "instagram_not_linked"
     http_status = 422
+
+
+class BodyTooLongError(ContentError):
+    """The body exceeds the hard character limit of the channel (SPRINT-07 A-2)."""
+
+    error = "body_too_long"
+    http_status = 422
+
+    def __init__(self, channel: Channel, limit: int, length: int) -> None:
+        self.channel = channel
+        self.limit = limit
+        self.length = length
+        super().__init__(f"body of {length} chars exceeds the {channel.value} limit of {limit}")
+
+
+class GenerationBudgetExceededError(ContentError):
+    """The brand's daily AI token budget is exhausted (SPRINT-07 A-5)."""
+
+    error = "generation_budget_exceeded"
+    http_status = 429
+
+    def __init__(self, budget: int, used: int, resets_in_seconds: int) -> None:
+        self.budget = budget
+        self.used = used
+        self.resets_in_seconds = resets_in_seconds
+        super().__init__()
 
 
 class GenerationRateLimitedError(ContentError):

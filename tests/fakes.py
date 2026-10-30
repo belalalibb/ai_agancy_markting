@@ -462,11 +462,14 @@ def compiled(statement: object) -> str:
 
 # ------------------------------------------------------------------ content --
 class FakeContentRepository:
-    """In-memory :class:`ContentRepository` (SPRINT-06). ``compare_and_set_status`` mirrors the
-    PG ``UPDATE … WHERE status = :expected`` semantics so the service's optimistic path is
-    exercised without a database."""
+    """In-memory :class:`ContentRepository` (SPRINT-06/07). ``compare_and_set_status`` mirrors
+    the PG ``UPDATE … WHERE status = :expected`` semantics; ``get_for_update`` serialises
+    callers per item with an ``asyncio.Lock`` (A-3) that is released when the request's
+    ``release_locks()`` runs (the conftest override does this after each request)."""
 
     def __init__(self) -> None:
+        import asyncio
+
         from src.modules.content.domain.models import (
             ApprovalEvent,
             ContentItem,
@@ -476,17 +479,39 @@ class FakeContentRepository:
         self.items: dict[UUID, ContentItem] = {}
         self.revisions: dict[UUID, list[ContentRevision]] = {}
         self.events: dict[UUID, list[ApprovalEvent]] = {}
+        self._locks: dict[UUID, asyncio.Lock] = {}
+        self.locked: list[UUID] = []
+        self.token_usage_override: int | None = None
 
     async def create_item(self, item, revision):  # noqa: ANN001, ANN201
         self.items[item.id] = item
         self.revisions[item.id] = []
         self.events[item.id] = []
-        await self.add_revision(revision)
+        await self._store_revision(revision)
         return self.items[item.id]
 
     async def get_item(self, brand_id: UUID, item_id: UUID):  # noqa: ANN201
         item = self.items.get(item_id)
         return item if item is not None and item.brand_id == brand_id else None
+
+    async def get_for_update(self, brand_id: UUID, item_id: UUID):  # noqa: ANN201
+        import asyncio
+
+        item = await self.get_item(brand_id, item_id)
+        if item is None:
+            return None
+        lock = self._locks.setdefault(item_id, asyncio.Lock())
+        await lock.acquire()
+        self.locked.append(item_id)
+        return item
+
+    def release_locks(self) -> None:
+        """End of the unit of work (what ``commit``/``rollback`` does on PG)."""
+        for item_id in self.locked:
+            lock = self._locks.get(item_id)
+            if lock is not None and lock.locked():
+                lock.release()
+        self.locked.clear()
 
     async def list_items(self, brand_id: UUID, *, status, limit: int, cursor):  # noqa: ANN001, ANN201
         rows = [i for i in self.items.values() if i.brand_id == brand_id]
@@ -495,12 +520,38 @@ class FakeContentRepository:
         rows.sort(key=lambda i: (i.created_at, i.id), reverse=True)
         if cursor is not None:
             rows = [i for i in rows if (i.created_at, i.id) < cursor]
-        return rows[: limit + 1]
+        return [(i, self._current_body(i)) for i in rows[: limit + 1]]
 
-    async def next_revision_no(self, item_id: UUID) -> int:
-        return len(self.revisions.get(item_id, [])) + 1
+    def _current_body(self, item) -> str | None:  # noqa: ANN001
+        for rev in self.revisions.get(item.id, []):
+            if rev.id == item.current_revision_id:
+                return rev.body
+        return None
 
-    async def add_revision(self, revision):  # noqa: ANN001, ANN201
+    async def add_revision(  # noqa: ANN201
+        self,
+        item_id: UUID,
+        *,
+        body: str,
+        provenance: dict,
+        created_by_tenant_id: UUID,
+        created_at,  # noqa: ANN001
+        media_refs: list[dict] | None = None,
+    ):
+        from src.modules.content.domain.models import ContentRevision
+
+        revision = ContentRevision(
+            item_id=item_id,
+            revision_no=len(self.revisions.get(item_id, [])) + 1,
+            body=body,
+            media_refs=list(media_refs or []),
+            provenance=provenance,
+            created_by_tenant_id=created_by_tenant_id,
+            created_at=created_at,
+        )
+        return await self._store_revision(revision)
+
+    async def _store_revision(self, revision):  # noqa: ANN001, ANN201
         self.revisions.setdefault(revision.item_id, []).append(revision)
         item = self.items[revision.item_id]
         self.items[item.id] = item.model_copy(
@@ -541,3 +592,25 @@ class FakeContentRepository:
             update={"status": new, "scheduled_for": scheduled_for, "updated_at": updated_at}
         )
         return True
+
+    def _ai_revisions_since(self, brand_id: UUID, since):  # noqa: ANN001, ANN202
+        return [
+            r
+            for item in self.items.values()
+            if item.brand_id == brand_id
+            for r in self.revisions.get(item.id, [])
+            if r.created_at >= since and r.provenance.get("kind") == "ai_generated"
+        ]
+
+    async def ai_token_usage_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
+        if self.token_usage_override is not None:
+            return self.token_usage_override
+        return sum(
+            int(r.provenance.get("prompt_tokens") or 0)
+            + int(r.provenance.get("completion_tokens") or 0)
+            for r in self._ai_revisions_since(brand_id, since)
+        )
+
+    async def oldest_ai_generation_at(self, brand_id: UUID, since):  # noqa: ANN001, ANN201
+        rows = self._ai_revisions_since(brand_id, since)
+        return min((r.created_at for r in rows), default=None)

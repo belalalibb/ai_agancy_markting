@@ -22,6 +22,7 @@ from src.modules.content.domain.lifecycle import (
     transition,
 )
 from src.modules.content.domain.models import (
+    CHANNEL_LIMITS,
     ApprovalAction,
     ApprovalEvent,
     Channel,
@@ -32,8 +33,10 @@ from src.modules.content.domain.models import (
 from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.exceptions import (
     ApprovalRequiresOwnerError,
+    BodyTooLongError,
     ContentInsufficientRoleError,
     ContentNotFoundError,
+    GenerationBudgetExceededError,
     GenerationRateLimitedError,
     InstagramNotLinkedError,
     InvalidTransitionError,
@@ -42,7 +45,7 @@ from src.modules.content.exceptions import (
     TargetPageNotSelectedError,
 )
 from src.modules.content.prompts import (
-    CHANNEL_LIMITS,
+    PROMPT_VERSION,
     Language,
     Tone,
     prompt_hash,
@@ -63,6 +66,16 @@ GENERATION_BUCKET = "ai_generate_brand"
 GENERATION_LIMIT_PER_HOUR = 20
 GENERATION_WINDOW_SECONDS = 3600
 GENERATION_STATES = frozenset({ContentStatus.DRAFT, ContentStatus.REJECTED})
+# A-5: daily token budget window (per brand; summed from revision provenance).
+TOKEN_BUDGET_WINDOW = timedelta(hours=24)
+
+
+def enforce_channel_limit(channel: Channel, body: str) -> None:
+    """A-2: 422 ``body_too_long`` when ``body`` exceeds the channel's hard limit."""
+    limit = CHANNEL_LIMITS[channel]
+    if len(body) > limit:
+        raise BodyTooLongError(channel, limit, len(body))
+
 
 _EVENT_FOR_ACTION: dict[Action, ApprovalAction] = {
     Action.SUBMIT: ApprovalAction.SUBMITTED,
@@ -77,9 +90,12 @@ class ContentService:
         self,
         repository: ContentRepository,
         connections: ConnectedAccountRepository,
+        *,
+        daily_token_budget: int = 200_000,
     ) -> None:
         self._repo = repository
         self._connections = connections
+        self._daily_token_budget = daily_token_budget
 
     # ------------------------------------------------------------ create ---
     async def create_item(
@@ -92,6 +108,7 @@ class ContentService:
         target_page_id: str | None,
     ) -> ContentItem:
         """Draft + revision 1 with ``provenance={"kind": "human"}``."""
+        enforce_channel_limit(channel, body)
         now = datetime.now(tz=UTC)
         item = ContentItem(
             brand_id=brand_id,
@@ -131,9 +148,8 @@ class ContentService:
         events = await self._repo.list_events(item_id)
         return item, revisions, events
 
-    async def current_body(self, item: ContentItem) -> str | None:
-        revisions = await self._repo.list_revisions(item.id, limit=1)
-        return revisions[0].body if revisions else None
+    async def list_revisions(self, item_id: UUID, *, limit: int) -> list[ContentRevision]:
+        return await self._repo.list_revisions(item_id, limit=limit)
 
     async def list_items(
         self,
@@ -142,7 +158,8 @@ class ContentService:
         status: ContentStatus | None,
         limit: int,
         cursor: tuple[datetime, UUID] | None,
-    ) -> tuple[list[ContentItem], bool]:
+    ) -> tuple[list[tuple[ContentItem, str | None]], bool]:
+        """A-4: ``(item, current_body)`` pairs from a single query."""
         rows = await self._repo.list_items(brand_id, status=status, limit=limit, cursor=cursor)
         has_more = len(rows) > limit
         return rows[:limit], has_more
@@ -160,19 +177,13 @@ class ContentService:
     ) -> ContentItem:
         """New revision. From ``pending_approval``/``approved``/``rejected``/``scheduled`` the
         item returns to ``draft`` with an automatic ``withdrawn`` event (B2-U2). ``archived``
-        items are immutable ⇒ 409 ``invalid_transition``."""
-        item = await self.get_item(brand_id, item_id)
+        items are immutable ⇒ 409 ``invalid_transition``. A-3: the item row is locked
+        (``get_for_update``) before the revision number is assigned."""
+        item = await self._lock_item(brand_id, item_id)
         if item.status is ContentStatus.ARCHIVED:
             raise InvalidTransitionError(item.status, "edit")
+        enforce_channel_limit(item.channel, body)
         now = datetime.now(tz=UTC)
-        revision = ContentRevision(
-            item_id=item.id,
-            revision_no=await self._repo.next_revision_no(item.id),
-            body=body,
-            provenance=provenance or {"kind": "human"},
-            created_by_tenant_id=actor_tenant_id,
-            created_at=now,
-        )
         if item.status in EDIT_RESETS_TO_DRAFT:
             moved = await self._repo.compare_and_set_status(
                 item.id,
@@ -183,7 +194,13 @@ class ContentService:
             )
             if not moved:
                 raise InvalidTransitionError(item.status, "edit", "item changed concurrently")
-            await self._repo.add_revision(revision)
+            revision = await self._repo.add_revision(
+                item.id,
+                body=body,
+                provenance=provenance or {"kind": "human"},
+                created_by_tenant_id=actor_tenant_id,
+                created_at=now,
+            )
             await self._repo.add_event(
                 ApprovalEvent(
                     item_id=item.id,
@@ -196,8 +213,20 @@ class ContentService:
                 )
             )
         else:
-            await self._repo.add_revision(revision)
+            await self._repo.add_revision(
+                item.id,
+                body=body,
+                provenance=provenance or {"kind": "human"},
+                created_by_tenant_id=actor_tenant_id,
+                created_at=now,
+            )
         return await self.get_item(brand_id, item_id)
+
+    async def _lock_item(self, brand_id: UUID, item_id: UUID) -> ContentItem:
+        item = await self._repo.get_for_update(brand_id, item_id)
+        if item is None:
+            raise ContentNotFoundError()
+        return item
 
     # --------------------------------------------------------- transitions ---
     async def act(
@@ -302,10 +331,12 @@ class ContentService:
         """Ask the gateway for a draft and store it as a **new revision** with
         ``provenance={"kind": "ai_generated", ...}`` (D-055 evidence). State must be ``draft``
         or ``rejected`` (else 409 ``invalid_transition``); the item is ``draft`` afterwards.
-        20 generations / hour / brand (429 ``generation_rate_limited``). Usage is logged as a
+        20 generations / hour / brand (429 ``generation_rate_limited``) and a daily token
+        budget per brand (A-5, 429 ``generation_budget_exceeded``). Usage is logged as a
         structured INFO line (ids + token counts only, never the text) and counted in
-        ``counters["ai_completions"]`` / ``["ai_failures"]``."""
-        item = await self.get_item(brand_id, item_id)
+        ``counters["ai_completions"]`` / ``["ai_failures"]``. A-3: the item row is locked
+        before the revision is numbered."""
+        item = await self._lock_item(brand_id, item_id)
         if item.status not in GENERATION_STATES:
             raise InvalidTransitionError(item.status, "generate")
         retry_after = limiter.hit(
@@ -313,6 +344,7 @@ class ContentService:
         )
         if retry_after is not None:
             raise GenerationRateLimitedError(retry_after)
+        await self._check_token_budget(brand_id)
         system = system_prompt(item.channel, tone=tone, language=language)
         user = user_prompt(brief)
         request = CompletionRequest(
@@ -343,25 +375,24 @@ class ContentService:
             result.latency_ms,
         )
         now = datetime.now(tz=UTC)
-        body = result.text.strip()[: CHANNEL_LIMITS[item.channel]] or "…"
+        text = result.text.strip()
+        limit = CHANNEL_LIMITS[item.channel]
+        truncated = len(text) > limit  # A-2: the cut is kept but **recorded** (private field)
+        body = text[:limit] or "…"
         provenance: dict[str, Any] = {
+            # public (A-1 / A-6)
             "kind": "ai_generated",
+            "generated_at": now.isoformat(),
+            "prompt_version": PROMPT_VERSION,
+            # private — generation_log for OWNER/MANAGER only
             "provider": result.provider,
             "model": result.model,
             "prompt_hash": prompt_hash(system, user),
-            "generated_at": now.isoformat(),
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
             "latency_ms": result.latency_ms,
+            "truncated": truncated,
         }
-        revision = ContentRevision(
-            item_id=item.id,
-            revision_no=await self._repo.next_revision_no(item.id),
-            body=body,
-            provenance=provenance,
-            created_by_tenant_id=actor_tenant_id,
-            created_at=now,
-        )
         if item.status is ContentStatus.REJECTED:
             moved = await self._repo.compare_and_set_status(
                 item.id,
@@ -372,8 +403,29 @@ class ContentService:
             )
             if not moved:
                 raise InvalidTransitionError(item.status, "generate", "item changed concurrently")
-        await self._repo.add_revision(revision)
+        await self._repo.add_revision(
+            item.id,
+            body=body,
+            provenance=provenance,
+            created_by_tenant_id=actor_tenant_id,
+            created_at=now,
+        )
         return await self.get_item(brand_id, item_id)
+
+    async def _check_token_budget(self, brand_id: UUID) -> None:
+        """A-5: one JSONB aggregate per generation; ``used >= budget`` ⇒ 429."""
+        now = datetime.now(tz=UTC)
+        since = now - TOKEN_BUDGET_WINDOW
+        used = await self._repo.ai_token_usage_since(brand_id, since)
+        if used < self._daily_token_budget:
+            return
+        oldest = await self._repo.oldest_ai_generation_at(brand_id, since)
+        resets_in = (
+            max(int((oldest + TOKEN_BUDGET_WINDOW - now).total_seconds()), 1)
+            if oldest is not None
+            else int(TOKEN_BUDGET_WINDOW.total_seconds())
+        )
+        raise GenerationBudgetExceededError(self._daily_token_budget, used, resets_in)
 
     async def _validate_schedule(
         self,

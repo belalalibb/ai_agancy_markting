@@ -2180,3 +2180,174 @@ def test_b5_i1_generate_persists_ai_revision_with_provenance_on_pg(
         (1, "human", None, None, "draft", False),
         (2, "ai_generated", "fake", 16, "draft", True),
     ]
+
+
+# ================================================================ SPRINT-07 Part A on PG ====
+def test_a3_i1_concurrent_body_edits_never_500_on_pg(integration_app: FastAPI) -> None:
+    """A3-I1 — the planner's SPRINT-06 experiment replayed through the API: two sessions on
+    two engines, ``asyncio.Barrier(2)`` after the item was read and **before** the revision
+    is written. With the ``SELECT … FOR UPDATE`` row lock (A-3) the outcome is
+    ``[200, 200]`` with revision numbers ``2, 3`` (or ``[200, 409]`` if the status CAS
+    collides) — never a 500 / ``IntegrityError``. Three repetitions."""
+    import src.modules.content.service as service_module
+    from src.main import create_app
+
+    _seed_fresh()
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        item_ids = [_content_create(client, owner)["id"] for _ in range(3)]
+
+    original_lock = service_module.ContentService._lock_item
+
+    for item_id in item_ids:
+        barrier = asyncio.Barrier(2)
+
+        async def _lock_then_wait(self, brand_id, iid, *, _orig=original_lock, _b=barrier):  # noqa: ANN001, ANN202
+            item = await _orig(self, brand_id, iid)
+            # Both requests have *read* the item; the loser now blocks on the row lock
+            # held by the winner until its transaction commits.
+            try:
+                await asyncio.wait_for(_b.wait(), timeout=2)
+            except TimeoutError:  # the first session committed already — fine
+                pass
+            return item
+
+        async def _race(iid: str) -> list[httpx.Response]:
+            reset_db_caches()
+            service_module.ContentService._lock_item = _lock_then_wait
+            try:
+                apps = [create_app(settings), create_app(settings)]
+                async with (
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+                    ) as c1,
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+                    ) as c2,
+                ):
+                    return list(
+                        await asyncio.gather(
+                            c1.put(
+                                f"{CONTENT}/items/{iid}/body",
+                                json={"body": "edit A"},
+                                headers=owner,
+                            ),
+                            c2.put(
+                                f"{CONTENT}/items/{iid}/body",
+                                json={"body": "edit B"},
+                                headers=owner,
+                            ),
+                        )
+                    )
+            finally:
+                service_module.ContentService._lock_item = original_lock
+
+        responses = asyncio.run(_race(item_id))
+        codes = sorted(r.status_code for r in responses)
+        assert codes in ([200, 200], [200, 409]), [r.text for r in responses]
+        numbers = [
+            r[0]
+            for r in _rows(
+                "SELECT revision_no FROM content_revisions WHERE item_id = :id "
+                "ORDER BY revision_no",
+                {"id": UUID(item_id)},
+            )
+        ]
+        assert numbers == [1, 2, 3] if codes == [200, 200] else numbers == [1, 2]
+
+
+def test_a4_i1_list_of_25_items_uses_at_most_two_queries_on_pg(integration_app: FastAPI) -> None:
+    """A4-I1 — ``GET /items`` for 25 items (with bodies) issues ≤ 2 SQL statements beyond the
+    auth/authorisation reads (one keyset ``LEFT JOIN`` page). Counted with
+    ``event.listen(engine.sync_engine, "before_cursor_execute")``."""
+    from sqlalchemy import event
+    from src.core import database
+
+    _seed_fresh()
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        statements.append(statement)
+
+    with TestClient(integration_app) as client:
+        for _ in range(25):
+            _content_create(client, owner)
+        engine = database.get_engine()
+        event.listen(engine.sync_engine, "before_cursor_execute", _count)
+        try:
+            page = client.get(f"{CONTENT}/items", params={"limit": 25}, headers=owner).json()
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _count)
+    assert len(page["items"]) == 25 and all(i["current_body"] for i in page["items"])
+    content_sql = [s for s in statements if "content_" in s]
+    assert len(content_sql) <= 2, content_sql
+    assert any("LEFT OUTER JOIN content_revisions" in s for s in content_sql)
+
+
+def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A5-I1 — ``ai_token_usage_since`` sums ``prompt_tokens + completion_tokens`` from the
+    JSONB provenance of ``ai_generated`` revisions only; ``human`` rows (even with stray
+    token keys) and rows outside the window are not counted; the 429 fires on PG."""
+    from src.core.config import Settings
+
+    _seed_fresh()
+    settings: Settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        item_id = _content_create(client, owner)["id"]
+        other = _content_create(client, owner)["id"]
+    now = datetime.now(tz=UTC)
+    rows = [
+        (item_id, 2, "ai_generated", 120_000, 50_000, now - timedelta(hours=1)),
+        (item_id, 3, "ai_generated", 10_000, 10_000, now - timedelta(hours=30)),  # outside
+        (other, 2, "human", 999_999, 999_999, now - timedelta(minutes=5)),  # never counted
+    ]
+    for iid, no, kind, p, c, created in rows:
+        _run(
+            "INSERT INTO content_revisions (id, item_id, revision_no, body, media_refs, "
+            "provenance, created_by_tenant_id, created_at) VALUES (:id, :item, :no, 'x', "
+            "CAST('[]' AS JSONB), CAST(:prov AS JSONB), :tenant, :created)",
+            {
+                "id": uuid4(),
+                "item": UUID(iid),
+                "no": no,
+                "prov": f'{{"kind": "{kind}", "prompt_tokens": {p}, "completion_tokens": {c}}}',
+                "tenant": OWNER_ID,
+                "created": created,
+            },
+        )
+
+    async def _usage() -> int:
+        from src.modules.content.infrastructure.postgres_repository import (
+            PostgresContentRepository,
+        )
+
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            async with AsyncSession(eng) as session:
+                repo = PostgresContentRepository(session)
+                return await repo.ai_token_usage_since(BRAND_ID, now - timedelta(hours=24))
+        finally:
+            await eng.dispose()
+
+    assert asyncio.run(_usage()) == 170_000
+    # Lower the budget below the measured usage ⇒ 429 through the API.
+    integration_app.state.settings = settings.model_copy(
+        update={"ai_daily_token_budget_per_brand": 170_000}
+    )
+    from src.core.config import get_settings
+
+    integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
+    with TestClient(integration_app) as client:
+        res = client.post(
+            f"{CONTENT}/items/{item_id}/generate",
+            json={"brief": "افتتاح فرع جديد لمقهى النيل في الزمالك"},
+            headers=owner,
+        )
+    assert res.status_code == 429, res.text
+    assert res.json()["detail"]["error"] == "generation_budget_exceeded"
+    assert res.json()["detail"]["used"] == 170_000

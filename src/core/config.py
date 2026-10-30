@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     )
     ai_default_model: str = "gpt-4o-mini"
     ai_http_timeout_seconds: float = 30.0
+    # SPRINT-07 A-5: daily token budget per brand (sum of prompt+completion tokens of the
+    # ``ai_generated`` revisions in the last 24 h) ⇒ 429 ``generation_budget_exceeded``.
+    ai_daily_token_budget_per_brand: int = 200_000
 
     @field_validator("meta_graph_api_version")
     @classmethod

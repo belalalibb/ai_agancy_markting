@@ -1,4 +1,4 @@
-"""Domain models of the ``content`` module (SPRINT-06 B1/B2).
+"""Domain models of the ``content`` module (SPRINT-06 B1/B2, SPRINT-07 A-1/A-2).
 
 ``ContentItem`` is the aggregate root (one post-to-be per brand and channel), its text lives
 in immutable ``ContentRevision`` rows and every approval decision is an ``ApprovalEvent``
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,6 +24,17 @@ class Channel(StrEnum):
     INSTAGRAM = "instagram"
 
 
+# SPRINT-07 A-2: single source of the per-channel hard length limits (service + prompts).
+CHANNEL_LIMITS: Final[dict[Channel, int]] = {Channel.INSTAGRAM: 2200, Channel.FACEBOOK_PAGE: 5000}
+
+# SPRINT-07 A-1 (D-066): the only provenance keys every role may see. Everything else
+# (provider, model, prompt_hash, tokens, latency, credential_mode, truncated) is **private**
+# and surfaces solely in ``generation_log`` for OWNER/MANAGER. Storage is one JSONB dict.
+PUBLIC_PROVENANCE_KEYS: Final[frozenset[str]] = frozenset(
+    {"kind", "generated_at", "prompt_version"}
+)
+
+
 class ContentStatus(StrEnum):
     DRAFT = "draft"
     PENDING_APPROVAL = "pending_approval"
@@ -31,6 +42,11 @@ class ContentStatus(StrEnum):
     REJECTED = "rejected"
     SCHEDULED = "scheduled"
     ARCHIVED = "archived"
+
+
+def public_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
+    """A-1: project a stored provenance dict onto :data:`PUBLIC_PROVENANCE_KEYS`."""
+    return {k: v for k, v in provenance.items() if k in PUBLIC_PROVENANCE_KEYS}
 
 
 class ApprovalAction(StrEnum):

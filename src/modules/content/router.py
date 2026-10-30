@@ -29,6 +29,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
 from src.modules.ai_gateway.dependencies import Gateway
 from src.modules.ai_gateway.exceptions import AIRateLimitedError, AIUpstreamError
@@ -38,7 +39,9 @@ from src.modules.content.domain.lifecycle import Action
 from src.modules.content.domain.models import Channel, ContentItem, ContentStatus
 from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.exceptions import (
+    BodyTooLongError,
     ContentError,
+    GenerationBudgetExceededError,
     GenerationRateLimitedError,
     InvalidTransitionError,
 )
@@ -49,10 +52,12 @@ from src.modules.content.schemas import (
     ContentBodyUpdate,
     ContentItemCreate,
     ContentItemDetail,
+    ContentItemDetailWithUsage,
     ContentItemPage,
     ContentItemPublic,
     ContentRevisionPublic,
     GenerateRequest,
+    GenerationLogEntry,
     RejectRequest,
     ScheduleRequest,
     StatusLiteral,
@@ -86,8 +91,11 @@ def get_content_repository(
 def get_content_service(
     repository: Annotated[ContentRepository, Depends(get_content_repository)],
     connections: Annotated[ConnectedAccountRepository, Depends(get_connection_repository)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ContentService:
-    return ContentService(repository, connections)
+    return ContentService(
+        repository, connections, daily_token_budget=settings.ai_daily_token_budget_per_brand
+    )
 
 
 Service = Annotated[ContentService, Depends(get_content_service)]
@@ -115,14 +123,17 @@ async def _authorise(
 
 def to_http(exc: ContentError) -> HTTPException:
     detail: dict[str, object] = {"error": exc.error, "message": exc.message}
+    headers: dict[str, str] | None = None
     if isinstance(exc, InvalidTransitionError):
         detail["from"] = exc.from_status.value
         detail["action"] = exc.action
-    headers = (
-        {"Retry-After": str(exc.retry_after_seconds)}
-        if isinstance(exc, GenerationRateLimitedError)
-        else None
-    )
+    elif isinstance(exc, BodyTooLongError):  # A-2
+        detail.update(channel=exc.channel.value, limit=exc.limit, length=exc.length)
+    elif isinstance(exc, GenerationBudgetExceededError):  # A-5
+        detail.update(budget=exc.budget, used=exc.used, resets_in_seconds=exc.resets_in_seconds)
+        headers = {"Retry-After": str(exc.resets_in_seconds)}
+    elif isinstance(exc, GenerationRateLimitedError):
+        headers = {"Retry-After": str(exc.retry_after_seconds)}
     return HTTPException(exc.http_status, detail=detail, headers=headers)
 
 
@@ -149,17 +160,17 @@ def _decode_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
         ) from exc
 
 
-async def _public(service: ContentService, item: ContentItem) -> ContentItemPublic:
-    return ContentItemPublic.from_domain(item, current_body=await service.current_body(item))
-
-
 # ------------------------------------------------------------------- routes --
 @router.post(
     f"{BRAND_PREFIX}/items",
     response_model=ContentItemPublic,
     status_code=status.HTTP_201_CREATED,
     summary="Create a draft (revision 1, provenance=human) — OWNER/MANAGER",
-    responses={403: {"description": "insufficient_role"}, 404: {"description": "brand_not_found"}},
+    responses={
+        403: {"description": "insufficient_role"},
+        404: {"description": "brand_not_found"},
+        422: {"description": "body_too_long {channel, limit, length}"},
+    },
 )
 async def create_item(
     brand_id: UUID,
@@ -168,15 +179,20 @@ async def create_item(
     service: Service,
     resolver: Resolver,
 ) -> ContentItemPublic:
-    """Roles: OWNER, MANAGER (VIEWER ⇒ 403 ``insufficient_role``). Result: ``draft``."""
+    """Roles: OWNER, MANAGER (VIEWER ⇒ 403 ``insufficient_role``). Result: ``draft``.
+    Body longer than the channel limit (Instagram 2200 / Facebook 5000) ⇒ 422
+    ``body_too_long`` (A-2)."""
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
-    item = await service.create_item(
-        brand_id,
-        actor_tenant_id=actor.tenant_id,
-        channel=Channel(payload.channel),
-        body=payload.body,
-        target_page_id=payload.target_page_id,
-    )
+    try:
+        item = await service.create_item(
+            brand_id,
+            actor_tenant_id=actor.tenant_id,
+            channel=Channel(payload.channel),
+            body=payload.body,
+            target_page_id=payload.target_page_id,
+        )
+    except ContentError as exc:
+        raise to_http(exc) from exc
     return ContentItemPublic.from_domain(item, current_body=payload.body)
 
 
@@ -204,45 +220,46 @@ async def list_items(
         cursor=_decode_cursor(cursor),
     )
     return ContentItemPage(
-        items=[await _public(service, i) for i in items],
-        next_cursor=_encode_cursor(items[-1]) if has_more and items else None,
+        items=[ContentItemPublic.from_domain(item, current_body=body) for item, body in items],
+        next_cursor=_encode_cursor(items[-1][0]) if has_more and items else None,
         has_more=has_more,
     )
 
 
 @router.get(
     f"{BRAND_PREFIX}/items/{{item_id}}",
-    response_model=ContentItemDetail,
-    response_model_exclude_none=True,
+    response_model=ContentItemDetail | ContentItemDetailWithUsage,
     summary="Item detail with last 20 revisions and the approval log — all roles",
     responses={404: {"description": "content_not_found / brand_not_found"}},
 )
 async def get_item(
     brand_id: UUID, item_id: UUID, actor: CurrentUser, service: Service, resolver: Resolver
-) -> ContentItemDetail:
-    """Roles: OWNER, MANAGER, VIEWER. ``generation_log`` (provider/model/token usage of the AI
-    revisions) is present for OWNER/MANAGER and **removed** for VIEWER (§2-0 b)."""
+) -> ContentItemDetail | ContentItemDetailWithUsage:
+    """Roles: OWNER, MANAGER, VIEWER. Two response models (A-4): OWNER/MANAGER receive
+    ``ContentItemDetailWithUsage`` (``generation_log`` with provider/model/token usage of the
+    AI revisions); VIEWER receives ``ContentItemDetail`` — the key is absent, not ``null``
+    (§2-0 b). ``revisions[].provenance`` is the public projection for every role (A-1)."""
     role = await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
     try:
         item, revisions, events = await service.get_detail(brand_id, item_id)
     except ContentError as exc:
         raise to_http(exc) from exc
-    generation_log = (
-        [
-            {k: v for k, v in r.provenance.items() if k != "kind"} | {"revision_no": r.revision_no}
-            for r in revisions
-            if r.provenance.get("kind") == "ai_generated"
-        ]
-        if role is not BrandRole.VIEWER
-        else None
-    )
-    return ContentItemDetail(
+    base = ContentItemDetail(
         **ContentItemPublic.from_domain(
             item, current_body=revisions[0].body if revisions else None
         ).model_dump(),
         revisions=[ContentRevisionPublic.from_domain(r) for r in revisions],
         approval_events=[ApprovalEventPublic.from_domain(e) for e in events],
-        generation_log=generation_log,
+    )
+    if role is BrandRole.VIEWER:
+        return base
+    return ContentItemDetailWithUsage(
+        **base.model_dump(),
+        generation_log=[
+            GenerationLogEntry.from_revision(r)
+            for r in revisions
+            if r.provenance.get("kind") == "ai_generated"
+        ],
     )
 
 
@@ -254,6 +271,7 @@ async def get_item(
         403: {"description": "insufficient_role"},
         404: {"description": "content_not_found"},
         409: {"description": "invalid_transition (archived items are immutable)"},
+        422: {"description": "body_too_long {channel, limit, length}"},
     },
 )
 async def update_body(
@@ -310,7 +328,12 @@ async def _act(
         )
     except ContentError as exc:
         raise to_http(exc) from exc
-    return await _public(service, item)
+    return ContentItemPublic.from_domain(item, current_body=await _body_of(service, item))
+
+
+async def _body_of(service: ContentService, item: ContentItem) -> str | None:
+    revisions = await service.list_revisions(item.id, limit=1)
+    return revisions[0].body if revisions else None
 
 
 _TRANSITION_RESPONSES = {
@@ -513,7 +536,10 @@ async def archive_item(
         403: {"description": "insufficient_role"},
         404: {"description": "content_not_found"},
         409: {"description": "invalid_transition — only draft/rejected items can be generated"},
-        429: {"description": "generation_rate_limited (20/h per brand) / ai_rate_limited"},
+        429: {
+            "description": "generation_rate_limited (20/h per brand) / "
+            "generation_budget_exceeded (daily tokens) / ai_rate_limited"
+        },
         502: {"description": "ai_upstream_unavailable (fixed body)"},
         503: {"description": "ai_provider_not_configured"},
     },
@@ -561,4 +587,4 @@ async def generate_item(
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, detail={"error": "ai_upstream_unavailable"}
         ) from exc
-    return await _public(service, item)
+    return ContentItemPublic.from_domain(item, current_body=await _body_of(service, item))
