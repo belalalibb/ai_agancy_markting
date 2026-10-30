@@ -23,7 +23,7 @@
 
 ## 📊 2. حالة التنفيذ الفعلية (تُحدَّث من مراجعات المخطط)
 
-| البند | الحالة (2026-10-30، `main` @ `8f1f246`) | المرجع |
+| البند | الحالة (2026-10-30، `main` @ `32c20cb` بعد SPRINT-04.1) | المرجع |
 |---|---|---|
 | Zero-Secret في الكود والمستودع | ✅ فحص أسرار يدوي في كل مراجعة + `gitleaks` في CI على كامل التاريخ | `.github/workflows/ci.yml` |
 | Zero-Secret في واجهات API | ✅ حارس اختباري على `/openapi.json`: لا حقل باسم يحوي `token` إلا `has_page_token` | `tests/modules/social_connect/test_router.py` |
@@ -31,6 +31,11 @@
 | `state` في OAuth | ✅ HMAC موقَّع `{t, b, n, iat}` بمدة صلاحية؛ اختبار تلاعب حتمي على مستوى البايت | `src/core/oauth_state.py` |
 | هوية Meta | ✅ من `/me` + `appsecret_proof`؛ `/debug_token` مُتحقَّق (`is_valid`, `app_id`, `user_id`) | `src/modules/social_connect/service.py` |
 | عزل المستأجرين | ✅ `brand_id` + `BrandAccessResolver` (404 عند انعدام الوصول) | `src/modules/tenancy/` |
-| **هوية الفاعل** | ⚠️ **مُدَّعاة ذاتياً** (`?tenant_id=`) — الفجوة الوحيدة المعروفة؛ **تُغلق في SPRINT-04** (JWT + Refresh كما في §1-4) | `CURRENT_DIRECTIVE.md` |
+| **هوية الفاعل** | ✅ Argon2id + JWT HS256 (15 د) + Refresh دوّار في كوكي `__Secure-refresh` (HttpOnly/Strict/Secure، `Path=/api/v1/auth`)؛ كشف إعادة الاستخدام يُبطل كل الجلسات؛ إبطال-أولاً بـ`rowcount==1` (سباق مُثبَت على PG: `[200,401]`)؛ `CurrentUserFresh` يفحص `revoked_at`+`expires_at`+`users.is_active` | `src/modules/auth/`, `sprints/SPRINT-04.1_REVIEW.md` |
+| أسرار Graph في الطلبات الصادرة | ✅ `client_secret`/التوكنات في `Authorization: Bearer` أو جسم POST فقط؛ `appsecret_proof` وحده في الرابط؛ `paging.next` يُنقّى ويُقيَّد بـ`https` + مضيف Graph؛ `SecretRedactingFilter` على مسجّل الجذر و`httpx`/`httpcore` على WARNING — **مُثبَت تجريبياً** (تجربة تسريب httpx: لا سر في السجل) | `src/modules/social_connect/meta_client.py`, `src/core/logging.py` |
+| عزل الوكالة داخل العلامة الواحدة | ✅ الصفحات غير المختارة لا يراها إلا مالك الاتصال (`connected_by_tenant_id`)؛ `is_connection_owner` في الاستجابة؛ اختيار/فصل من غير المالك ⇒ 403 | `src/modules/social_connect/schemas.py`, `service.py` |
+| علامة `reauth_required` | ✅ تُكتب خارج معاملة الطلب (`PostgresStatusMarker`) فلا يبتلعها `rollback` | `src/modules/social_connect/infrastructure/status_marker.py` |
+| سباقات الفهارس الفريدة | ✅ 409 حتمي لا 500 (اختبارات تزامن حقيقية على PG) | `tests/integration/test_postgres_persistence.py` |
 | تراخيص شجرة التشغيل | ✅ 34–37 حزمة كلها MIT/BSD/Apache/PSF؛ `certifi` بـ **MPL-2.0** مقبولة بوعي (ترخيص ملفّي ضعيف الـcopyleft، لا يمسّ النواة) | `scripts/check_licenses.py` |
-| تحديد معدل الطلبات | ⏳ أدنى داخل العملية في SPRINT-04؛ Redis لاحقاً | — |
+| تحديد معدل الطلبات | ⚠️ داخل العملية (نافذة منزلقة، محدود الذاكرة `max_keys=10_000` بطرد الأقدم) — لا يتشارك بين النسخ؛ Redis بند مؤجَّل #7 | `src/modules/auth/infrastructure/rate_limit.py` |
+| `POST /debug_token` بلا `method=GET` | ⚠️ ملاحظة بروتوكولية من المالك ثبتت بنيوياً؛ خلل التكوين يُبتلع في `_inspect_token` — **تُغلق في SPRINT-05 A-0** | `sprints/SPRINT-04.1_REVIEW.md` §4 |
