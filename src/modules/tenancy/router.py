@@ -1,15 +1,18 @@
 """HTTP routes for tenancy (``/api/v1/tenants*``, ``/api/v1/brands*``) — SPRINT-03 B9.
 
-| Method | Path                                   | Role          |
-|--------|----------------------------------------|---------------|
-| POST   | /tenants                               | —             |
-| GET    | /tenants/{tenant_id}?tenant_id=        | same tenant   |
-| POST   | /brands                                | owner = body  |
-| GET    | /brands?tenant_id=                     | —             |
-| GET    | /brands/{brand_id}?tenant_id=          | any role      |
-| POST   | /brands/{brand_id}/grants              | OWNER         |
-| GET    | /brands/{brand_id}/grants?tenant_id=   | OWNER         |
-| DELETE | /brands/{brand_id}/grants/{grant_id}   | OWNER (B8)    |
+Every route requires ``Authorization: Bearer <access JWT>``; the acting tenant is the
+token's ``tid`` claim (SPRINT-04 B1). Tenants are created only through
+``POST /auth/register`` (B4).
+
+| Method | Path                                 | Role                  |
+|--------|--------------------------------------|-----------------------|
+| GET    | /tenants/{tenant_id}                 | same tenant           |
+| POST   | /brands                              | owner = actor         |
+| GET    | /brands                              | —                     |
+| GET    | /brands/{brand_id}                   | any role              |
+| POST   | /brands/{brand_id}/grants            | OWNER                 |
+| GET    | /brands/{brand_id}/grants            | OWNER                 |
+| DELETE | /brands/{brand_id}/grants/{grant_id} | OWNER, fresh session  |
 
 Error bodies: ``{"error": "<code>", "message": "..."}`` (B10).
 """
@@ -21,6 +24,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
+from src.modules.auth.dependencies import CurrentUserFresh
 from src.modules.tenancy.dependencies import (
     ActorTenantId,
     get_brand_access_resolver,
@@ -51,7 +55,6 @@ from src.modules.tenancy.schemas import (
     BrandWithRoleOut,
     GrantCreate,
     GrantOut,
-    TenantCreate,
     TenantOut,
 )
 from src.modules.tenancy.service import TenancyService
@@ -72,20 +75,6 @@ Service = Annotated[TenancyService, Depends(get_tenancy_service)]
 
 
 # ---------------------------------------------------------------- tenants --
-@router.post(
-    "/tenants",
-    response_model=TenantOut,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create a tenant",
-)
-async def create_tenant(payload: TenantCreate, service: Service) -> TenantOut:
-    try:
-        tenant = await service.create_tenant(payload.slug, payload.name)
-    except TenancyError as exc:
-        raise to_http(exc) from exc
-    return TenantOut.from_domain(tenant)
-
-
 @router.get("/tenants/{tenant_id}", response_model=TenantOut, summary="Read your own tenant")
 async def get_tenant(tenant_id: UUID, actor: ActorTenantId, service: Service) -> TenantOut:
     try:
@@ -102,9 +91,9 @@ async def get_tenant(tenant_id: UUID, actor: ActorTenantId, service: Service) ->
     status_code=status.HTTP_201_CREATED,
     summary="Create a brand owned by the acting tenant",
 )
-async def create_brand(payload: BrandCreate, service: Service) -> BrandOut:
+async def create_brand(payload: BrandCreate, actor: ActorTenantId, service: Service) -> BrandOut:
     try:
-        brand = await service.create_brand(payload.tenant_id, payload.slug, payload.name)
+        brand = await service.create_brand(actor, payload.slug, payload.name)
     except TenancyError as exc:
         raise to_http(exc) from exc
     return BrandOut.from_domain(brand)
@@ -136,10 +125,12 @@ async def get_brand(brand_id: UUID, actor: ActorTenantId, service: Service) -> B
     status_code=status.HTTP_201_CREATED,
     summary="Grant another tenant a role on this brand (owner only)",
 )
-async def create_grant(brand_id: UUID, payload: GrantCreate, service: Service) -> GrantOut:
+async def create_grant(
+    brand_id: UUID, payload: GrantCreate, actor: ActorTenantId, service: Service
+) -> GrantOut:
     try:
         grant = await service.grant_access(
-            payload.tenant_id, brand_id, payload.grantee_tenant_id, payload.role
+            actor, brand_id, payload.grantee_tenant_id, payload.role
         )
     except TenancyError as exc:
         raise to_http(exc) from exc
@@ -165,10 +156,11 @@ async def list_grants(brand_id: UUID, actor: ActorTenantId, service: Service) ->
     summary="Revoke a grant and purge the grantee's connections in this brand (owner only)",
 )
 async def revoke_grant(
-    brand_id: UUID, grant_id: UUID, actor: ActorTenantId, service: Service
+    brand_id: UUID, grant_id: UUID, actor: CurrentUserFresh, service: Service
 ) -> Response:
+    """Destructive ⇒ ``CurrentUserFresh``: a logged-out session is refused immediately."""
     try:
-        await service.revoke_grant(actor, brand_id, grant_id)
+        await service.revoke_grant(actor.tenant_id, brand_id, grant_id)
     except TenancyError as exc:
         raise to_http(exc) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from alembic import command
@@ -25,6 +26,9 @@ from src.core import database
 from src.core.config import Settings
 from src.core.database import build_engine, build_session_factory
 from src.core.security import TokenEncryptionService
+from src.modules.auth.domain.models import AuthenticatedActor
+from src.modules.auth.infrastructure.argon2_hasher import Argon2PasswordHasher
+from src.modules.auth.jwt import AccessTokenCodec
 
 pytestmark = pytest.mark.integration
 
@@ -110,10 +114,16 @@ def integration_app(
     ``get_settings`` is patched so the lazily-built engine targets ``TEST_DATABASE_URL``.
     """
     from src.main import create_app
+    from src.modules.auth.dependencies import get_rate_limiter
+    from tests.fakes import FakeRateLimiter
 
     reset_db_caches()
     monkeypatch.setattr(database, "get_settings", lambda: integration_settings)
-    yield create_app(integration_settings)
+    application = create_app(integration_settings)
+    # A8: the process-wide in-memory limiter would accumulate "testclient" hits across
+    # tests; the directive mandates disabling it in tests through the fake dependency.
+    application.dependency_overrides[get_rate_limiter] = FakeRateLimiter
+    yield application
     reset_db_caches()
 
 
@@ -123,13 +133,52 @@ def integration_encryption(encryption: TokenEncryptionService) -> TokenEncryptio
 
 
 # ------------------------------------------------------------- tenancy seed --
+# SPRINT-04: one user + one live refresh session per fixed-world tenant, so API-level
+# integration tests can present a real Bearer JWT (``CurrentUser``) that also passes the
+# ``CurrentUserFresh`` revocation check.
+SESSION_BY_TENANT: dict[UUID, UUID] = {}
+_SEED_HASH: str | None = None
+
+
+def seed_password_hash() -> str:
+    """Argon2id hash of ``tests.conftest.TEST_PASSWORD`` (computed once per session)."""
+    global _SEED_HASH  # noqa: PLW0603 - memoised, hashing is deliberately slow
+    if _SEED_HASH is None:
+        from tests.conftest import TEST_PASSWORD
+
+        _SEED_HASH = Argon2PasswordHasher().hash(TEST_PASSWORD)
+    return _SEED_HASH
+
+
+def integration_headers(settings: Settings, tenant_id: UUID) -> dict[str, str]:
+    """Bearer headers for the seeded user of ``tenant_id`` (sid = seeded live session)."""
+    from tests.conftest import USER_BY_TENANT
+
+    assert settings.auth_jwt_secret is not None
+    codec = AccessTokenCodec(settings.auth_jwt_secret, issuer=settings.app_name, ttl_seconds=900)
+    actor = AuthenticatedActor(
+        user_id=USER_BY_TENANT[tenant_id],
+        tenant_id=tenant_id,
+        sid=SESSION_BY_TENANT[tenant_id],
+    )
+    return {"Authorization": f"Bearer {codec.issue(actor)}"}
+
+
 async def seed_tenancy(session: AsyncSession) -> None:
     """Insert the SPRINT-03 test world (same ids as ``tests.conftest``) and commit.
 
     tenants: OWNER (nile-owner), AGENCY (agency), STRANGER (stranger);
-    brands : BRAND (nile-coffee) and BRAND2 (cairo-dental), both owned by OWNER.
+    brands : BRAND (nile-coffee) and BRAND2 (cairo-dental), both owned by OWNER;
+    users  : one per tenant (``<slug>@example.com`` / ``TEST_PASSWORD``) + one live session.
     """
-    from tests.conftest import AGENCY_ID, BRAND2_ID, BRAND_ID, OWNER_ID, STRANGER_ID
+    from tests.conftest import (
+        AGENCY_ID,
+        BRAND2_ID,
+        BRAND_ID,
+        OWNER_ID,
+        STRANGER_ID,
+        USER_BY_TENANT,
+    )
 
     await session.execute(
         text(
@@ -148,6 +197,28 @@ async def seed_tenancy(session: AsyncSession) -> None:
         ),
         {"b1": BRAND_ID, "b2": BRAND2_ID, "owner": OWNER_ID},
     )
+    slugs = {OWNER_ID: "nile-owner", AGENCY_ID: "agency", STRANGER_ID: "stranger"}
+    for tenant_id, user_id in USER_BY_TENANT.items():
+        sid = SESSION_BY_TENANT.setdefault(tenant_id, UUID(int=user_id.int + 0x1000))
+        await session.execute(
+            text(
+                "INSERT INTO users (id, tenant_id, email, password_hash) "
+                "VALUES (:id, :tenant, :email, :hash)"
+            ),
+            {
+                "id": user_id,
+                "tenant": tenant_id,
+                "email": f"{slugs[tenant_id]}@example.com",
+                "hash": seed_password_hash(),
+            },
+        )
+        await session.execute(
+            text(
+                "INSERT INTO refresh_sessions (id, user_id, token_hash, expires_at) "
+                "VALUES (:id, :user, :hash, now() + interval '30 days')"
+            ),
+            {"id": sid, "user": user_id, "hash": "0" * 64},
+        )
     await session.commit()
 
 

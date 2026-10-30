@@ -25,8 +25,8 @@ from uuid import UUID
 
 from src.core.config import Settings, get_settings
 
-# TEMPORARY: replay within TTL is bounded by Meta's single-use code; add nonce store
-# (Redis) when auth module lands.
+# Replay within the TTL is bounded by Meta's single-use ``code``; a server-side nonce store
+# (Redis) is deferred (owner decision, see Hub deferred list).
 
 _MAX_FUTURE_SKEW_SECONDS = 60
 
@@ -65,18 +65,28 @@ class OAuthStateSigner:
         self._clock = clock
 
     # ------------------------------------------------------------------ API --
-    def issue(self, tenant_id: UUID, brand_id: UUID) -> str:
-        payload = {
+    def issue(self, tenant_id: UUID, brand_id: UUID, user_id: UUID | None = None) -> str:
+        """Sign ``{t, b, u?, n, iat}``; ``u`` (SPRINT-04 B3) records *which user* started the
+        flow — audit only, never used for authorisation."""
+        payload: dict[str, Any] = {
             "t": str(tenant_id),
             "b": str(brand_id),
             "n": secrets.token_urlsafe(16),
             "iat": int(self._clock()),
         }
+        if user_id is not None:
+            payload["u"] = str(user_id)
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         return f"{_b64encode(body)}.{_b64encode(self._sign(body))}"
 
     def verify(self, state: str) -> tuple[UUID, UUID]:
         """Return ``(tenant_id, brand_id)`` embedded in a valid ``state``; raise otherwise."""
+        payload = self.decode_payload(state)
+        return payload["t"], payload["b"]
+
+    def decode_payload(self, state: str) -> dict[str, Any]:
+        """Verify signature + TTL and return the full claims (``t``, ``b``, optional ``u``,
+        ``n``, ``iat``) with ids as ``UUID``. Used by ``verify`` and by audit/tests."""
         if not isinstance(state, str) or state.count(".") != 1:
             raise InvalidOAuthStateError("Malformed OAuth state.")
         body_b64, sig_b64 = state.split(".", 1)
@@ -96,7 +106,7 @@ class OAuthStateSigner:
             raise InvalidOAuthStateError("OAuth state issued in the future.")
         if now - issued_at > self._ttl:
             raise InvalidOAuthStateError("OAuth state has expired.")
-        return payload["t"], payload["b"]
+        return payload
 
     # -------------------------------------------------------------- helpers --
     def _sign(self, body: bytes) -> bytes:
@@ -110,8 +120,10 @@ class OAuthStateSigner:
             raise InvalidOAuthStateError("OAuth state payload is not valid JSON.") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("iat"), int):
             raise InvalidOAuthStateError("OAuth state payload is missing required fields.")
-        for key in ("t", "b"):
+        for key in ("t", "b", "u"):
             value = payload.get(key)
+            if value is None and key == "u":  # optional audit claim
+                continue
             if not isinstance(value, str) or not value:
                 raise InvalidOAuthStateError("OAuth state payload is missing required fields.")
             try:

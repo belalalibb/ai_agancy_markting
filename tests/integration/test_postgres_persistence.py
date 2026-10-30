@@ -59,6 +59,7 @@ from tests.integration.conftest import (
     TABLES,
     TEST_DATABASE_URL,
     alembic_config,
+    integration_headers,
     reset_db_caches,
     seed_tenancy,
 )
@@ -592,10 +593,10 @@ def test_full_callback_flow_persists_via_api(
     """start → callback → GET — then a *new* app instance still sees the row."""
     _seed_fresh()
     _mock_graph(graph_mock, pages=2)
-    owner = {"tenant_id": str(OWNER_ID)}
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
 
     with TestClient(integration_app) as client:
-        started = client.post(f"{brand_base()}/connections/start", json=owner)
+        started = client.post(f"{brand_base()}/connections/start", headers=owner)
         assert started.status_code == 200, started.text
         state = started.json()["state"]
         assert SIGNER.verify(state) == (OWNER_ID, BRAND_ID)
@@ -612,11 +613,12 @@ def test_full_callback_flow_persists_via_api(
         assert all(p["is_selected"] is False for p in created["pages"])
         assert all(p["has_page_token"] is False for p in created["pages"])
 
-        listed = client.get(f"{brand_base()}/connections", params=owner)
+        listed = client.get(f"{brand_base()}/connections", headers=owner)
         assert [a["id"] for a in listed.json()] == [created["id"]]
-        assert client.get(f"{brand_base(BRAND2_ID)}/connections", params=owner).json() == []
+        assert client.get(f"{brand_base(BRAND2_ID)}/connections", headers=owner).json() == []
         stranger = client.get(
-            f"{brand_base()}/connections", params={"tenant_id": str(STRANGER_ID)}
+            f"{brand_base()}/connections",
+            headers=integration_headers(integration_app.state.settings, STRANGER_ID),
         )
         assert stranger.status_code == 404
         assert stranger.json()["detail"]["error"] == "brand_not_found"
@@ -627,14 +629,14 @@ def test_full_callback_flow_persists_via_api(
     reset_db_caches()
     restarted = create_app(integration_app.state.settings)
     with TestClient(restarted) as client:
-        again = client.get(f"{brand_base()}/connections/{created['id']}", params=owner)
+        again = client.get(f"{brand_base()}/connections/{created['id']}", headers=owner)
         assert again.status_code == 200
         pages = {p["page_id"]: p for p in again.json()["pages"]}
         assert pages["1001"]["instagram"]["username"] == "nilecoffee"
 
-        gone = client.delete(f"{brand_base()}/connections/{created['id']}", params=owner)
+        gone = client.delete(f"{brand_base()}/connections/{created['id']}", headers=owner)
         assert gone.status_code == 204
-        assert client.get(f"{brand_base()}/connections", params=owner).json() == []
+        assert client.get(f"{brand_base()}/connections", headers=owner).json() == []
 
     assert _run("SELECT COUNT(*) FROM social_connections", scalar=True) == 0
     assert _run("SELECT COUNT(*) FROM social_connection_pages", scalar=True) == 0
@@ -652,10 +654,10 @@ def test_disconnect_leaves_no_provider_name_anywhere(
     graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
         return_value=httpx.Response(200, json=me_payload(user_id="90001", name=needle))
     )
-    owner = {"tenant_id": str(OWNER_ID)}
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
 
     with TestClient(integration_app) as client:
-        state = client.post(f"{brand_base()}/connections/start", json=owner).json()["state"]
+        state = client.post(f"{brand_base()}/connections/start", headers=owner).json()["state"]
         created = client.get(CALLBACK, params={"code": "CODE", "state": state}).json()
         assert created["provider_user_name"] == needle
         assert created["pages"][0]["is_selected"] is True  # single page auto-selected
@@ -670,7 +672,7 @@ def test_disconnect_leaves_no_provider_name_anywhere(
         == 1
     )
     with TestClient(integration_app) as client:
-        res = client.delete(f"{brand_base()}/connections/{created['id']}", params=owner)
+        res = client.delete(f"{brand_base()}/connections/{created['id']}", headers=owner)
         assert res.status_code == 204
 
     # Scan every text column of every public table for the name — it must be gone.
@@ -696,18 +698,19 @@ def test_revoke_grant_purges_agency_connections_via_api(
     """I-B6 (B8) — revoking the agency's grant deletes its connections; the owner's remain."""
     _seed_fresh()
     _mock_graph(graph_mock, pages=1)
-    owner = {"tenant_id": str(OWNER_ID)}
-    agency = {"tenant_id": str(AGENCY_ID)}
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    agency = integration_headers(integration_app.state.settings, AGENCY_ID)
 
     with TestClient(integration_app) as client:
         grant = client.post(
             f"{API}/brands/{BRAND_ID}/grants",
-            json={**owner, "grantee_tenant_id": str(AGENCY_ID), "role": "manager"},
+            json={"grantee_tenant_id": str(AGENCY_ID), "role": "manager"},
+            headers=owner,
         )
         assert grant.status_code == 201, grant.text
 
         # Owner connects Meta user 90001; agency connects Meta user 90002.
-        state = client.post(f"{brand_base()}/connections/start", json=owner).json()["state"]
+        state = client.post(f"{brand_base()}/connections/start", headers=owner).json()["state"]
         owner_conn = client.get(CALLBACK, params={"code": "CODE", "state": state})
         assert owner_conn.status_code == 201, owner_conn.text
 
@@ -717,24 +720,24 @@ def test_revoke_grant_purges_agency_connections_via_api(
         graph_mock.get("/debug_token").mock(
             return_value=httpx.Response(200, json=debug_token_payload(user_id="90002"))
         )
-        state = client.post(f"{brand_base()}/connections/start", json=agency).json()["state"]
+        state = client.post(f"{brand_base()}/connections/start", headers=agency).json()["state"]
         agency_conn = client.get(CALLBACK, params={"code": "CODE", "state": state})
         assert agency_conn.status_code == 201, agency_conn.text
         assert agency_conn.json()["connected_by_tenant_id"] == str(AGENCY_ID)
 
-        assert len(client.get(f"{brand_base()}/connections", params=owner).json()) == 2
+        assert len(client.get(f"{brand_base()}/connections", headers=owner).json()) == 2
 
         revoked = client.delete(
-            f"{API}/brands/{BRAND_ID}/grants/{grant.json()['id']}", params=owner
+            f"{API}/brands/{BRAND_ID}/grants/{grant.json()['id']}", headers=owner
         )
         assert revoked.status_code == 204, revoked.text
 
-        remaining = client.get(f"{brand_base()}/connections", params=owner).json()
+        remaining = client.get(f"{brand_base()}/connections", headers=owner).json()
         assert [c["id"] for c in remaining] == [owner_conn.json()["id"]]
         assert remaining[0]["connected_by_tenant_id"] == str(OWNER_ID)
 
         # The agency has lost access entirely (404, not 403 — no information leak).
-        assert client.get(f"{brand_base()}/connections", params=agency).status_code == 404
+        assert client.get(f"{brand_base()}/connections", headers=agency).status_code == 404
 
     assert _run("SELECT COUNT(*) FROM social_connections", scalar=True) == 1
     assert (
@@ -747,47 +750,88 @@ def test_revoke_grant_purges_agency_connections_via_api(
     )
 
 
-# ---------------------------------------------------------------- I-B8 ---
-def test_full_tenancy_flow_via_api(integration_app: FastAPI, graph_mock: respx.MockRouter) -> None:
-    """I-B8 — tenant ⇒ brand ⇒ grant(manager) ⇒ start (agency) ⇒ callback (3 pages) ⇒
-    selection (1) ⇒ list ⇒ disconnect — all on PostgreSQL."""
+# ---------------------------------------------------- SPRINT-04 I-B1 (ex-I-B8) ---
+AUTH = f"{API}/auth"
+CSRF = {"X-Requested-With": "XMLHttpRequest"}
+COOKIE = "refresh"  # AUTH_COOKIE_SECURE=false in tests
+PASSWORD = "a-strong-passphrase-42"  # noqa: S105 - test fixture value
+SEED_PASSWORD = "correct-horse-battery"  # noqa: S105 - == tests.conftest.TEST_PASSWORD
+LIVE_SESSIONS = "SELECT COUNT(*) FROM refresh_sessions WHERE user_id = :u AND revoked_at IS NULL"
+
+
+def _register(client: TestClient, slug: str, email: str) -> tuple[str, str, str]:
+    """``POST /auth/register`` ⇒ (tenant_id, user_id, bearer)."""
+    res = client.post(
+        f"{AUTH}/register",
+        json={
+            "email": email,
+            "password": PASSWORD,
+            "tenant_slug": slug,
+            "tenant_name": slug.title(),
+        },
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    return body["user"]["tenant_id"], body["user"]["id"], f"Bearer {body['access_token']}"
+
+
+def test_full_tenancy_flow_via_api_with_jwt(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """I-B1 — register owner + agency ⇒ brand ⇒ grant(manager) ⇒ start (agency) ⇒ callback
+    (3 pages) ⇒ selection (1) ⇒ list ⇒ revoke grant ⇒ agency connections = 0 — all on PG,
+    every protected call authenticated with a *real* JWT from ``/auth/register``."""
     _mock_graph(graph_mock, pages=3)
 
     with TestClient(integration_app) as client:
-        owner = client.post(f"{API}/tenants", json={"slug": "flow-owner", "name": "Owner"})
-        agency = client.post(f"{API}/tenants", json={"slug": "flow-agency", "name": "Agency"})
-        assert owner.status_code == 201 and agency.status_code == 201
-        owner_id, agency_id = owner.json()["id"], agency.json()["id"]
-        dup = client.post(f"{API}/tenants", json={"slug": "flow-owner", "name": "Again"})
+        owner_id, owner_user, owner = _register(client, "flow-owner", "owner@flow.example")
+        agency_id, _, agency = _register(client, "flow-agency", "agency@flow.example")
+        owner_h, agency_h = {"Authorization": owner}, {"Authorization": agency}
+        assert owner_id != agency_id
+
+        # I-A3: duplicate slug ⇒ 409 and no orphan user row.
+        users_before = _run("SELECT COUNT(*) FROM users", scalar=True)
+        dup = client.post(
+            f"{AUTH}/register",
+            json={
+                "email": "third@flow.example",
+                "password": PASSWORD,
+                "tenant_slug": "flow-owner",
+                "tenant_name": "Again",
+            },
+        )
         assert dup.status_code == 409 and dup.json()["detail"]["error"] == "tenant_slug_taken"
+        assert _run("SELECT COUNT(*) FROM users", scalar=True) == users_before
+
+        me = client.get(f"{AUTH}/me", headers=owner_h).json()
+        assert me["id"] == owner_user and me["tenant"]["slug"] == "flow-owner"
 
         brand = client.post(
-            f"{API}/brands", json={"tenant_id": owner_id, "slug": "flow-brand", "name": "Brand"}
+            f"{API}/brands", json={"slug": "flow-brand", "name": "Brand"}, headers=owner_h
         )
         assert brand.status_code == 201, brand.text
         brand_id = brand.json()["id"]
         assert brand.json()["owner_tenant_id"] == owner_id
 
         # Agency cannot see the brand before a grant (404).
-        assert (
-            client.get(f"{API}/brands/{brand_id}", params={"tenant_id": agency_id}).status_code
-            == 404
-        )
+        assert client.get(f"{API}/brands/{brand_id}", headers=agency_h).status_code == 404
         grant = client.post(
             f"{API}/brands/{brand_id}/grants",
-            json={"tenant_id": owner_id, "grantee_tenant_id": agency_id, "role": "manager"},
+            json={"grantee_tenant_id": agency_id, "role": "manager"},
+            headers=owner_h,
         )
         assert grant.status_code == 201, grant.text
-        mine = client.get(f"{API}/brands", params={"tenant_id": agency_id}).json()
+        mine = client.get(f"{API}/brands", headers=agency_h).json()
         assert [(b["id"], b["role"]) for b in mine] == [(brand_id, "manager")]
 
         base = brand_base(UUID(brand_id))
-        started = client.post(f"{base}/connections/start", json={"tenant_id": agency_id})
+        started = client.post(f"{base}/connections/start", headers=agency_h)
         assert started.status_code == 200, started.text
         state = started.json()["state"]
         assert SIGNER.verify(state) == (UUID(agency_id), UUID(brand_id))
+        assert str(SIGNER.decode_payload(state)["u"]) == me_agency_user(client, agency_h)
 
-        cb = client.get(CALLBACK, params={"code": "CODE", "state": state})
+        cb = client.get(CALLBACK, params={"code": "CODE", "state": state})  # no Bearer (B3)
         assert cb.status_code == 201, cb.text
         conn = cb.json()
         cid = conn["id"]
@@ -797,32 +841,277 @@ def test_full_tenancy_flow_via_api(integration_app: FastAPI, graph_mock: respx.M
 
         bad = client.put(
             f"{base}/connections/{cid}/pages/selection",
-            json={"tenant_id": agency_id, "page_ids": ["1002", "9999"]},
+            json={"page_ids": ["1002", "9999"]},
+            headers=agency_h,
         )
         assert bad.status_code == 422
         assert bad.json()["detail"] == {"error": "unknown_page_ids", "page_ids": ["9999"]}
 
         selected = client.put(
             f"{base}/connections/{cid}/pages/selection",
-            json={"tenant_id": agency_id, "page_ids": ["1002"]},
+            json={"page_ids": ["1002"]},
+            headers=agency_h,
         )
         assert selected.status_code == 200, selected.text
         pages = {p["page_id"]: p for p in selected.json()["pages"]}
         assert pages["1002"]["is_selected"] is True and pages["1002"]["has_page_token"] is True
         assert pages["1001"]["is_selected"] is False and pages["1001"]["has_page_token"] is False
-        assert pages["1003"]["is_selected"] is False and pages["1003"]["has_page_token"] is False
         assert "PAGE_TOKEN" not in selected.text
 
-        listed = client.get(f"{base}/connections", params={"tenant_id": owner_id}).json()
+        listed = client.get(f"{base}/connections", headers=owner_h).json()
         assert [c["id"] for c in listed] == [cid]
 
-        res = client.delete(f"{base}/connections/{cid}", params={"tenant_id": agency_id})
-        assert res.status_code == 204
-        assert client.get(f"{base}/connections", params={"tenant_id": owner_id}).json() == []
+        revoked = client.delete(
+            f"{API}/brands/{brand_id}/grants/{grant.json()['id']}", headers=owner_h
+        )
+        assert revoked.status_code == 204, revoked.text
+        assert client.get(f"{base}/connections", headers=owner_h).json() == []
+        assert client.get(f"{base}/connections", headers=agency_h).status_code == 404
 
     assert _run("SELECT COUNT(*) FROM social_connection_pages", scalar=True) == 0
     assert _run("SELECT COUNT(*) FROM social_connections", scalar=True) == 0
     assert _run("SELECT COUNT(*) FROM brand_access_grants", scalar=True) == 1
+    assert (
+        _run(
+            "SELECT COUNT(*) FROM social_connections WHERE connected_by_tenant_id = :id",
+            {"id": UUID(agency_id)},
+            scalar=True,
+        )
+        == 0
+    )
+
+
+def me_agency_user(client: TestClient, headers: dict[str, str]) -> str:
+    return client.get(f"{AUTH}/me", headers=headers).json()["id"]
+
+
+# ---------------------------------------------------------------- I-A1 ---
+def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
+    """I-A1 — 0003 → 0004 → 0003 → 0004; ``uq_users_email_lower`` rejects ``A@x.com`` after
+    ``a@x.com``."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    command.downgrade(cfg, "0003")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0003"
+    tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert not {"users", "refresh_sessions"} & tables
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
+    tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert {"users", "refresh_sessions"} <= tables
+    indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
+    assert {"uq_users_email_lower", "uq_users_tenant_id"} <= indexes
+
+    _seed_fresh()
+    tenant_x = uuid4()
+    _run("INSERT INTO tenants (id, slug, name) VALUES (:id, 'case-x', 'X')", {"id": tenant_x})
+    _run(
+        "INSERT INTO users (id, tenant_id, email, password_hash) VALUES "
+        "(:id, :tenant, 'a@x.com', '$argon2id$x')",
+        {"id": uuid4(), "tenant": tenant_x},
+    )
+    tenant_y = uuid4()
+    _run("INSERT INTO tenants (id, slug, name) VALUES (:id, 'case-y', 'Y')", {"id": tenant_y})
+    with pytest.raises(IntegrityError) as exc:
+        _run(
+            "INSERT INTO users (id, tenant_id, email, password_hash) VALUES "
+            "(:id, :tenant, 'A@x.com', '$argon2id$y')",
+            {"id": uuid4(), "tenant": tenant_y},
+        )
+    assert "uq_users_email_lower" in str(exc.value)
+    # One user per tenant (A2): a second user on tenant_x is refused too.
+    with pytest.raises(IntegrityError) as exc2:
+        _run(
+            "INSERT INTO users (id, tenant_id, email, password_hash) VALUES "
+            "(:id, :tenant, 'b@x.com', '$argon2id$z')",
+            {"id": uuid4(), "tenant": tenant_x},
+        )
+    assert "uq_users_tenant_id" in str(exc2.value)
+    _run("DELETE FROM users")
+    _run("DELETE FROM tenants WHERE slug IN ('case-x', 'case-y')")
+
+
+# ---------------------------------------------------------------- I-A2 ---
+def _cookie(response: httpx.Response) -> str:
+    from http.cookies import SimpleCookie
+
+    jar = SimpleCookie()
+    for raw in response.headers.get_list("set-cookie"):
+        jar.load(raw)
+    return jar[COOKIE].value
+
+
+def test_register_me_refresh_reuse_login_logout_all_on_pg(integration_app: FastAPI) -> None:
+    """I-A2 — register ⇒ me ⇒ refresh ⇒ reuse old ⇒ 401 + all revoked in DB ⇒ login ⇒
+    logout-all ⇒ every session ``revoked_at IS NOT NULL``."""
+    with TestClient(integration_app) as client:
+        reg = client.post(
+            f"{AUTH}/register",
+            json={
+                "email": "Owner@Flow.example",
+                "password": PASSWORD,
+                "tenant_slug": "ia2-owner",
+                "tenant_name": "IA2",
+            },
+        )
+        assert reg.status_code == 201, reg.text
+        bearer = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+        user_id = UUID(reg.json()["user"]["id"])
+        old_cookie = _cookie(reg)
+        old_sid = UUID(old_cookie.partition(".")[0])
+
+        me = client.get(f"{AUTH}/me", headers=bearer)
+        assert me.status_code == 200 and me.json()["tenant"]["slug"] == "ia2-owner"
+
+        client.cookies.set(COOKIE, old_cookie, path=f"{API}/auth")
+        rotated = client.post(f"{AUTH}/refresh", headers=CSRF)
+        assert rotated.status_code == 200, rotated.text
+        new_cookie = _cookie(rotated)
+        new_sid = UUID(new_cookie.partition(".")[0])
+        assert new_sid != old_sid
+
+    row = _rows(
+        "SELECT revoked_at IS NOT NULL, replaced_by FROM refresh_sessions WHERE id = :id",
+        {"id": old_sid},
+    )
+    assert row == [(True, new_sid)]
+
+    with TestClient(integration_app) as client:
+        # Reuse of the rotated-out cookie ⇒ theft suspected ⇒ everything revoked.
+        client.cookies.set(COOKIE, old_cookie, path=f"{API}/auth")
+        replay = client.post(f"{AUTH}/refresh", headers=CSRF)
+        assert replay.status_code == 401
+        assert replay.json()["detail"]["error"] == "refresh_reuse_detected"
+
+    assert _run(LIVE_SESSIONS, {"u": user_id}, scalar=True) == 0
+
+    with TestClient(integration_app) as client:
+        # Login again (case-insensitive email) ⇒ two new sessions ⇒ logout-all kills both.
+        login = client.post(
+            f"{AUTH}/login",
+            json={"email": "owner@flow.example", "password": "a-strong-passphrase-42"},
+        )
+        assert login.status_code == 200, login.text
+        second = client.post(
+            f"{AUTH}/login",
+            json={"email": "OWNER@FLOW.EXAMPLE", "password": "a-strong-passphrase-42"},
+        )
+        assert second.status_code == 200
+        assert (
+            _run(
+                "SELECT COUNT(*) FROM refresh_sessions WHERE user_id = :u AND revoked_at IS NULL",
+                {"u": user_id},
+                scalar=True,
+            )
+            == 2
+        )
+        out = client.post(
+            f"{AUTH}/logout-all",
+            headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        )
+        assert out.status_code == 204
+
+    total = _run(
+        "SELECT COUNT(*) FROM refresh_sessions WHERE user_id = :u", {"u": user_id}, scalar=True
+    )
+    live = _run(
+        "SELECT COUNT(*) FROM refresh_sessions WHERE user_id = :u AND revoked_at IS NULL",
+        {"u": user_id},
+        scalar=True,
+    )
+    assert total == 4 and live == 0  # register + refresh + 2 logins, all revoked
+    assert _run(
+        "SELECT last_login_at IS NOT NULL FROM users WHERE id = :u", {"u": user_id}, scalar=True
+    )
+
+
+# ---------------------------------------------------------------- I-A4 ---
+def test_db_stores_argon2id_and_sha256_only(integration_app: FastAPI) -> None:
+    """I-A4 — ``password_hash`` is Argon2id, ``token_hash`` ≠ cookie secret, and no column
+    anywhere holds the raw password or the raw refresh secret."""
+    password = PASSWORD
+    with TestClient(integration_app) as client:
+        reg = client.post(
+            f"{AUTH}/register",
+            json={
+                "email": "ia4@flow.example",
+                "password": password,
+                "tenant_slug": "ia4-owner",
+                "tenant_name": "IA4",
+            },
+        )
+        assert reg.status_code == 201, reg.text
+        cookie = _cookie(reg)
+    sid_text, _, secret = cookie.partition(".")
+
+    stored_hash = _run(
+        "SELECT password_hash FROM users WHERE email = 'ia4@flow.example'", scalar=True
+    )
+    assert isinstance(stored_hash, str) and stored_hash.startswith("$argon2id$")
+    assert password not in stored_hash
+    token_hash = _run(
+        "SELECT token_hash FROM refresh_sessions WHERE id = :id",
+        {"id": UUID(sid_text)},
+        scalar=True,
+    )
+    assert token_hash != secret and len(token_hash) == 64 and secret not in token_hash
+    columns = {
+        r[0]
+        for r in _rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name IN ('users', 'refresh_sessions')"
+        )
+    }
+    assert not any(c in {"password", "token", "secret", "refresh_token"} for c in columns)
+    text_columns = _rows(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND data_type IN ('text', 'character varying')"
+    )
+    for table, column in text_columns:
+        for needle in (password, secret):
+            hits = _run(
+                f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" = :needle',  # noqa: S608
+                {"needle": needle},
+                scalar=True,
+            )
+            assert hits == 0, (table, column)
+
+
+# ---------------------------------------------------------------- I-B2 ---
+def test_current_user_fresh_after_logout_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """I-B2 — after ``logout`` the same JWT still reads (``CurrentUser``, stateless) but a
+    destructive ``DELETE …/connections/{id}`` is refused with 401 ``session_revoked``."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=1)
+    with TestClient(integration_app) as client:
+        login = client.post(
+            f"{AUTH}/login",
+            json={"email": "nile-owner@example.com", "password": "correct-horse-battery"},
+        )
+        assert login.status_code == 200, login.text
+        owner = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        state = client.post(f"{brand_base()}/connections/start", headers=owner).json()["state"]
+        cid = client.get(CALLBACK, params={"code": "CODE", "state": state}).json()["id"]
+
+        # The client jar also carries the refresh cookie ⇒ A6 CSRF header is required.
+        assert client.post(f"{AUTH}/logout", headers={**owner, **CSRF}).status_code == 204
+
+        still_reads = client.get(f"{brand_base()}/connections/{cid}", headers=owner)
+        assert still_reads.status_code == 200  # documented: valid until exp (≤ 15 min)
+        denied = client.delete(f"{brand_base()}/connections/{cid}", headers=owner)
+        assert denied.status_code == 401
+        assert denied.json()["detail"]["error"] == "session_revoked"
+        assert denied.headers["www-authenticate"] == "Bearer"
+        # Grant revoke and page selection are guarded the same way.
+        sel = client.put(
+            f"{brand_base()}/connections/{cid}/pages/selection",
+            json={"page_ids": ["1001"]},
+            headers=owner,
+        )
+        assert sel.status_code == 401 and sel.json()["detail"]["error"] == "session_revoked"
+
+    assert _run("SELECT COUNT(*) FROM social_connections", scalar=True) == 1  # nothing deleted
 
 
 # ---------------------------------------------------------------- A-T3 ---

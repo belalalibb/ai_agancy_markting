@@ -181,3 +181,28 @@ def test_factory_requires_secret(settings: Settings) -> None:
     empty = settings.model_copy(update={"oauth_state_secret": SecretStr("")})
     with pytest.raises(OAuthStateSecretMissingError):
         get_oauth_state_signer(empty)
+
+
+# ------------------------------------------------------- SPRINT-04 B3: claim ``u`` ---
+def test_oauth_state_carries_optional_user_claim(signer: OAuthStateSigner) -> None:
+    user = uuid4()
+    with_user = signer.issue(TENANT_A, BRAND, user)
+    payload = signer.decode_payload(with_user)
+    assert payload["t"] == TENANT_A and payload["b"] == BRAND and payload["u"] == user
+    assert isinstance(payload["u"], UUID)
+    # ``verify`` is unchanged: still the (tenant, brand) pair.
+    assert signer.verify(with_user) == (TENANT_A, BRAND)
+    # Without a user the claim is absent — older states remain valid.
+    assert "u" not in signer.decode_payload(signer.issue(TENANT_A, BRAND))
+
+
+def test_oauth_state_rejects_non_uuid_user_claim(signer: OAuthStateSigner) -> None:
+    body = json.dumps(
+        {"t": str(TENANT_A), "b": str(BRAND), "u": "not-a-uuid", "n": "x", "iat": 1_800_000_000},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    body_b64 = base64.urlsafe_b64encode(body).rstrip(b"=").decode()
+    sig_b64 = base64.urlsafe_b64encode(signer._sign(body)).rstrip(b"=").decode()  # noqa: SLF001
+    with pytest.raises(InvalidOAuthStateError, match="non-UUID"):
+        signer.verify(f"{body_b64}.{sig_b64}")

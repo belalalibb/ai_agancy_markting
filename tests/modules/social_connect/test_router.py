@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
@@ -68,9 +69,18 @@ SECRET_PATTERNS = re.compile(
 )
 
 
+Headers = Callable[[UUID], dict[str, str]]
+
+
 @pytest.fixture
 def signer() -> OAuthStateSigner:
     return OAuthStateSigner(FAKE_STATE_SECRET)
+
+
+@pytest.fixture
+def as_(auth_headers: Headers) -> Headers:
+    """``as_(tenant_id)`` ⇒ Bearer headers for that tenant's user (SPRINT-04 B5)."""
+    return auth_headers
 
 
 def _stub_oauth(graph_mock: respx.MockRouter) -> None:
@@ -108,6 +118,7 @@ def _callback(
 
 def _select(
     client: TestClient,
+    as_: Headers,
     cid: str,
     page_ids: list[str],
     tenant: UUID = OWNER_ID,
@@ -115,7 +126,8 @@ def _select(
 ) -> httpx.Response:
     return client.put(
         f"{brand_base(brand)}/connections/{cid}/pages/selection",
-        json={"tenant_id": str(tenant), "page_ids": page_ids},
+        json={"page_ids": page_ids},
+        headers=as_(tenant),
     )
 
 
@@ -163,10 +175,10 @@ def test_openapi_lists_exactly_the_brand_scoped_meta_routes(client: TestClient) 
     assert not any(p.startswith(f"{API}/social/meta/connections") for p in paths)
 
 
-def test_removed_routes_return_404(client: TestClient) -> None:
+def test_removed_routes_return_404(client: TestClient, as_: Headers) -> None:
     old = f"{API}/social/meta"
     assert client.post(f"{old}/connections/start", json={}).status_code in (404, 405)
-    assert client.get(f"{old}/connections", params={"tenant_id": str(OWNER_ID)}).status_code == 404
+    assert client.get(f"{old}/connections", headers=as_(OWNER_ID)).status_code == 404
     assert client.get(f"{old}/connections/{uuid4()}").status_code == 404
     assert client.get(f"{old}/authorize-url").status_code in (404, 405)
 
@@ -181,35 +193,63 @@ def test_module_level_app_boots_and_owns_shared_http_client() -> None:
 
 # ---------------------------------------------------------------- start ---
 def test_start_connection_returns_signed_state_and_url(
-    client: TestClient, signer: OAuthStateSigner
+    client: TestClient, signer: OAuthStateSigner, as_: Headers
 ) -> None:
-    res = client.post(f"{BASE}/connections/start", json={"tenant_id": str(OWNER_ID)})
+    res = client.post(f"{BASE}/connections/start", headers=as_(OWNER_ID))
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["authorization_url"].startswith("https://www.facebook.com/")
     assert body["state"] in body["authorization_url"]
-    # B-U7: the state carries both tenant and brand.
+    # B-U7: the state carries both tenant and brand — taken from the JWT, not the body.
     assert signer.verify(body["state"]) == (OWNER_ID, BRAND_ID)
     assert FAKE_APP_SECRET not in res.text
 
 
-def test_start_connection_validates_body(client: TestClient) -> None:
-    assert client.post(f"{BASE}/connections/start", json={}).status_code == 422
-    assert client.post(f"{BASE}/connections/start", json={"tenant_id": ""}).status_code == 422
-    assert client.post(f"{BASE}/connections/start", json={"tenant_id": "demo"}).status_code == 422
+def test_start_connection_state_carries_user_claim_u(
+    client: TestClient, signer: OAuthStateSigner, as_: Headers
+) -> None:
+    """B-U4 — ``u`` = the user who started the flow (audit); callback needs no Bearer."""
+    from tests.conftest import OWNER_USER_ID
+
+    state = client.post(f"{BASE}/connections/start", headers=as_(OWNER_ID)).json()["state"]
+    payload = signer.decode_payload(state)
+    assert payload["t"] == OWNER_ID and payload["b"] == BRAND_ID
+    assert payload["u"] == OWNER_USER_ID
 
 
-def test_start_connection_unknown_brand_404(client: TestClient) -> None:
-    res = client.post(
-        f"{brand_base(uuid4())}/connections/start", json={"tenant_id": str(OWNER_ID)}
+def test_start_connection_validates_body(client: TestClient, as_: Headers) -> None:
+    """B-U2 — the body is optional and must be *empty*; ``tenant_id`` is no longer accepted."""
+    assert (
+        client.post(f"{BASE}/connections/start", json={}, headers=as_(OWNER_ID)).status_code == 200
     )
+    assert client.post(f"{BASE}/connections/start", headers=as_(OWNER_ID)).status_code == 200
+    spoof = client.post(
+        f"{BASE}/connections/start", json={"tenant_id": str(OWNER_ID)}, headers=as_(AGENCY_ID)
+    )
+    assert spoof.status_code == 422
+    assert client.post(f"{BASE}/connections/start", json={}).status_code == 401
+
+
+def test_start_connection_unknown_brand_404(client: TestClient, as_: Headers) -> None:
+    res = client.post(f"{brand_base(uuid4())}/connections/start", headers=as_(OWNER_ID))
     assert res.status_code == 404
     assert res.json()["detail"]["error"] == "brand_not_found"
 
 
-def test_start_connection_stranger_404_not_403(client: TestClient) -> None:
-    res = client.post(f"{BASE}/connections/start", json={"tenant_id": str(STRANGER_ID)})
-    assert res.status_code == 404  # existence hidden
+def test_start_connection_stranger_404_not_403(client: TestClient, as_: Headers) -> None:
+    """B-U3 — a tenant without any grant sees 404 (existence hidden), never 403."""
+    res = client.post(f"{BASE}/connections/start", headers=as_(STRANGER_ID))
+    assert res.status_code == 404
+
+
+def test_start_connection_agency_state_names_agency(
+    client: TestClient, signer: OAuthStateSigner, store: FakeStore, as_: Headers
+) -> None:
+    """B-U3 — a MANAGER grantee starting the flow gets ``state.t == AGENCY_ID``."""
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    res = client.post(f"{BASE}/connections/start", headers=as_(AGENCY_ID))
+    assert res.status_code == 200
+    assert signer.verify(res.json()["state"]) == (AGENCY_ID, BRAND_ID)
 
 
 # ------------------------------------------------------------- callback ---
@@ -400,9 +440,10 @@ def test_callback_with_revoked_grant_404_without_graph_call(
     signer: OAuthStateSigner,
     store: FakeStore,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     g = grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
-    start = client.post(f"{BASE}/connections/start", json={"tenant_id": str(AGENCY_ID)})
+    start = client.post(f"{BASE}/connections/start", headers=as_(AGENCY_ID))
     assert start.status_code == 200
     state = start.json()["state"]
     # Grant revoked between start and callback.
@@ -440,25 +481,30 @@ def test_viewer_can_read_but_not_write(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     store: FakeStore,
+    as_: Headers,
 ) -> None:
     grant(store, BRAND_ID, AGENCY_ID, GrantRole.VIEWER)
     _stub_happy_path(graph_mock, pages=3)
     cid = _callback(client, signer).json()["id"]
-    viewer = {"tenant_id": str(AGENCY_ID)}
+    viewer = as_(AGENCY_ID)
 
-    assert client.get(f"{BASE}/connections", params=viewer).status_code == 200
-    assert client.get(f"{BASE}/connections/{cid}", params=viewer).status_code == 200
-    start = client.post(f"{BASE}/connections/start", json=viewer)
+    assert client.get(f"{BASE}/connections", headers=viewer).status_code == 200
+    assert client.get(f"{BASE}/connections/{cid}", headers=viewer).status_code == 200
+    start = client.post(f"{BASE}/connections/start", headers=viewer)
     assert start.status_code == 403
     assert start.json()["detail"]["error"] == "insufficient_role"
-    assert _select(client, cid, ["1001"], tenant=AGENCY_ID).status_code == 403
-    assert client.delete(f"{BASE}/connections/{cid}", params=viewer).status_code == 403
+    assert _select(client, as_, cid, ["1001"], tenant=AGENCY_ID).status_code == 403
+    assert client.delete(f"{BASE}/connections/{cid}", headers=viewer).status_code == 403
     # Still there.
-    assert client.get(f"{BASE}/connections/{cid}", params=viewer).status_code == 200
+    assert client.get(f"{BASE}/connections/{cid}", headers=viewer).status_code == 200
 
 
 def test_manager_can_write(
-    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, store: FakeStore
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
 ) -> None:
     grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
     _stub_happy_path(graph_mock, pages=3)
@@ -466,13 +512,8 @@ def test_manager_can_write(
     assert res.status_code == 201
     assert res.json()["connected_by_tenant_id"] == str(AGENCY_ID)
     cid = res.json()["id"]
-    assert _select(client, cid, ["1002"], tenant=AGENCY_ID).status_code == 200
-    assert (
-        client.delete(
-            f"{BASE}/connections/{cid}", params={"tenant_id": str(AGENCY_ID)}
-        ).status_code
-        == 204
-    )
+    assert _select(client, as_, cid, ["1002"], tenant=AGENCY_ID).status_code == 200
+    assert client.delete(f"{BASE}/connections/{cid}", headers=as_(AGENCY_ID)).status_code == 204
 
 
 # --------------------------------------------- B-U8: callback selection ---
@@ -528,10 +569,11 @@ def test_reconnect_preserves_selection_and_refreshes_tokens(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock, pages=3)
     cid = _callback(client, signer).json()["id"]
-    assert _select(client, cid, ["1001", "1003"]).status_code == 200
+    assert _select(client, as_, cid, ["1001", "1003"]).status_code == 200
     before = fake_repo.rows[UUID(cid)]
     old_tokens = {p.page_id: p.encrypted_page_token for p in before.pages}
     old_user_token = before.encrypted_user_token
@@ -577,10 +619,11 @@ def test_selection_one_of_three(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock, pages=3)
     cid = _callback(client, signer).json()["id"]
-    res = _select(client, cid, ["1002"])
+    res = _select(client, as_, cid, ["1002"])
     assert res.status_code == 200, res.text
     pages = _pages_by_id(res.json())
     assert pages["1002"] == {**pages["1002"], "is_selected": True, "has_page_token": True}
@@ -601,11 +644,12 @@ def test_deselect_wipes_token(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock, pages=3)
     cid = _callback(client, signer).json()["id"]
-    assert _select(client, cid, ["1001", "1002"]).status_code == 200
-    res = _select(client, cid, ["1002"])
+    assert _select(client, as_, cid, ["1001", "1002"]).status_code == 200
+    res = _select(client, as_, cid, ["1002"])
     pages = _pages_by_id(res.json())
     assert pages["1001"]["is_selected"] is False and pages["1001"]["has_page_token"] is False
     assert pages["1002"]["is_selected"] is True and pages["1002"]["has_page_token"] is True
@@ -619,13 +663,14 @@ def test_selection_unknown_page_ids_422_no_change(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock, pages=3)
     cid = _callback(client, signer).json()["id"]
-    assert _select(client, cid, ["1001"]).status_code == 200
+    assert _select(client, as_, cid, ["1001"]).status_code == 200
     snapshot = fake_repo.rows[UUID(cid)].model_copy(deep=True)
 
-    res = _select(client, cid, ["1002", "9999", "8888"])
+    res = _select(client, as_, cid, ["1002", "9999", "8888"])
     assert res.status_code == 422
     assert res.json()["detail"] == {"error": "unknown_page_ids", "page_ids": ["9999", "8888"]}
     assert fake_repo.rows[UUID(cid)] == snapshot  # untouched
@@ -637,12 +682,13 @@ def test_selection_new_meta_pages_added_unselected(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock, pages=2)
     cid = _callback(client, signer).json()["id"]
     # A third Page appears on Meta before the selection call.
     graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(3)))
-    res = _select(client, cid, ["1001"])
+    res = _select(client, as_, cid, ["1001"])
     pages = _pages_by_id(res.json())
     assert set(pages) == {"1001", "1002", "1003"}
     assert pages["1003"]["is_selected"] is False and pages["1003"]["has_page_token"] is False
@@ -654,33 +700,41 @@ def test_selection_expired_user_token_401_and_reauth_required(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock, pages=3)
     cid = _callback(client, signer).json()["id"]
     graph_mock.get("/me/accounts").mock(
         return_value=httpx.Response(400, json=oauth_error_payload())
     )
-    res = _select(client, cid, ["1001"])
+    res = _select(client, as_, cid, ["1001"])
     assert res.status_code == 401
     assert res.json()["detail"]["error"] == "MetaTokenExpiredError"
     assert res.json()["detail"]["required_action"] == "reconnect"
     assert fake_repo.rows[UUID(cid)].status.value == "reauth_required"
-    got = client.get(f"{BASE}/connections/{cid}", params={"tenant_id": str(OWNER_ID)})
+    got = client.get(f"{BASE}/connections/{cid}", headers=as_(OWNER_ID))
     assert got.json()["status"] == "reauth_required"
     fake_repo.assert_selection_invariant()
 
 
-def test_selection_validation(client: TestClient) -> None:
+def test_selection_validation(client: TestClient, as_: Headers) -> None:
     cid = uuid4()
     url = f"{BASE}/connections/{cid}/pages/selection"
-    t = str(OWNER_ID)
-    assert client.put(url, json={"tenant_id": t, "page_ids": []}).status_code == 422
-    assert client.put(url, json={"tenant_id": t, "page_ids": ["1", "1"]}).status_code == 422
-    assert client.put(url, json={"tenant_id": t, "page_ids": [" "]}).status_code == 422
-    assert client.put(url, json={"tenant_id": t, "page_ids": ["x"] * 51}).status_code == 422
-    assert client.put(url, json={"page_ids": ["1"]}).status_code == 422
+    h = as_(OWNER_ID)
+    assert client.put(url, json={"page_ids": []}, headers=h).status_code == 422
+    assert client.put(url, json={"page_ids": ["1", "1"]}, headers=h).status_code == 422
+    assert client.put(url, json={"page_ids": [" "]}, headers=h).status_code == 422
+    assert client.put(url, json={"page_ids": ["x"] * 51}, headers=h).status_code == 422
+    # B-U2: ``tenant_id`` in the body is rejected (extra=forbid).
+    assert (
+        client.put(
+            url, json={"tenant_id": str(OWNER_ID), "page_ids": ["1"]}, headers=h
+        ).status_code
+        == 422
+    )
+    assert client.put(url, json={"page_ids": ["1"]}).status_code == 401
     # Valid body but unknown connection in an accessible brand → 404.
-    assert client.put(url, json={"tenant_id": t, "page_ids": ["1"]}).status_code == 404
+    assert client.put(url, json={"page_ids": ["1"]}, headers=h).status_code == 404
 
 
 # ----------------------------------------- B-U10: two brands, one account ---
@@ -689,6 +743,7 @@ def test_same_meta_user_in_two_brands_is_two_independent_rows(
     graph_mock: respx.MockRouter,
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock, pages=3)
     a = _callback(client, signer, brand=BRAND_ID).json()
@@ -697,75 +752,99 @@ def test_same_meta_user_in_two_brands_is_two_independent_rows(
     assert a["provider_user_id"] == b["provider_user_id"] == "10001"
     assert len(fake_repo.rows) == 2
 
-    assert _select(client, a["id"], ["1001"], brand=BRAND_ID).status_code == 200
+    assert _select(client, as_, a["id"], ["1001"], brand=BRAND_ID).status_code == 200
     other = client.get(
-        f"{brand_base(BRAND2_ID)}/connections/{b['id']}", params={"tenant_id": str(OWNER_ID)}
+        f"{brand_base(BRAND2_ID)}/connections/{b['id']}", headers=as_(OWNER_ID)
     ).json()
     assert all(not p["is_selected"] for p in other["pages"])
     # Cross-brand access to a connection id is a 404.
-    cross = client.get(f"{BASE}/connections/{b['id']}", params={"tenant_id": str(OWNER_ID)})
+    cross = client.get(f"{BASE}/connections/{b['id']}", headers=as_(OWNER_ID))
     assert cross.status_code == 404
     fake_repo.assert_selection_invariant()
 
 
 # ----------------------------------------------------- list / get / delete ---
 def test_list_get_delete_flow(
-    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
 ) -> None:
     _stub_happy_path(graph_mock)
     created = _callback(client, signer).json()
     cid = created["id"]
-    owner = {"tenant_id": str(OWNER_ID)}
+    owner = as_(OWNER_ID)
 
-    listed = client.get(f"{BASE}/connections", params=owner)
+    listed = client.get(f"{BASE}/connections", headers=owner)
     assert listed.status_code == 200
     assert [c["id"] for c in listed.json()] == [cid]
     # Other brand of the same owner: empty.
-    assert client.get(f"{brand_base(BRAND2_ID)}/connections", params=owner).json() == []
+    assert client.get(f"{brand_base(BRAND2_ID)}/connections", headers=owner).json() == []
 
-    one = client.get(f"{BASE}/connections/{cid}", params=owner)
+    one = client.get(f"{BASE}/connections/{cid}", headers=owner)
     assert one.status_code == 200
     assert one.json()["id"] == cid
 
-    stranger = {"tenant_id": str(STRANGER_ID)}
-    assert client.get(f"{BASE}/connections/{cid}", params=stranger).status_code == 404
-    assert client.delete(f"{BASE}/connections/{cid}", params=stranger).status_code == 404
+    stranger = as_(STRANGER_ID)
+    assert client.get(f"{BASE}/connections/{cid}", headers=stranger).status_code == 404
+    assert client.delete(f"{BASE}/connections/{cid}", headers=stranger).status_code == 404
 
-    deleted = client.delete(f"{BASE}/connections/{cid}", params=owner)
+    deleted = client.delete(f"{BASE}/connections/{cid}", headers=owner)
     assert deleted.status_code == 204
-    assert client.get(f"{BASE}/connections/{cid}", params=owner).status_code == 404
-    assert client.delete(f"{BASE}/connections/{cid}", params=owner).status_code == 404
+    assert client.get(f"{BASE}/connections/{cid}", headers=owner).status_code == 404
+    assert client.delete(f"{BASE}/connections/{cid}", headers=owner).status_code == 404
 
 
-def test_get_unknown_connection_404(client: TestClient) -> None:
-    res = client.get(f"{BASE}/connections/{uuid4()}", params={"tenant_id": str(OWNER_ID)})
+def test_get_unknown_connection_404(client: TestClient, as_: Headers) -> None:
+    res = client.get(f"{BASE}/connections/{uuid4()}", headers=as_(OWNER_ID))
     assert res.status_code == 404
 
 
-def test_tenant_id_is_required_and_uuid_on_read_routes(client: TestClient) -> None:
-    assert client.get(f"{BASE}/connections").status_code == 422
-    assert client.get(f"{BASE}/connections/{uuid4()}").status_code == 422
-    assert client.delete(f"{BASE}/connections/{uuid4()}").status_code == 422
-    assert client.get(f"{BASE}/connections", params={"tenant_id": "demo"}).status_code == 422
-    bad = client.get(f"{BASE}/connections/not-a-uuid", params={"tenant_id": str(OWNER_ID)})
+def test_bearer_is_required_on_read_routes_and_query_tenant_id_is_ignored(
+    client: TestClient, as_: Headers
+) -> None:
+    """SPRINT-04 B-U5 — no Bearer ⇒ 401; a stray ``?tenant_id=`` never changes the actor."""
+    for res in (
+        client.get(f"{BASE}/connections"),
+        client.get(f"{BASE}/connections/{uuid4()}"),
+        client.delete(f"{BASE}/connections/{uuid4()}"),
+    ):
+        assert res.status_code == 401
+        assert res.headers["www-authenticate"] == "Bearer"
+    # Stranger spoofing the owner via query string still gets the stranger's view (404).
+    spoof = client.get(
+        f"{BASE}/connections", params={"tenant_id": str(OWNER_ID)}, headers=as_(STRANGER_ID)
+    )
+    assert spoof.status_code == 404
+    # And the owner with a bogus query value is unaffected.
+    assert (
+        client.get(
+            f"{BASE}/connections", params={"tenant_id": "demo"}, headers=as_(OWNER_ID)
+        ).status_code
+        == 200
+    )
+    bad = client.get(f"{BASE}/connections/not-a-uuid", headers=as_(OWNER_ID))
     assert bad.status_code == 422
 
 
 # ------------------------------------------------------- Zero-Secret guard ---
 def test_router_responses_never_contain_tokens(
-    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
 ) -> None:
     """U17 — scan every successful route body for anything token-like."""
     _stub_happy_path(graph_mock, pages=3)
-    owner = {"tenant_id": str(OWNER_ID)}
+    owner = as_(OWNER_ID)
     bodies = [
-        client.post(f"{BASE}/connections/start", json=owner).text,
+        client.post(f"{BASE}/connections/start", headers=owner).text,
         _callback(client, signer).text,
-        client.get(f"{BASE}/connections", params=owner).text,
+        client.get(f"{BASE}/connections", headers=owner).text,
     ]
     cid = json.loads(bodies[2])[0]["id"]
-    bodies.append(_select(client, cid, ["1001", "1002"]).text)
-    bodies.append(client.get(f"{BASE}/connections/{cid}", params=owner).text)
+    bodies.append(_select(client, as_, cid, ["1001", "1002"]).text)
+    bodies.append(client.get(f"{BASE}/connections/{cid}", headers=owner).text)
     for body in bodies:
         _assert_no_secrets(body)
 
@@ -852,18 +931,19 @@ def test_identity_and_secrets_never_logged(
     signer: OAuthStateSigner,
     fake_repo: FakeConnectedAccountRepository,
     caplog: pytest.LogCaptureFixture,
+    as_: Headers,
 ) -> None:
     """B7 — the full flow at DEBUG emits neither identity nor tokens (raw or encrypted)."""
     _stub_happy_path(graph_mock, pages=3)
-    owner = {"tenant_id": str(OWNER_ID)}
+    owner = as_(OWNER_ID)
     with caplog.at_level(logging.DEBUG, logger="src"):
-        client.post(f"{BASE}/connections/start", json=owner)
+        client.post(f"{BASE}/connections/start", headers=owner)
         created = _callback(client, signer).json()
         cid = created["id"]
-        _select(client, cid, ["1001"])
+        _select(client, as_, cid, ["1001"])
         stored = fake_repo.rows[UUID(cid)].model_copy(deep=True)
-        client.get(f"{BASE}/connections/{cid}", params=owner)
-        client.delete(f"{BASE}/connections/{cid}", params=owner)
+        client.get(f"{BASE}/connections/{cid}", headers=owner)
+        client.delete(f"{BASE}/connections/{cid}", headers=owner)
 
     text = "\n".join(
         f"{r.getMessage()} {r.args!r}" for r in caplog.records if r.name.startswith("src")
@@ -897,12 +977,15 @@ def test_missing_encryption_key_returns_503(
         app.dependency_overrides.pop(get_settings, None)
 
 
-def test_missing_state_secret_returns_503(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_state_secret_returns_503(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, as_: Headers
+) -> None:
+    headers = as_(OWNER_ID)  # issued with the *test* JWT secret before settings are swapped
     monkeypatch.delenv("OAUTH_STATE_SECRET", raising=False)
     app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None)  # type: ignore[call-arg]
     try:
         with TestClient(app) as c:
-            res = c.post(f"{BASE}/connections/start", json={"tenant_id": str(OWNER_ID)})
+            res = c.post(f"{BASE}/connections/start", headers=headers)
         assert res.status_code == 503
         assert "state" in res.json()["detail"].lower()
     finally:

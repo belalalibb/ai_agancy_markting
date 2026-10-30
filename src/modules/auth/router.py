@@ -17,9 +17,11 @@ Error bodies: ``{"error": "<code>", "message": "..."}``.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from src.core.config import Settings, get_settings
 from src.modules.auth.dependencies import (
@@ -98,7 +100,17 @@ AppSettings = Annotated[Settings, Depends(get_settings)]
 
 
 def _client(request: Request) -> ClientInfo:
-    return ClientInfo(user_agent=request.headers.get("user-agent"), ip=client_ip(request))
+    """Audit info for the session row; ``ip`` is stored only when it is a real IPv4/IPv6
+    literal (the column is ``INET``) — anything else (unix sockets, test clients) ⇒ NULL."""
+    return ClientInfo(user_agent=request.headers.get("user-agent"), ip=_inet_or_none(request))
+
+
+def _inet_or_none(request: Request) -> str | None:
+    host = client_ip(request)
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return None
 
 
 def _cookie_path(settings: Settings) -> str:
@@ -227,7 +239,7 @@ async def refresh(
     service: Service,
     limiter: Limiter,
     settings: AppSettings,
-) -> TokenOut:
+) -> TokenOut | Response:
     _limit_by_ip(request, limiter)
     _require_csrf(request, settings)
     cookie = request.cookies.get(settings.auth_refresh_cookie_name)
@@ -236,9 +248,15 @@ async def refresh(
     try:
         issued = await service.refresh(cookie, client=_client(request))
     except AuthError as exc:
+        # *Return* the error instead of raising it: an exception makes ``get_db_session``
+        # roll back, which would silently undo the reuse-detection ``revoke_all_for_user``.
+        # The 401 must be durable (I-A2), so the request-scoped transaction has to commit.
         http = to_http(exc)
-        http.headers = {**(http.headers or {}), **_clear_cookie_header(settings)}
-        raise http from exc
+        return JSONResponse(
+            status_code=http.status_code,
+            content={"detail": http.detail},
+            headers={**(http.headers or {}), **_clear_cookie_header(settings)},
+        )
     _set_refresh_cookie(response, settings, issued.refresh_cookie_value)
     return _token_out(issued)
 

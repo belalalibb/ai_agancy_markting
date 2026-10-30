@@ -561,4 +561,13 @@ def test_session_stores_only_sha256_of_cookie_secret(client: TestClient, store: 
     assert session.token_hash == hash_refresh_secret(secret)
     assert secret not in session.model_dump_json()
     assert session.user_agent == "testclient"
-    assert session.ip == "testclient"
+    assert session.ip is None  # "testclient" is not an IP literal ⇒ INET column gets NULL
+
+
+def test_session_records_real_client_ip(app: FastAPI, store: FakeStore) -> None:
+    """A genuine IPv4/IPv6 peer address is persisted; non-IP hosts are dropped (INET column)."""
+    with TestClient(app, client=("203.0.113.9", 51234)) as c:
+        res = c.post(f"{AUTH}/login", json=OWNER_LOGIN)
+        assert res.status_code == 200, res.text
+        sid = UUID(set_cookie_header(res)[COOKIE].value.partition(".")[0])
+    assert store.sessions[sid].ip == "203.0.113.9"

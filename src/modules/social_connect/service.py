@@ -85,8 +85,10 @@ class MetaConnectService:
         self._settings = settings
 
     # ------------------------------------------------------------- start ---
-    def start_connection(self, tenant_id: UUID, brand_id: UUID) -> MetaAuthorizeUrlResponse:
-        state = self._state_signer.issue(tenant_id, brand_id)
+    def start_connection(
+        self, tenant_id: UUID, brand_id: UUID, user_id: UUID | None = None
+    ) -> MetaAuthorizeUrlResponse:
+        state = self._state_signer.issue(tenant_id, brand_id, user_id)
         url, _ = self._client.build_authorize_url(
             self._settings.meta_oauth_redirect_uri, state=state
         )
