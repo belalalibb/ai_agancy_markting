@@ -17,9 +17,28 @@ from pydantic import (
     field_validator,
 )
 
-from src.modules.social_connect.domain.models import ConnectedAccount, PageAsset
+from src.modules.social_connect.domain.models import AccountStatus, ConnectedAccount, PageAsset
 
 TokenType = Literal["bearer"]
+
+# SPRINT-05 B1: derived, client-facing health of the stored credential (no token exposed).
+TokenHealth = Literal["valid", "expiring_soon", "expired", "unknown", "reauth_required"]
+EXPIRING_SOON_WINDOW = timedelta(days=7)
+
+
+def compute_token_health(account: ConnectedAccount, *, now: datetime) -> TokenHealth:
+    """B1 rules, in priority order: ``reauth_required`` status wins; unknown expiry ⇒
+    ``unknown``; past ⇒ ``expired``; within 7 days ⇒ ``expiring_soon``; else ``valid``."""
+    if account.status == AccountStatus.REAUTH_REQUIRED:
+        return "reauth_required"
+    expires_at = account.token_expires_at
+    if expires_at is None:
+        return "unknown"
+    if expires_at <= now:
+        return "expired"
+    if expires_at - now <= EXPIRING_SOON_WINDOW:
+        return "expiring_soon"
+    return "valid"
 
 
 class MetaAuthRequest(BaseModel):
@@ -225,8 +244,12 @@ class ConnectedAccountPublic(BaseModel):
     )
     granted_scopes: list[str] = Field(default_factory=list)
     status: str
+    # SPRINT-05 B1: derived from ``status`` + ``expires_at`` at render time (visible to all).
+    token_health: TokenHealth = "unknown"  # noqa: S105 - health *label*, not a secret
     connected_at: datetime
-    last_synced_at: datetime | None = None
+    last_synced_at: datetime | None = Field(
+        default=None, description="Last successful sync with Meta (OAuth, selection, resync)."
+    )
     updated_at: datetime
     # H1: ``True`` when the viewer is ``connected_by_tenant_id`` — only then may the client
     # offer the selection UI (and only then does ``pages`` include unselected Pages).
@@ -235,17 +258,23 @@ class ConnectedAccountPublic(BaseModel):
 
     @classmethod
     def from_domain(
-        cls, account: ConnectedAccount, *, viewer_tenant_id: UUID
+        cls,
+        account: ConnectedAccount,
+        *,
+        viewer_tenant_id: UUID,
+        now: datetime | None = None,
     ) -> ConnectedAccountPublic:
         """Public view **for a given viewer** (SPRINT-04.1 H1).
 
         Unselected Pages are personal data of the Meta account that ran OAuth (an agency's
         other clients, for instance). They are shown only to the connection owner; every
-        other role on the brand sees the selected Pages alone.
+        other role on the brand sees the selected Pages alone. ``now`` is injectable for a
+        deterministic ``token_health`` (B1).
         """
         is_owner = account.connected_by_tenant_id == viewer_tenant_id
         data = account.model_dump(exclude={"pages", *_SENSITIVE_ACCOUNT_FIELDS})
         data["is_connection_owner"] = is_owner
+        data["token_health"] = compute_token_health(account, now=now or datetime.now(tz=UTC))
         data["pages"] = [
             PageAssetPublic.from_domain(page)
             for page in account.pages
@@ -255,3 +284,74 @@ class ConnectedAccountPublic(BaseModel):
 
 
 ConnectedAccountOut = ConnectedAccountPublic
+
+
+# ------------------------------------------------ SPRINT-05 operational reads ---
+class ResyncResponse(ConnectedAccountPublic):
+    """B2: the refreshed connection plus the selected Pages Meta no longer returned."""
+
+    removed_selected_page_ids: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_resync(
+        cls,
+        account: ConnectedAccount,
+        *,
+        viewer_tenant_id: UUID,
+        removed_selected_page_ids: list[str],
+        now: datetime | None = None,
+    ) -> ResyncResponse:
+        base = ConnectedAccountPublic.from_domain(
+            account, viewer_tenant_id=viewer_tenant_id, now=now
+        )
+        return cls.model_validate(
+            {**base.model_dump(), "removed_selected_page_ids": list(removed_selected_page_ids)}
+        )
+
+
+class PagePostPublic(BaseModel):
+    """B3: one Page post (``GET /{page_id}/posts``) — only the whitelisted fields."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    message: str | None = None
+    created_time: datetime
+    permalink_url: str | None = None
+    status_type: str | None = None
+    full_picture: str | None = None
+    is_published: bool | None = None
+
+
+class InstagramMediaPublic(BaseModel):
+    """B4: one Instagram media node (``GET /{ig_user_id}/media``)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    caption: str | None = None
+    media_type: str
+    media_url: str | None = None
+    thumbnail_url: str | None = None
+    permalink: str | None = None
+    timestamp: datetime
+    like_count: int | None = None
+    comments_count: int | None = None
+
+
+class _CursorPage(BaseModel):
+    """Opaque cursor pagination. ``next_cursor`` is ``paging.cursors.after`` **only** — the
+    raw Graph paging URL (which embeds the Page token) is never exposed (§2-0(a))."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class PagePostsPage(_CursorPage):
+    items: list[PagePostPublic] = Field(default_factory=list)
+
+
+class InstagramMediaPage(_CursorPage):
+    items: list[InstagramMediaPublic] = Field(default_factory=list)

@@ -7,6 +7,7 @@ lives in ``infrastructure/postgres_repository.py``. Every operation is scoped by
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
@@ -45,4 +46,18 @@ class ConnectedAccountRepository(Protocol):
 
     async def delete(self, brand_id: UUID, account_id: UUID) -> bool:
         """Return ``True`` when a row was deleted (pages cascade), ``False`` when not found."""
+        ...
+
+    async def update_token_metadata(
+        self,
+        brand_id: UUID,
+        account_id: UUID,
+        *,
+        token_expires_at: datetime | None,
+        granted_scopes: list[str] | None,
+        last_synced_at: datetime,
+    ) -> bool:
+        """SPRINT-05 B2 (resync): refresh expiry / scopes / ``last_synced_at`` of the stored
+        user token **without** touching the ciphertext, the status or the Pages.
+        ``granted_scopes=None`` keeps the stored scopes. ``False`` when not found."""
         ...

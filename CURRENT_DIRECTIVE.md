@@ -162,15 +162,26 @@ ls alembic/versions/
 
 ## 6. تقرير المنفذ (يملؤه المنفذ)
 
-- **حالة التنفيذ:** `[ ] مكتمل` / `[ ] جزئي — السبب:`
-- **Commit SHA Part A:** — **Part B:** — **docs:**
-- **PR:** #— — **CI:**
-- **الاختبارات:** وحدة — / تكامل — / الكل — — **التغطية:** —%
-- **A-0:** سطر `"method": "GET"` في `meta_client.py`: — ؛ سطر `logger.error` + العدّاد: —
-- **B3/B4: أسطر `headers=`/`params=` للنقطتين الجديدتين:** —
-- **B2: سياسة الدمج كما نُفّذت (سطر):** —
+- **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي — السبب:` — كل بنود A-0/A-1/B1–B5 منفَّذة؛ لا هجرة، لا تغيير مخطط، لا اعتمادية جديدة (`git diff origin/main -- pyproject.toml requirements.txt` فارغ)؛ `alembic/versions/` = 0001–0004 فقط؛ لا ملف محظور مُسّ.
+- **Commit SHA Part A:** `faac70a` — **Part B:** `1b6e3d1` — **docs:** `6a4c363` (+ هذا الكوميت الذي يسجّل نتيجة CI)
+- **PR:** #16 https://github.com/belalalibb/ai_agancy_markting/pull/16 — **CI:** **خضراء 10/10** على `6a4c363` (lint / unit / integration / secrets / licenses × push + PR؛ Checks API `success`). محلياً: `ruff check` + `ruff format --check` نظيفان؛ pytest كامل على PG 17 حقيقي أخضر.
+- **الاختبارات:** وحدة 490 / تكامل 33 / الكل **523 passed, 0 failed** — **التغطية:** **99%** (`--cov-fail-under=95`؛ 3 أسطر فقط غير مغطاة: `exceptions.py:118` دفاعي قديم، `postgres_repository.py:162` فرع `granted_scopes=None` على PG، `service.py:596` فرع `cursors.after` غير نصّي).
+- **A-0:** سطر `"method": "GET"` في `meta_client.py`: **208** (`data={"input_token": input_token, "method": "GET"}`؛ `_URL_SECRET_PARAMS` += `input_token`, `method` سطر 58–60) ؛ سطر `logger.error` + العدّاد: **`service.py:520`** (`counters.increment("meta_debug_token_failures")`) + **521** (`logger.error("debug_token misconfiguration: …")`)؛ العدّاد في ملف جديد `src/core/metrics.py` (`Counters` آمن للخيوط + `counters` singleton؛ اختباراته `tests/core/test_metrics.py`). WARNING محفوظ لـ `MetaNetworkError`/`MetaTransientError`/`MetaRateLimitError` (سطر 510–518). اختبارات: A0-U1 `test_meta_client.py:459`؛ A0-U2 (×3: code 100 / transient / generic) `test_service.py:458,494,521`؛ A0-U3 `test_service.py:539` (فرع `service.py:300` القديم = fallback في `_mark_reauth_required`)؛ A0-U4 `tenancy/test_router.py:289`. A-1: A1-I1 `test_postgres_persistence.py:1531`، A1-I2 `:1578`.
+- **B3/B4: أسطر `headers=`/`params=` للنقطتين الجديدتين:** `get_page_posts` `meta_client.py:276` ⇒ `params=params` **306** / `headers=_bearer(page_access_token)` **307**؛ `get_instagram_media` `:310` ⇒ `params=params` **338** / `headers=` **339**. `params` يحوي فقط `fields`, `limit` (1..100)، `after` (اختياري)، `appsecret_proof` (HMAC-SHA256 لتوكن الصفحة). المسارات: `router.py:401` (posts) و`:436` (media)؛ `Query(ge=1, le=100)` + `after` ≤512 عبر `LimitQuery`/`AfterQuery`. الترقيم: `service.py:586 _cursor()` يستخرج `paging.cursors.after` فقط عندما يوجد `paging.next`؛ `paging.next` لا يُعاد ولا يُسجَّل ولا يُتبَع (`grep paging.next schemas.py router.py` فارغ).
+- **B2: سياسة الدمج كما نُفّذت (سطر):** `service.py:315 resync()` — get ⇒ مالك الاتصال (`NotConnectionOwnerError`→403) ⇒ `REVOKED` (`ConnectionRevokedError`→409) ⇒ فك تشفير توكن المستخدم (نطاق الدالة فقط) ⇒ `_inspect_token` (`is_valid=False` ⇒ `mark_out_of_band(REAUTH_REQUIRED)` + 401 `reconnect`) ⇒ `get_user_pages` ⇒ **الدمج سطر 360–364**: المختارة سابقاً والعائدة بتوكن تبقى مختارة بتوكن **جديد** مشفَّر (`_apply_selection_policy` يعيد استخدام B6؛ صفحة وحيدة ⇒ مختارة تلقائياً)؛ المختارة المختفية ⇒ `removed_selected_page_ids` + `logger.warning` (ids فقط)؛ غير المختارة ⇒ بيانات بلا توكن ⇒ `update_token_metadata` (سطر 375؛ `granted_scopes=None` يحفظ القديمة) ⇒ `replace_pages` بالجملة (سطر 382). الحالة لا تُلمَس (ACTIVE تبقى ACTIVE؛ REAUTH_REQUIRED لا تُنعَش إلا بـ OAuth). المسار `router.py:363` (`CurrentUserFresh`, `CONNECTION_WRITE_ROLES`). الاستجابة `ResyncResponse(ConnectedAccountPublic)` + `removed_selected_page_ids` (`schemas.py:290`). المستودع: `update_token_metadata` في Protocol `repository.py:51` / PG `postgres_repository.py:137` / Fake `tests/fakes.py:347`.
+- **B1:** `compute_token_health` `schemas.py:29` (أولوية `reauth_required` ⇒ `unknown` ⇒ `expired` ⇒ `expiring_soon` ≤7 أيام ⇒ `valid`)، الحقل `token_health` `:248`، `from_domain(…, now=…)` قابل للحقن؛ `last_synced_at` مُعرَّض. B1-U1 `test_schemas.py:306` (5 حالات) + `:322`.
 - **انحرافات (بالسطر والسبب):**
+  1. `router.py:504 _to_http(exc, *, operational_read=False)`: في B3/B4 فقط `MetaPermissionError` ⇒ `required_action: "reconnect"` (B3-5) وtransient/network ⇒ 502 بجسم ثابت `{"error":"upstream_unavailable"}` بلا `code/message` (B3-5 «لا تفاصيل»). مسارات 02/03/04.1 القديمة تُبقي `reauthorize_with_additional_scopes` كي لا تنكسر عقودها واختباراتها (test_router.py:402, 1005). التوحيد إلى `reconnect` تغيير سطر واحد إن أراده المخطط.
+  2. رسالة ERROR في A-0 صيغت `(graph code %s, http %s)` بدل `code=%s` لأن `SecretRedactingFilter` (04.1) يحجب نمط `code=…` فتصير `code=***` وغير قابلة للقراءة.
+  3. حرّاس Zero-Secret (`test_schemas.py:_ALLOWED_LABEL_FIELDS`، `test_router.py:SECRET_PATTERNS` `(?!_health)` و`allowed`، `test_postgres_persistence.py:613`) وُسِّعت لقبول `token_health` حصراً مع التحقق أنه `Literal` مغلق بالقيم الخمس — الاسم مفروض بالتوجيه.
+  4. B3-U7 وُسّع ليشمل `limit=0` و`after` بطول 513 ⇒ 422. B2-U3 يغطي الحالتين معاً (OWNER غير مالك ⇒ `not_connection_owner`؛ VIEWER ⇒ `insufficient_role`) مع `route.called is False` لـ`/me/accounts` و`/debug_token`.
+  5. `test_openapi_lists_exactly_the_brand_scoped_meta_routes` و`PROTECTED_ROUTE_COUNT` 15⇒18 حُدِّثا للمسارات الثلاثة.
+  6. اختبار 02 القديم `test_complete_connection_debug_token_failure_keeps_identity_from_me` (code 100) حُدِّث ليتوقع «debug_token misconfiguration» (ERROR) بدل «debug_token failed» (WARNING) — هذا جوهر A-0.
+  7. بيئة التنفيذ أُعيد ضبطها 4 مرات خلال هذا السبرنت (ضاع عمل غير مدفوع مرتين وأُعيد)؛ لذلك دُفعت checkpoints `wip` كثيرة ثم سُحقت إلى الكوميتين المفروضين (§5) قبل التسليم.
 - **أسئلة:**
+  1. هل يُوحَّد `required_action` لـ `MetaPermissionError` إلى `reconnect` في كل المسارات (select/callback أيضاً) في سبرنت لاحق؟
+  2. B2: عند تدهور `debug_token` (WARNING) نحفظ `token_expires_at`/`granted_scopes` القديمة ونحدّث `last_synced_at` — مقبول؟ أم يُفضَّل رفض المزامنة حين يتعذر التحقق؟
+  3. `counters` داخل العملية فقط؛ هل يُضاف `/metrics` أو تصدير في سبرنت لاحق؟
 
 ---
 

@@ -7,6 +7,8 @@ logging guard (B-U11), the B6 invariant (B-U12) and the extended Zero-Secret gua
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -20,6 +22,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from src.core.config import Settings, get_settings
 from src.core.oauth_state import OAuthStateSigner
+from src.core.security import TokenEncryptionService
 from src.main import app as module_level_app
 from src.modules.social_connect.domain.models import AccountStatus
 from src.modules.social_connect.exceptions import (
@@ -66,7 +69,8 @@ BASE = brand_base()
 # ``EAA`` (Meta token prefix) is matched case-sensitively: with IGNORECASE a random UUID such
 # as ``7a69deaa-…`` produced a false positive (flaky CI run on SPRINT-03 PR #7).
 SECRET_PATTERNS = re.compile(
-    r"(?<!has_page_)token|encrypted|\*\*\*|(?-i:EAA)|LONG_LIVED|PAGE_TOKEN_", re.IGNORECASE
+    r"(?<!has_page_)token(?!_health)|encrypted|\*\*\*|(?-i:EAA)|LONG_LIVED|PAGE_TOKEN_",
+    re.IGNORECASE,
 )
 
 
@@ -167,11 +171,17 @@ def test_openapi_lists_exactly_the_brand_scoped_meta_routes(client: TestClient) 
         f"{b}/connections",
         f"{b}/connections/{{connection_id}}",
         f"{b}/connections/{{connection_id}}/pages/selection",
+        # SPRINT-05 B2/B3/B4
+        f"{b}/connections/{{connection_id}}/resync",
+        f"{b}/connections/{{connection_id}}/pages/{{page_id}}/posts",
+        f"{b}/connections/{{connection_id}}/pages/{{page_id}}/instagram/media",
     }
     meta_paths = {p for p in paths if "/social/meta" in p}
     assert meta_paths == expected
     assert set(paths[f"{b}/connections/{{connection_id}}"]) == {"get", "delete"}
     assert set(paths[f"{b}/connections/{{connection_id}}/pages/selection"]) == {"put"}
+    assert set(paths[f"{b}/connections/{{connection_id}}/resync"]) == {"post"}
+    assert set(paths[f"{b}/connections/{{connection_id}}/pages/{{page_id}}/posts"]) == {"get"}
     # §4: no /social/meta/connections outside /brands/{brand_id}/; callback stays put.
     assert not any(p.startswith(f"{API}/social/meta/connections") for p in paths)
 
@@ -861,7 +871,8 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
     spec = client.get("/openapi.json").json()
     schemas = spec.get("components", {}).get("schemas", {})
     forbidden = ("password", "hash", "secret", "token")
-    allowed = {"access_token", "token_type", "has_page_token"}
+    # ``token_health`` (SPRINT-05 B1): derived closed-Literal health label, not a credential.
+    allowed = {"access_token", "token_type", "has_page_token", "token_health"}
     structural = {"required", "properties", "title", "description", "type", "format"}
 
     def refs(node: object) -> set[str]:
@@ -1235,3 +1246,584 @@ def test_h3_expired_token_status_is_written_out_of_band(
     )
     assert _select(client, as_, cid, ["1001"]).status_code == 401
     assert status_marker.calls == [(BRAND_ID, UUID(cid), AccountStatus.REAUTH_REQUIRED)]
+
+
+# ================================================================ SPRINT-05 Part B
+RESYNC = "resync"
+
+
+def _owner_connection_with_1001_selected(
+    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, as_: Headers
+) -> str:
+    """OWNER connects (2 Pages) and selects 1001 (has Instagram); 1002 stays unselected."""
+    _stub_happy_path(graph_mock, pages=2)
+    cid = _callback(client, signer).json()["id"]
+    assert _select(client, as_, cid, ["1001"]).status_code == 200
+    return cid
+
+
+def _posts_payload(count: int = 2, *, with_next: bool = False) -> dict:
+    data = [
+        {
+            "id": f"1001_{i}",
+            "message": f"post {i}",
+            "created_time": "2026-10-20T10:00:00+0000",
+            "permalink_url": f"https://www.facebook.com/1001/posts/{i}",
+            "status_type": "mobile_status_update",
+            "full_picture": None,
+            "is_published": True,
+        }
+        for i in range(count)
+    ]
+    paging: dict = {"cursors": {"before": "BEFORE", "after": "AFTER_CURSOR"}}
+    if with_next:
+        paging["next"] = (
+            "https://graph.facebook.com/v26.0/1001/posts?access_token=PAGE_TOKEN_1001"
+            "&limit=25&after=AFTER_CURSOR"
+        )
+    return {"data": data, "paging": paging}
+
+
+def _media_payload(count: int = 2, *, with_next: bool = False) -> dict:
+    data = [
+        {
+            "id": f"178_{i}",
+            "caption": f"media {i}",
+            "media_type": "IMAGE",
+            "media_url": f"https://scontent.example/{i}.jpg",
+            "thumbnail_url": None,
+            "permalink": f"https://www.instagram.com/p/x{i}/",
+            "timestamp": "2026-10-21T09:00:00+0000",
+            "like_count": 3,
+            "comments_count": 1,
+        }
+        for i in range(count)
+    ]
+    paging: dict = {"cursors": {"before": "B", "after": "IG_AFTER"}}
+    if with_next:
+        paging["next"] = (
+            "https://graph.facebook.com/v26.0/17841400000001/media"
+            "?access_token=PAGE_TOKEN_1001&limit=25&after=IG_AFTER"
+        )
+    return {"data": data, "paging": paging}
+
+
+def _assert_bearer_only(request: httpx.Request, token: str) -> None:
+    """§2-0(a): Bearer + ``appsecret_proof`` (recomputed), nothing secret in the URL."""
+    # ``access_token`` may legitimately appear as a *field name* inside ``fields=`` (PAGE_FIELDS);
+    # what must never exist is an ``access_token`` query *parameter* or the token value itself.
+    assert "access_token" not in dict(request.url.params)
+    assert token not in str(request.url)
+    assert request.headers["authorization"].startswith("Bearer ")
+    assert request.headers["authorization"] == f"Bearer {token}"
+    expected = hmac.new(FAKE_APP_SECRET.encode(), token.encode(), hashlib.sha256).hexdigest()
+    assert dict(request.url.params)["appsecret_proof"] == expected
+
+
+def _posts_url(cid: str, page_id: str = "1001", brand: UUID = BRAND_ID) -> str:
+    return f"{brand_base(brand)}/connections/{cid}/pages/{page_id}/posts"
+
+
+def _media_url(cid: str, page_id: str = "1001", brand: UUID = BRAND_ID) -> str:
+    return f"{brand_base(brand)}/connections/{cid}/pages/{page_id}/instagram/media"
+
+
+def _get(client: TestClient, url: str, tenant: UUID, as_: Headers, **params: object) -> int:
+    return client.get(url, params=params or None, headers=as_(tenant)).status_code
+
+
+# ------------------------------------------------------------------ B2: resync
+def test_b2_u1_resync_keeps_selection_and_replaces_page_token(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    encryption: TokenEncryptionService,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    before = fake_repo.rows[UUID(cid)]
+    old_cipher = {p.page_id: p.encrypted_page_token for p in before.pages}
+    assert encryption.decrypt_token(old_cipher["1001"] or "") == "PAGE_TOKEN_1001"
+
+    rotated = pages_payload(2)
+    rotated["data"][0]["access_token"] = "PAGE_TOKEN_1001_ROTATED"  # noqa: S105
+    pages_route = graph_mock.get("/me/accounts").mock(
+        return_value=httpx.Response(200, json=rotated)
+    )
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(
+            200, json=debug_token_payload(scopes=["pages_show_list", "pages_read_engagement"])
+        )
+    )
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["removed_selected_page_ids"] == []
+    pages = _pages_by_id(body)
+    assert pages["1001"]["is_selected"] is True and pages["1001"]["has_page_token"] is True
+    assert pages["1002"]["is_selected"] is False and pages["1002"]["has_page_token"] is False
+    assert body["granted_scopes"] == ["pages_show_list", "pages_read_engagement"]
+    assert body["token_health"] == "valid"
+    assert body["last_synced_at"] is not None
+    _assert_no_secrets(res.text)
+
+    after = fake_repo.rows[UUID(cid)]
+    by_id = {p.page_id: p for p in after.pages}
+    assert by_id["1001"].encrypted_page_token != old_cipher["1001"]
+    assert encryption.decrypt_token(by_id["1001"].encrypted_page_token or "") == (
+        "PAGE_TOKEN_1001_ROTATED"
+    )
+    assert by_id["1002"].encrypted_page_token is None
+    assert after.encrypted_user_token == before.encrypted_user_token  # user token untouched
+    assert after.status is AccountStatus.ACTIVE
+    fake_repo.assert_selection_invariant()
+    _assert_bearer_only(pages_route.calls[-1].request, "LONG_LIVED")
+
+
+def test_b2_u2_resync_drops_vanished_selected_page_and_reports_it(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _stub_happy_path(graph_mock, pages=3)
+    cid = _callback(client, signer).json()["id"]
+    assert _select(client, as_, cid, ["1001", "1003"]).status_code == 200
+
+    # Meta now returns only 1001 + 1002: the selected 1003 vanished.
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(2)))
+    with caplog.at_level(logging.WARNING):
+        res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["removed_selected_page_ids"] == ["1003"]
+    pages = _pages_by_id(body)
+    assert set(pages) == {"1001", "1002"}
+    assert pages["1001"]["is_selected"] is True and pages["1001"]["has_page_token"] is True
+    assert pages["1002"]["is_selected"] is False and pages["1002"]["has_page_token"] is False
+
+    stored = fake_repo.rows[UUID(cid)]
+    assert all(p.page_id != "1003" for p in stored.pages)  # no orphan token row
+    assert sum(1 for p in stored.pages if p.encrypted_page_token) == 1
+    fake_repo.assert_selection_invariant()
+    warned = [r for r in caplog.records if "resync dropped selected pages" in r.getMessage()]
+    assert len(warned) == 1 and "1003" in warned[0].getMessage()
+    assert "PAGE_TOKEN" not in caplog.text and "LONG_LIVED" not in caplog.text
+
+
+def test_b2_u3_resync_by_non_owner_is_403_without_graph_call(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
+) -> None:
+    """Brand OWNER who is not the connection owner ⇒ 403 ``not_connection_owner``; VIEWER ⇒
+    403 ``insufficient_role``; no Graph request in either case."""
+    cid = _agency_connection(client, graph_mock, signer, store)
+    pages_route = _rearmed_pages_route(graph_mock)
+    debug_route = graph_mock.post("/debug_token")
+    debug_route.reset()
+    debug_route.mock(return_value=httpx.Response(200, json=debug_token_payload()))
+
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 403, res.text
+    assert res.json()["detail"]["error"] == "not_connection_owner"
+    assert pages_route.called is False and debug_route.called is False
+
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    viewer = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(STRANGER_ID))
+    assert viewer.status_code == 403
+    assert viewer.json()["detail"]["error"] == "insufficient_role"
+    assert pages_route.called is False and debug_route.called is False
+
+
+def test_b2_u4_resync_revoked_connection_is_409(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    fake_repo.rows[UUID(cid)] = fake_repo.rows[UUID(cid)].model_copy(
+        update={"status": AccountStatus.REVOKED}
+    )
+    pages_route = _rearmed_pages_route(graph_mock, pages=2)
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"]["error"] == "connection_revoked"
+    assert pages_route.called is False
+    assert fake_repo.rows[UUID(cid)].status is AccountStatus.REVOKED  # not resurrected
+
+
+def test_b2_resync_invalid_token_marks_reauth_required_and_401(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    status_marker: FakeStatusMarker,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload(is_valid=False, error_code=190))
+    )
+    pages_route = _rearmed_pages_route(graph_mock, pages=2)
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 401, res.text
+    assert res.json()["detail"]["required_action"] == "reconnect"
+    assert pages_route.called is False
+    assert status_marker.calls == [(BRAND_ID, UUID(cid), AccountStatus.REAUTH_REQUIRED)]
+    assert fake_repo.rows[UUID(cid)].status is AccountStatus.REAUTH_REQUIRED
+    # The selection survives — only a reconnect can refresh it.
+    assert [p.page_id for p in fake_repo.rows[UUID(cid)].pages if p.is_selected] == ["1001"]
+
+
+def test_b2_resync_unknown_connection_404_and_debug_degradation_keeps_old_metadata(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    missing = client.post(f"{BASE}/connections/{uuid4()}/{RESYNC}", headers=as_(OWNER_ID))
+    assert missing.status_code == 404
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    before = fake_repo.rows[UUID(cid)]
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(
+            500, json={"error": {"message": "down", "code": 2, "type": "ApiException"}}
+        )
+    )
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    after = fake_repo.rows[UUID(cid)]
+    assert after.granted_scopes == before.granted_scopes
+    assert after.token_expires_at == before.token_expires_at
+    assert after.last_synced_at is not None
+
+
+def test_b2_resync_single_page_is_auto_selected(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    """B6 inside B2: 2 Pages, none selected → Meta now returns 1 → auto-selected with token."""
+    _stub_happy_path(graph_mock, pages=2)
+    cid = _callback(client, signer).json()["id"]
+    graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=pages_payload(1)))
+    res = client.post(f"{BASE}/connections/{cid}/{RESYNC}", headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    pages = _pages_by_id(res.json())
+    assert set(pages) == {"1001"} and pages["1001"]["is_selected"] is True
+    assert res.json()["removed_selected_page_ids"] == []
+    fake_repo.assert_selection_invariant()
+
+
+# ------------------------------------------------------------- B3: page posts
+def test_b3_u1_posts_request_uses_bearer_page_token_and_appsecret_proof(
+    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, as_: Headers
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    route = graph_mock.get("/1001/posts").mock(
+        return_value=httpx.Response(200, json=_posts_payload(2))
+    )
+    res = client.get(_posts_url(cid), params={"limit": 10}, headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    assert route.called
+    req = route.calls[0].request
+    assert req.method == "GET"
+    _assert_bearer_only(req, "PAGE_TOKEN_1001")
+    qs = dict(req.url.params)
+    assert qs["fields"] == (
+        "id,message,created_time,permalink_url,status_type,full_picture,is_published"
+    )
+    assert qs["limit"] == "10"
+    assert "after" not in qs
+    body = res.json()
+    assert [p["id"] for p in body["items"]] == ["1001_0", "1001_1"]
+    assert body["items"][0]["message"] == "post 0"
+    assert body["items"][0]["is_published"] is True
+    assert body["has_more"] is False and body["next_cursor"] is None
+    _assert_no_secrets(res.text)
+
+
+def test_b3_u2_posts_pagination_exposes_cursor_only_never_paging_next(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    route = graph_mock.get("/1001/posts").mock(
+        return_value=httpx.Response(200, json=_posts_payload(2, with_next=True))
+    )
+    with caplog.at_level(logging.DEBUG):
+        first = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert first.status_code == 200
+    body = first.json()
+    assert body["next_cursor"] == "AFTER_CURSOR" and body["has_more"] is True
+    assert "paging" not in body and "next" not in body
+    assert "graph.facebook.com" not in first.text
+    assert "access_token" not in first.text
+    assert "PAGE_TOKEN_1001" not in caplog.text
+    assert "v26.0/1001/posts" not in caplog.text
+    assert route.call_count == 1  # never auto-followed
+
+    second = client.get(_posts_url(cid), params={"after": "AFTER_CURSOR"}, headers=as_(OWNER_ID))
+    assert second.status_code == 200
+    assert dict(route.calls[1].request.url.params)["after"] == "AFTER_CURSOR"
+    assert dict(route.calls[1].request.url.params)["limit"] == "25"  # default
+
+
+def test_b3_u3_unselected_page_is_404_for_owner_and_everyone_else(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
+) -> None:
+    """§2-0(b): same 404 ``page_not_selected`` for the connection owner, a MANAGER, a VIEWER and
+    for an unknown Page id; no Graph call."""
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    route = graph_mock.get("/1002/posts").mock(return_value=httpx.Response(200, json={}))
+    bodies = []
+    for tenant in (OWNER_ID, AGENCY_ID, STRANGER_ID):
+        res = client.get(_posts_url(cid, "1002"), headers=as_(tenant))
+        assert res.status_code == 404, res.text
+        bodies.append(res.json())
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert bodies[0]["detail"]["error"] == "page_not_selected"
+    assert bodies[0]["detail"]["page_id"] == "1002"
+    assert route.called is False
+    ghost = client.get(_posts_url(cid, "9999"), headers=as_(OWNER_ID))
+    assert ghost.status_code == 404 and ghost.json()["detail"]["error"] == "page_not_selected"
+    assert _get(client, _posts_url(str(uuid4())), OWNER_ID, as_) == 404
+
+
+def test_b3_u4_viewer_can_read_posts_of_selected_page(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    store: FakeStore,
+    as_: Headers,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    graph_mock.get("/1001/posts").mock(return_value=httpx.Response(200, json=_posts_payload(1)))
+    res = client.get(_posts_url(cid), headers=as_(STRANGER_ID))
+    assert res.status_code == 200, res.text
+    assert len(res.json()["items"]) == 1
+    # No grant at all ⇒ 404 brand_not_found (B5), no Graph call.
+    assert _get(client, _posts_url(cid, brand=BRAND2_ID), STRANGER_ID, as_) == 404
+
+
+def test_b3_u5_reauth_required_connection_is_409_without_graph_call(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    fake_repo.rows[UUID(cid)] = fake_repo.rows[UUID(cid)].model_copy(
+        update={"status": AccountStatus.REAUTH_REQUIRED}
+    )
+    route = graph_mock.get("/1001/posts").mock(return_value=httpx.Response(200, json={}))
+    res = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"]["error"] == "reauth_required"
+    assert res.json()["detail"]["required_action"] == "reconnect"
+    assert route.called is False
+
+    fake_repo.rows[UUID(cid)] = fake_repo.rows[UUID(cid)].model_copy(
+        update={"status": AccountStatus.REVOKED}
+    )
+    revoked = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert revoked.status_code == 409
+    assert revoked.json()["detail"]["error"] == "connection_revoked"
+    assert route.called is False
+
+
+def test_b3_u6_190_during_read_marks_reauth_required_via_marker_and_401(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    status_marker: FakeStatusMarker,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    graph_mock.get("/1001/posts").mock(
+        return_value=httpx.Response(400, json=oauth_error_payload("expired", code=190))
+    )
+    res = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 401, res.text
+    assert res.json()["detail"]["required_action"] == "reconnect"
+    assert status_marker.calls == [(BRAND_ID, UUID(cid), AccountStatus.REAUTH_REQUIRED)]
+    assert fake_repo.rows[UUID(cid)].status is AccountStatus.REAUTH_REQUIRED
+    assert "PAGE_TOKEN" not in res.text and "LONG_LIVED" not in res.text
+
+
+def test_b3_u7_limit_out_of_range_and_after_too_long_are_422(
+    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, as_: Headers
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    route = graph_mock.get("/1001/posts").mock(return_value=httpx.Response(200, json={}))
+    assert _get(client, _posts_url(cid), OWNER_ID, as_, limit=101) == 422
+    assert _get(client, _posts_url(cid), OWNER_ID, as_, limit=0) == 422
+    assert _get(client, _posts_url(cid), OWNER_ID, as_, after="x" * 513) == 422
+    assert route.called is False
+    ok = client.get(_posts_url(cid), params={"limit": 100}, headers=as_(OWNER_ID))
+    assert ok.status_code == 200 and dict(route.calls[0].request.url.params)["limit"] == "100"
+
+
+def test_b3_posts_provider_errors_map_to_429_403_502(
+    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, as_: Headers
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    route = graph_mock.get("/1001/posts")
+    route.mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": "slow down", "code": 4}}, headers={"Retry-After": "30"}
+        )
+    )
+    res = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 429 and res.headers["Retry-After"] == "30"
+    assert res.json()["detail"]["required_action"] == "retry_later"
+
+    route.mock(
+        return_value=httpx.Response(
+            403, json={"error": {"message": "no perm", "code": 10, "type": "OAuthException"}}
+        )
+    )
+    res = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 403 and res.json()["detail"]["required_action"] == "reconnect"
+
+    route.mock(return_value=httpx.Response(500, json={"error": {"message": "x", "code": 2}}))
+    res = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 502
+    assert res.json()["detail"] == {
+        "provider": "meta",
+        "error": "upstream_unavailable",
+        "required_action": None,
+    }
+
+    route.mock(side_effect=httpx.ConnectError("boom"))
+    res = client.get(_posts_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 502 and "boom" not in res.text
+
+
+# -------------------------------------------------------- B4: instagram media
+def test_b4_u1_media_request_uses_page_token_against_ig_user_id(
+    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, as_: Headers
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    route = graph_mock.get("/17841400000001/media").mock(
+        return_value=httpx.Response(200, json=_media_payload(2))
+    )
+    res = client.get(_media_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 200, res.text
+    req = route.calls[0].request
+    assert req.method == "GET"
+    _assert_bearer_only(req, "PAGE_TOKEN_1001")
+    qs = dict(req.url.params)
+    assert qs["fields"] == (
+        "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,"
+        "like_count,comments_count"
+    )
+    assert qs["limit"] == "25"
+    body = res.json()
+    assert [m["id"] for m in body["items"]] == ["178_0", "178_1"]
+    assert body["items"][0]["media_type"] == "IMAGE"
+    assert body["items"][0]["like_count"] == 3 and body["items"][0]["comments_count"] == 1
+    assert body["has_more"] is False and body["next_cursor"] is None
+    _assert_no_secrets(res.text)
+
+
+def test_b4_u2_page_without_instagram_is_404_instagram_not_linked(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    store: FakeStore,
+) -> None:
+    _stub_happy_path(graph_mock, pages=2)
+    cid = _callback(client, signer).json()["id"]
+    assert _select(client, as_, cid, ["1002"]).status_code == 200  # 1002 has no IG
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    for tenant in (OWNER_ID, STRANGER_ID):
+        res = client.get(_media_url(cid, "1002"), headers=as_(tenant))
+        assert res.status_code == 404, res.text
+        assert res.json()["detail"]["error"] == "instagram_not_linked"
+    # Unselected Page with IG ⇒ still page_not_selected (selection check comes first).
+    res = client.get(_media_url(cid, "1001"), headers=as_(OWNER_ID))
+    assert res.status_code == 404 and res.json()["detail"]["error"] == "page_not_selected"
+
+
+def test_b4_u3_media_pagination_cursor_only(
+    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, as_: Headers
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    route = graph_mock.get("/17841400000001/media").mock(
+        return_value=httpx.Response(200, json=_media_payload(1, with_next=True))
+    )
+    res = client.get(_media_url(cid), params={"limit": 1}, headers=as_(OWNER_ID))
+    assert res.status_code == 200
+    assert res.json()["next_cursor"] == "IG_AFTER" and res.json()["has_more"] is True
+    assert "graph.facebook.com" not in res.text and "access_token" not in res.text
+    assert route.call_count == 1
+    nxt = client.get(_media_url(cid), params={"after": "IG_AFTER"}, headers=as_(OWNER_ID))
+    assert nxt.status_code == 200
+    assert dict(route.calls[1].request.url.params)["after"] == "IG_AFTER"
+
+
+def test_b4_u4_permission_error_is_403_reconnect(
+    client: TestClient, graph_mock: respx.MockRouter, signer: OAuthStateSigner, as_: Headers
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    graph_mock.get("/17841400000001/media").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "(#200) Requires instagram_basic",
+                    "code": 200,
+                    "type": "OAuthException",
+                }
+            },
+        )
+    )
+    res = client.get(_media_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 403, res.text
+    assert res.json()["detail"]["required_action"] == "reconnect"
+    assert res.json()["detail"]["code"] == 200
+
+
+def test_b4_media_status_guards_and_190(
+    client: TestClient,
+    graph_mock: respx.MockRouter,
+    signer: OAuthStateSigner,
+    as_: Headers,
+    status_marker: FakeStatusMarker,
+) -> None:
+    cid = _owner_connection_with_1001_selected(client, graph_mock, signer, as_)
+    route = graph_mock.get("/17841400000001/media").mock(
+        return_value=httpx.Response(400, json=oauth_error_payload("expired", code=190))
+    )
+    res = client.get(_media_url(cid), headers=as_(OWNER_ID))
+    assert res.status_code == 401
+    assert status_marker.calls[-1][2] is AccountStatus.REAUTH_REQUIRED
+    assert _get(client, _media_url(cid), OWNER_ID, as_) == 409
+    assert route.call_count == 1
+    assert _get(client, _media_url(str(uuid4())), OWNER_ID, as_) == 404
+    assert _get(client, _media_url(cid), OWNER_ID, as_, limit=101) == 422

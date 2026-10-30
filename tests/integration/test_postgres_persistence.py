@@ -610,7 +610,9 @@ def test_full_callback_flow_persists_via_api(
         assert created["brand_id"] == str(BRAND_ID)
         assert created["connected_by_tenant_id"] == str(OWNER_ID)
         assert "LONG_LIVED" not in cb.text and "PAGE_TOKEN" not in cb.text
-        assert "token" not in cb.text.lower().replace("has_page_token", "")
+        # ``token_health`` (SPRINT-05 B1) is a derived label, not a credential.
+        scrubbed = cb.text.lower().replace("has_page_token", "").replace("token_health", "")
+        assert "token" not in scrubbed
         # Two pages ⇒ nothing selected yet (B6).
         assert all(p["is_selected"] is False for p in created["pages"])
         assert all(p["has_page_token"] is False for p in created["pages"])
@@ -1501,3 +1503,344 @@ def test_h7_i1_concurrent_refresh_with_same_cookie_exactly_one_wins(
         {"s": old_sid},
     )
     assert rows == [(True, True)]
+
+
+# ========================================================= SPRINT-05 Part A (A-1)
+def _mock_identity(graph_mock: respx.MockRouter, user_id: str) -> None:
+    """Re-arm ``/me`` + ``/debug_token`` for another Meta identity (same route objects)."""
+    graph_mock.get("/me", params__contains={"fields": "id,name"}).mock(
+        return_value=httpx.Response(200, json=me_payload(user_id=user_id))
+    )
+    graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json=debug_token_payload(user_id=user_id))
+    )
+
+
+def _page_rows(cid: str) -> dict[str, tuple[bool, bool]]:
+    """``page_id -> (is_selected, has_token)`` straight from PostgreSQL."""
+    return {
+        r[0]: (r[1], r[2])
+        for r in _rows(
+            "SELECT page_id, is_selected, encrypted_page_token IS NOT NULL "
+            "FROM social_connection_pages WHERE connection_id = :cid ORDER BY page_id",
+            {"cid": UUID(cid)},
+        )
+    }
+
+
+def test_a1_i1_new_meta_identity_on_same_brand_creates_second_connection(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """A1-I1 — brand has a connection for Meta user ``u1`` (1001 selected). A new OAuth on the
+    same brand whose ``/me`` says ``u2`` (same two Pages) ⇒ a **second** row for ``u2`` with
+    no selection; ``u1``'s row and selection are untouched."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2, user_id="u1")
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+
+    with TestClient(integration_app) as client:
+        first = _connect(client, owner)
+        c1 = first["id"]
+        assert first["provider_user_id"] == "u1"
+        sel = client.put(
+            f"{brand_base()}/connections/{c1}/pages/selection",
+            json={"page_ids": ["1001"]},
+            headers=owner,
+        )
+        assert sel.status_code == 200, sel.text
+        before = _page_rows(c1)
+        assert before == {"1001": (True, True), "1002": (False, False)}
+
+        _mock_identity(graph_mock, "u2")
+        second = _connect(client, owner)
+        c2 = second["id"]
+        assert c2 != c1
+        assert second["provider_user_id"] == "u2"
+        assert all(not p["is_selected"] and not p["has_page_token"] for p in second["pages"])
+        assert len(second["pages"]) == 2
+
+        listed = client.get(f"{brand_base()}/connections", headers=owner).json()
+        assert sorted(c["provider_user_id"] for c in listed) == ["u1", "u2"]
+
+    assert (
+        _run(
+            "SELECT count(*) FROM social_connections WHERE brand_id = :b",
+            {"b": BRAND_ID},
+            scalar=True,
+        )
+        == 2
+    )
+    assert _page_rows(c1) == before  # u1 untouched: selection + token kept
+    assert _page_rows(c2) == {"1001": (False, False), "1002": (False, False)}
+
+
+def test_a1_i2_reoauth_as_same_identity_from_other_tenant_transfers_ownership_keeps_selection(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """A1-I2 — the agency (MANAGER grant) re-runs OAuth as the *same* Meta user ``u1`` ⇒ the
+    row is reused, ``connected_by_tenant_id`` transfers to the agency, the selection (1001)
+    survives with a fresh Page token and the unselected Page stays token-less."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2, user_id="u1")
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    agency = integration_headers(settings, AGENCY_ID)
+
+    with TestClient(integration_app) as client:
+        first = _connect(client, owner)
+        c1 = first["id"]
+        assert first["connected_by_tenant_id"] == str(OWNER_ID)
+        sel = client.put(
+            f"{brand_base()}/connections/{c1}/pages/selection",
+            json={"page_ids": ["1001"]},
+            headers=owner,
+        )
+        assert sel.status_code == 200, sel.text
+        old_cipher = _run(
+            "SELECT encrypted_page_token FROM social_connection_pages "
+            "WHERE connection_id = :cid AND page_id = '1001'",
+            {"cid": UUID(c1)},
+            scalar=True,
+        )
+
+        _grant_agency(client, owner, role="manager")
+        again = _connect(client, agency)
+        assert again["id"] == c1  # same (brand, provider, provider_user_id) ⇒ same row
+        assert again["connected_by_tenant_id"] == str(AGENCY_ID)
+        assert again["is_connection_owner"] is True
+        by_id = {p["page_id"]: p for p in again["pages"]}
+        assert by_id["1001"]["is_selected"] is True and by_id["1001"]["has_page_token"] is True
+        assert by_id["1002"]["is_selected"] is False and by_id["1002"]["has_page_token"] is False
+
+        # The previous owner is now a plain viewer of the selected Page only (H1).
+        seen = client.get(f"{brand_base()}/connections/{c1}", headers=owner).json()
+        assert seen["is_connection_owner"] is False
+        assert [p["page_id"] for p in seen["pages"]] == ["1001"]
+
+    assert _page_rows(c1) == {"1001": (True, True), "1002": (False, False)}
+    new_cipher = _run(
+        "SELECT encrypted_page_token FROM social_connection_pages "
+        "WHERE connection_id = :cid AND page_id = '1001'",
+        {"cid": UUID(c1)},
+        scalar=True,
+    )
+    assert new_cipher != old_cipher  # token re-encrypted from the fresh OAuth
+    assert (
+        _run(
+            "SELECT connected_by_tenant_id FROM social_connections WHERE id = :cid",
+            {"cid": UUID(c1)},
+            scalar=True,
+        )
+        == AGENCY_ID
+    )
+
+
+# ========================================================= SPRINT-05 Part B (PG)
+def _select_1001(client: TestClient, cid: str, headers: dict[str, str]) -> None:
+    res = client.put(
+        f"{brand_base()}/connections/{cid}/pages/selection",
+        json={"page_ids": ["1001"]},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+
+
+def test_b2_i1_resync_invalid_token_status_survives_rollback_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """B2-I1 — ``/debug_token`` says ``is_valid=false`` during resync ⇒ 401 ``reconnect`` and
+    ``status='reauth_required'`` is **committed** (out-of-band marker) although the request
+    transaction rolled back; the selection is untouched."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        _select_1001(client, cid, owner)
+        graph_mock.post("/debug_token").mock(
+            return_value=httpx.Response(
+                200, json=debug_token_payload(is_valid=False, error_code=190)
+            )
+        )
+        res = client.post(f"{brand_base()}/connections/{cid}/resync", headers=owner)
+        assert res.status_code == 401, res.text
+        assert res.json()["detail"]["required_action"] == "reconnect"
+        shown = client.get(f"{brand_base()}/connections/{cid}", headers=owner).json()
+        assert shown["status"] == "reauth_required"
+        assert shown["token_health"] == "reauth_required"
+    assert _status_of(cid) == "reauth_required"
+    assert _page_rows(cid) == {"1001": (True, True), "1002": (False, False)}
+
+
+def test_b2_i2_resync_merge_respects_check_constraint_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """B2-I2 — after a resync where a selected Page vanished and another got a rotated token,
+    the DB ``CHECK (selected ⇒ token)`` holds, no orphan token row remains and
+    ``last_synced_at`` / scopes / expiry were refreshed."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=3)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        sel = client.put(
+            f"{brand_base()}/connections/{cid}/pages/selection",
+            json={"page_ids": ["1001", "1003"]},
+            headers=owner,
+        )
+        assert sel.status_code == 200, sel.text
+        before_cipher = _run(
+            "SELECT encrypted_page_token FROM social_connection_pages "
+            "WHERE connection_id = :cid AND page_id = '1001'",
+            {"cid": UUID(cid)},
+            scalar=True,
+        )
+        before_sync = _run(
+            "SELECT last_synced_at FROM social_connections WHERE id = :cid",
+            {"cid": UUID(cid)},
+            scalar=True,
+        )
+
+        rotated = pages_payload(2)  # 1003 vanished
+        rotated["data"][0]["access_token"] = "PAGE_TOKEN_1001_V2"  # noqa: S105
+        graph_mock.get("/me/accounts").mock(return_value=httpx.Response(200, json=rotated))
+        graph_mock.post("/debug_token").mock(
+            return_value=httpx.Response(
+                200,
+                json=debug_token_payload(
+                    scopes=["pages_show_list", "pages_read_engagement"], expires_at=1_950_000_000
+                ),
+            )
+        )
+        res = client.post(f"{brand_base()}/connections/{cid}/resync", headers=owner)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["removed_selected_page_ids"] == ["1003"]
+        assert body["granted_scopes"] == ["pages_show_list", "pages_read_engagement"]
+        assert body["status"] == "active"
+
+    assert _page_rows(cid) == {"1001": (True, True), "1002": (False, False)}
+    after_cipher = _run(
+        "SELECT encrypted_page_token FROM social_connection_pages "
+        "WHERE connection_id = :cid AND page_id = '1001'",
+        {"cid": UUID(cid)},
+        scalar=True,
+    )
+    assert after_cipher != before_cipher
+    violations = _run(
+        "SELECT count(*) FROM social_connection_pages WHERE connection_id = :cid "
+        "AND ((is_selected AND encrypted_page_token IS NULL) "
+        "OR (NOT is_selected AND encrypted_page_token IS NOT NULL))",
+        {"cid": UUID(cid)},
+        scalar=True,
+    )
+    assert violations == 0
+    row = _rows(
+        "SELECT last_synced_at, granted_scopes, token_expires_at, status "
+        "FROM social_connections WHERE id = :cid",
+        {"cid": UUID(cid)},
+    )[0]
+    assert row[0] > before_sync
+    assert list(row[1]) == ["pages_show_list", "pages_read_engagement"]
+    assert row[2] == datetime.fromtimestamp(1_950_000_000, tz=UTC)
+    assert row[3] == "active"
+
+
+def test_b3_i1_full_path_oauth_select_read_posts_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """B3-I1 — OAuth ⇒ select 1001 ⇒ read posts with the **stored, decrypted** Page token as
+    Bearer; VIEWER reads too; unselected 1002 ⇒ 404 for the owner."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2)
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    agency = integration_headers(settings, AGENCY_ID)
+    posts = graph_mock.get("/1001/posts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "1001_1", "message": "hi", "created_time": "2026-10-01T00:00:00+0000"}
+                ],
+                "paging": {
+                    "cursors": {"after": "C2"},
+                    "next": "https://graph.facebook.com/v26.0/1001/posts?access_token=X&after=C2",
+                },
+            },
+        )
+    )
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        _select_1001(client, cid, owner)
+        _grant_agency(client, owner, role="viewer")
+
+        res = client.get(f"{brand_base()}/connections/{cid}/pages/1001/posts", headers=owner)
+        assert res.status_code == 200, res.text
+        assert res.json() == {
+            "items": [
+                {
+                    "id": "1001_1",
+                    "message": "hi",
+                    "created_time": "2026-10-01T00:00:00Z",
+                    "permalink_url": None,
+                    "status_type": None,
+                    "full_picture": None,
+                    "is_published": None,
+                }
+            ],
+            "next_cursor": "C2",
+            "has_more": True,
+        }
+        req = posts.calls[0].request
+        assert req.headers["authorization"] == "Bearer PAGE_TOKEN_1001"
+        assert "access_token" not in dict(req.url.params)
+
+        viewer = client.get(f"{brand_base()}/connections/{cid}/pages/1001/posts", headers=agency)
+        assert viewer.status_code == 200
+        hidden = client.get(f"{brand_base()}/connections/{cid}/pages/1002/posts", headers=owner)
+        assert hidden.status_code == 404
+        assert hidden.json()["detail"]["error"] == "page_not_selected"
+    assert posts.call_count == 2
+
+
+def test_b4_i1_instagram_media_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """B4-I1 — IG media of the selected Page via the stored Page token; 1002 (no IG) is
+    unselected ⇒ ``page_not_selected``; after selecting 1002 ⇒ ``instagram_not_linked``."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    media = graph_mock.get("/17841400000001/media").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "m1", "media_type": "IMAGE", "timestamp": "2026-10-02T00:00:00+0000"}
+                ],
+                "paging": {"cursors": {"after": "Z"}},
+            },
+        )
+    )
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        _select_1001(client, cid, owner)
+        url = f"{brand_base()}/connections/{cid}/pages/1001/instagram/media"
+        res = client.get(url, headers=owner)
+        assert res.status_code == 200, res.text
+        assert res.json()["items"][0]["id"] == "m1"
+        assert res.json()["has_more"] is False and res.json()["next_cursor"] is None
+        assert media.calls[0].request.headers["authorization"] == "Bearer PAGE_TOKEN_1001"
+
+        other = f"{brand_base()}/connections/{cid}/pages/1002/instagram/media"
+        assert client.get(other, headers=owner).json()["detail"]["error"] == "page_not_selected"
+        sel = client.put(
+            f"{brand_base()}/connections/{cid}/pages/selection",
+            json={"page_ids": ["1002"]},
+            headers=owner,
+        )
+        assert sel.status_code == 200
+        res = client.get(other, headers=owner)
+        assert res.status_code == 404 and res.json()["detail"]["error"] == "instagram_not_linked"

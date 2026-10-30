@@ -12,6 +12,13 @@ use ``CurrentUserFresh`` — a logged-out session is refused immediately.
 | GET    | …/connections/{id}                            | Bearer, any role      |
 | PUT    | …/connections/{id}/pages/selection            | fresh, connection owner |
 | DELETE | …/connections/{id}                            | fresh, OWNER or conn. owner |
+| POST   | …/connections/{id}/resync                     | fresh, connection owner (B2) |
+| GET    | …/connections/{id}/pages/{pid}/posts          | Bearer, any role, selected Page (B3) |
+| GET    | …/connections/{id}/pages/{pid}/instagram/media| Bearer, any role, selected Page (B4) |
+
+SPRINT-05 §2-0(b): anything about an **unselected** Page is 404 ``page_not_selected`` for
+everyone (even the connection owner). Pagination is opaque (``next_cursor`` = Graph
+``paging.cursors.after``); the Graph ``paging.next`` URL is never returned.
 
 H1 (SPRINT-04.1): unselected Pages are shown only to the connection owner
 (``ConnectedAccountPublic.from_domain(..., viewer_tenant_id=actor.tenant_id)``).
@@ -50,6 +57,8 @@ from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
 from src.modules.social_connect.domain.status_marker import StatusMarker
 from src.modules.social_connect.exceptions import (
+    ConnectionRevokedError,
+    InstagramNotLinkedError,
     MetaGraphError,
     MetaNetworkError,
     MetaOAuthError,
@@ -59,18 +68,27 @@ from src.modules.social_connect.exceptions import (
     MetaTransientError,
     NotConnectionOwnerError,
     PageNotSelectableError,
+    PageNotSelectedError,
+    ReauthRequiredError,
     UnknownPageIdsError,
 )
 from src.modules.social_connect.infrastructure.postgres_repository import (
     PostgresConnectedAccountRepository,
 )
 from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
-from src.modules.social_connect.meta_client import MetaGraphClient
+from src.modules.social_connect.meta_client import (
+    DEFAULT_READ_LIMIT,
+    MAX_READ_LIMIT,
+    MetaGraphClient,
+)
 from src.modules.social_connect.schemas import (
     ConnectedAccountPublic,
     ConnectionStartRequest,
+    InstagramMediaPage,
     MetaAuthorizeUrlResponse,
+    PagePostsPage,
     PageSelectionRequest,
+    ResyncResponse,
 )
 from src.modules.social_connect.service import MetaConnectService
 from src.modules.tenancy.dependencies import ActorTenantId, get_brand_access_resolver
@@ -336,7 +354,136 @@ async def disconnect(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+# ------------------------------------------------ SPRINT-05 operational routes --
+LimitQuery = Annotated[int, Query(ge=1, le=MAX_READ_LIMIT)]
+AfterQuery = Annotated[str | None, Query(max_length=512)]
+_NOT_FOUND = "Connection not found."
+
+
+@router.post(
+    f"{BRAND_PREFIX}/connections/{{connection_id}}/resync",
+    response_model=ResyncResponse,
+    summary="Re-validate the stored token and refresh the Page set from Meta (connection owner)",
+    responses={
+        401: {"description": "token invalid/expired — connection marked reauth_required"},
+        403: {"description": "not_connection_owner / insufficient_role"},
+        409: {"description": "connection_revoked — reconnect instead"},
+    },
+)
+async def resync_connection(
+    brand_id: UUID,
+    connection_id: UUID,
+    actor: CurrentUserFresh,
+    service: Service,
+    resolver: Resolver,
+) -> ResyncResponse:
+    """B2: merge policy — selected Pages still returned keep their selection with a fresh
+    token; selected Pages that vanished are dropped and listed in
+    ``removed_selected_page_ids``. Owner-only, checked before any Graph call."""
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        result = await service.resync(brand_id, connection_id, actor_tenant_id=actor.tenant_id)
+    except NotConnectionOwnerError as exc:
+        raise _not_owner(exc) from exc
+    except ConnectionRevokedError as exc:
+        raise _conflict(exc) from exc
+    except MetaGraphError as exc:
+        raise _to_http(exc) from exc
+    if result is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
+    return ResyncResponse.from_resync(
+        result.account,
+        viewer_tenant_id=actor.tenant_id,
+        removed_selected_page_ids=result.removed_selected_page_ids,
+    )
+
+
+@router.get(
+    f"{BRAND_PREFIX}/connections/{{connection_id}}/pages/{{page_id}}/posts",
+    response_model=PagePostsPage,
+    summary="Read-through: latest posts of a selected Page (opaque cursor pagination)",
+    responses={
+        404: {"description": "connection not found / page_not_selected"},
+        409: {"description": "reauth_required / connection_revoked — no Graph call made"},
+    },
+)
+async def get_page_posts(
+    brand_id: UUID,
+    connection_id: UUID,
+    page_id: str,
+    actor: CurrentUser,
+    service: Service,
+    resolver: Resolver,
+    limit: LimitQuery = DEFAULT_READ_LIMIT,
+    after: AfterQuery = None,
+) -> PagePostsPage:
+    await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
+    try:
+        page = await service.get_page_posts(
+            brand_id, connection_id, page_id, limit=limit, after=after
+        )
+    except (PageNotSelectedError, InstagramNotLinkedError) as exc:
+        raise _not_found(exc) from exc
+    except (ReauthRequiredError, ConnectionRevokedError) as exc:
+        raise _conflict(exc) from exc
+    except MetaGraphError as exc:
+        raise _to_http(exc, operational_read=True) from exc
+    if page is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
+    return page
+
+
+@router.get(
+    f"{BRAND_PREFIX}/connections/{{connection_id}}/pages/{{page_id}}/instagram/media",
+    response_model=InstagramMediaPage,
+    summary="Read-through: latest media of the Instagram account linked to a selected Page",
+    responses={
+        404: {"description": "connection not found / page_not_selected / instagram_not_linked"},
+        409: {"description": "reauth_required / connection_revoked — no Graph call made"},
+    },
+)
+async def get_instagram_media(
+    brand_id: UUID,
+    connection_id: UUID,
+    page_id: str,
+    actor: CurrentUser,
+    service: Service,
+    resolver: Resolver,
+    limit: LimitQuery = DEFAULT_READ_LIMIT,
+    after: AfterQuery = None,
+) -> InstagramMediaPage:
+    await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
+    try:
+        page = await service.get_instagram_media(
+            brand_id, connection_id, page_id, limit=limit, after=after
+        )
+    except (PageNotSelectedError, InstagramNotLinkedError) as exc:
+        raise _not_found(exc) from exc
+    except (ReauthRequiredError, ConnectionRevokedError) as exc:
+        raise _conflict(exc) from exc
+    except MetaGraphError as exc:
+        raise _to_http(exc, operational_read=True) from exc
+    if page is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
+    return page
+
+
 # ---------------------------------------------------------- error mapping --
+def _not_found(exc: PageNotSelectedError | InstagramNotLinkedError) -> HTTPException:
+    """§2-0(b): same body for every role — the Page id is echoed, nothing else."""
+    return HTTPException(
+        status.HTTP_404_NOT_FOUND,
+        detail={"error": exc.error, "message": exc.message, "page_id": exc.page_id},
+    )
+
+
+def _conflict(exc: ReauthRequiredError | ConnectionRevokedError) -> HTTPException:
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail={"error": exc.error, "message": exc.message, "required_action": "reconnect"},
+    )
+
+
 def _not_owner(exc: NotConnectionOwnerError) -> HTTPException:
     return HTTPException(
         status.HTTP_403_FORBIDDEN, detail={"error": exc.error, "message": exc.message}
@@ -354,7 +501,18 @@ def _required_action(exc: MetaGraphError) -> str | None:
     return None
 
 
-def _to_http(exc: MetaGraphError) -> HTTPException:
+def _to_http(exc: MetaGraphError, *, operational_read: bool = False) -> HTTPException:
+    """``operational_read`` (SPRINT-05 B3/B4): a Page-token permission failure means the
+    stored grant is insufficient ⇒ ``required_action: reconnect``; transient/network errors
+    carry no provider details (502 without ``code``/``message`` leakage)."""
+    action = _required_action(exc)
+    if operational_read and isinstance(exc, MetaPermissionError):
+        action = "reconnect"
+    if operational_read and isinstance(exc, MetaTransientError | MetaNetworkError):
+        return HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail={"provider": "meta", "error": "upstream_unavailable", "required_action": None},
+        )
     detail = {
         "provider": "meta",
         "error": type(exc).__name__,
@@ -362,7 +520,7 @@ def _to_http(exc: MetaGraphError) -> HTTPException:
         "code": exc.code,
         "subcode": exc.subcode,
         "fbtrace_id": exc.fbtrace_id,
-        "required_action": _required_action(exc),
+        "required_action": action,
     }
     if isinstance(exc, MetaRateLimitError):
         headers = (

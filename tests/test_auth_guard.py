@@ -50,7 +50,7 @@ def test_protected_route_count_is_reported() -> None:
     """Printed into the executor report (§7); fails loudly if the surface changes."""
     print(f"\nB-U1 protected routes: {PROTECTED_ROUTE_COUNT}")
     # auth: logout, logout-all, me (3) + tenancy: 7 + social: 5
-    assert PROTECTED_ROUTE_COUNT == 15, PROTECTED
+    assert PROTECTED_ROUTE_COUNT == 18, PROTECTED  # SPRINT-05: +resync, +posts, +ig media
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)

@@ -453,7 +453,30 @@ async def test_debug_token_parses_payload(
     req = route.calls[0].request
     assert req.url.query == b""  # H2: nothing secret in the request line
     assert req.headers["Authorization"] == f"Bearer {FAKE_APP_ID}|{FAKE_APP_SECRET}"
-    assert _form(req) == {"input_token": "TOKEN"}
+    assert _form(req) == {"input_token": "TOKEN", "method": "GET"}
+
+
+async def test_a0_u1_debug_token_is_post_with_method_get_override_in_body(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    """SPRINT-05 A0-U1 — ``POST /debug_token`` carries ``method=GET`` + ``input_token`` in the
+    form body only; the request line has neither ``input_token`` nor ``access_token``."""
+    route = graph_mock.post("/debug_token").mock(
+        return_value=httpx.Response(200, json={"data": {"app_id": FAKE_APP_ID, "is_valid": True}})
+    )
+    await meta_client.debug_token("INSPECTED_TOKEN")
+    req = route.calls[0].request
+    assert req.method == "POST"
+    body = _form(req)
+    assert body["method"] == "GET"
+    assert body["input_token"] == "INSPECTED_TOKEN"
+    url = str(req.url)
+    assert "input_token" not in url
+    assert "access_token" not in url
+    assert "method" not in url
+    assert "INSPECTED_TOKEN" not in url
+    assert req.headers["authorization"].startswith("Bearer ")
+    assert req.headers["authorization"] == f"Bearer {FAKE_APP_ID}|{FAKE_APP_SECRET}"
 
 
 async def test_debug_token_handles_sparse_payload(
