@@ -31,3 +31,7 @@
 | **خدمة العملاء والرسائل** | **Chatwoot** | `chatwoot/chatwoot` | MIT (Core) | **REFERENCE** | مرجع تصميمي لصندوق الوارد الموحد (Omnichannel Inbox) لرسائل التواصل والواتساب. |
 | **جدولة السوشيال ميديا** | **Postiz** | `gitroomhq/postiz-app` | AGPL-3.0 | **REFERENCE** | **مرجع تصميمي فقط:** لدراسة تفاصيل واجهات النشر والتكامل، ويُحظر تضمين كوده تجارياً. |
 | **جدولة خفيفة للسوشيال** | **Mixpost Lite** | `inovector/mixpost` | MIT (Lite) | **REFERENCE** | **مرجع فقط:** النسخة المجانية تغطي فيسبوك وإكس وماستودون فقط، بينما بقية المنصات في النسخة المدفوعة ($299). |
+| **رسائل WhatsApp Cloud API** | **PyWa** | `david-lev/pywa` | MIT | **COMPONENT** (M6) | Webhook موقَّع، قوالب، أزرار/قوائم، تكامل FastAPI — يختصر معظم كود M6؛ مشروط بتثبيت الإصدار واختبار توافق D-064 (`REPOSITORY_EVALUATIONS.md` 5-د). |
+| **تحسين البرومبت بالقياس** | **DSPy** | `stanfordnlp/dspy` | MIT | **WATCH** ⇒ COMPONENT مشروط | محسِّن خارج الطلب لحلقة التعلّم D-069 عند توفر ≥ 200 إشارة/قناة؛ يمرّ عبر `AIGateway` فقط (بند مؤجَّل 13). |
+| **قوالب أدوار الوكالة** | **agency-agents** | `msitarzewski/agency-agents` | MIT | **REFERENCE** | هيكل «دور = مهمة + حدود + معايير قبول» لبرومبتات المحركات (نسخة عربية-أولاً)؛ لا كود. |
+| **بوابة + ملاحظات + تقييم** | **TensorZero** | `tensorzero/tensorzero` | Apache-2.0 | **REFERENCE** | نمط `feedback(inference_id, metric)` و`variants` ⇒ `learning_signals`/`prompt_version`؛ لا تبنّي (ClickHouse + Rust ثقيلان لمرحلتنا). |
