@@ -11,7 +11,7 @@
 | **معرف المهمة** | `SPRINT-08-MULTI-PLATFORM-READINESS` |
 | **النوع** | Part A: تصحيحات إلزامية من مراجعة SPRINT-07 (A-1..A-4) · Part B: **M5 جاهزية تعدد المنصات** — تجريد `Channel`/`Publisher` بسجل محوّلات، Meta مرجعاً، LinkedIn/X/TikTok محوّلات **هيكلية** بلا اعتمادات ولا نداء شبكي، مصفوفة التفعيل كبيانات تُقرأ من API · **لا هجرة جديدة** (انظر B-1 — `channel` يبقى VARCHAR وقيد CHECK يُوسَّع بهجرة **صغيرة واحدة** فقط إن تعذّر بغيرها) |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
-| **يبدأ من** | `main` @ SHA دمج PR المخطط (يُسجَّل في `WORK_STATE.md` §6 أعلى الجدول). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **يبدأ من** | `main` @ `21ff44d` (دمج PR #23 — هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
 | **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-08: multi-platform readiness (M5) — channel registry + structural adapters + SPRINT-07 review fixes` |
 | **الكوميتات** | **ثلاثة**: Part A ⇒ Part B-1 (سجل القنوات + نقل Meta خلفه + هجرة 0007 إن لزمت) ⇒ Part B-2 (المحوّلات الهيكلية + مصفوفة التفعيل + API). كل كوميت يمرّ الحزمة كاملة وحده |
 | **تبعيات جديدة** | **لا شيء.** لا SDK لأي منصة (`linkedin`, `tweepy`, `tiktok` … ممنوعة — تقع تحت D-068 بالروح وإن لم تكن في قائمة `banned-api`؛ **أضفها إليها**) |
