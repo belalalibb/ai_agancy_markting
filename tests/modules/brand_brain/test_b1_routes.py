@@ -477,8 +477,8 @@ def test_cost_is_owner_only_and_aggregates_by_day(
     body = response.json()
     assert body["days"] == 30
     assert body["total_calls"] == 3
-    assert body["total_prompt_tokens"] == 300
-    assert body["total_completion_tokens"] == 100
+    assert body["prompt_tokens"] == 300
+    assert body["completion_tokens"] == 100
     assert Decimal(body["total_estimated_cost_usd"]) == Decimal("0.000600")
     assert body["items"][0]["day"] == today.date().isoformat()
     assert body["items"][0]["calls"] == 2 and body["items"][0]["errors"] == 1

@@ -362,7 +362,7 @@ async def get_cost(
         days=summary.window_days,
         items=[CostDayPublic.from_domain(d) for d in summary.days],
         total_calls=sum(d.calls for d in summary.days),
-        total_prompt_tokens=sum(d.prompt_tokens for d in summary.days),
-        total_completion_tokens=sum(d.completion_tokens for d in summary.days),
+        prompt_tokens=sum(d.prompt_tokens for d in summary.days),
+        completion_tokens=sum(d.completion_tokens for d in summary.days),
         total_estimated_cost_usd=sum(costs) if costs else None,
     )

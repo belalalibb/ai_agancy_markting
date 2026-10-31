@@ -229,6 +229,6 @@ class CostReport(_Strict):
     days: int
     items: list[CostDayPublic]
     total_calls: int
-    total_prompt_tokens: int
-    total_completion_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
     total_estimated_cost_usd: Decimal | None

@@ -4435,7 +4435,7 @@ def test_b1_i4_cost_log_feeds_budget_union_and_daily_report_on_pg(
         assert report.status_code == 200, report.text
         body = report.json()
         assert body["total_calls"] == 3 and body["items"][0]["errors"] == 1
-        assert body["total_prompt_tokens"] == 300
+        assert body["prompt_tokens"] == 300
         assert client.get(f"{BRAIN_PG}/cost", headers=manager).status_code in (403, 404)
     reset_db_caches()
 
