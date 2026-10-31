@@ -517,7 +517,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"  # SPRINT-07
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -922,7 +922,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"  # SPRINT-07 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1943,7 +1943,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2013,7 +2013,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2434,7 +2434,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2563,7 +2563,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2701,3 +2701,77 @@ def test_b2_i2_unschedule_of_leased_job_is_409_and_changes_nothing_on_pg(
             "scheduled",
             "publish_cancelled",
         ]
+
+
+def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
+    """B1-M1 (SPRINT-08) — ``head ⇒ 0006 ⇒ head`` with a ``channel='linkedin'`` draft (and
+    its revision, with the circular ``current_revision_id`` set). The downgrade archives the
+    row and then removes it so the narrowed CHECK can be re-created (a row keeping
+    ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
+    rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
+    for item_id, channel in ((fb_id, "facebook_page"), (li_id, "linkedin")):
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+            "VALUES (:id, :b, :t, :c, 'draft')",
+            {"id": item_id, "b": BRAND_ID, "t": OWNER_ID, "c": channel},
+        )
+    _run(
+        "INSERT INTO content_revisions (id, item_id, revision_no, body, provenance, "
+        "created_by_tenant_id) VALUES (:id, :item, 1, 'li', CAST(:prov AS JSONB), :t)",
+        {"id": li_rev, "item": li_id, "prov": '{"kind": "human"}', "t": OWNER_ID},
+    )
+    _run(
+        "UPDATE content_items SET current_revision_id = :rev WHERE id = :id",
+        {"rev": li_rev, "id": li_id},
+    )
+    # At head every registry channel is accepted; an unknown one is still rejected.
+    for channel in ("x", "tiktok", "instagram"):
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+            "VALUES (:id, :b, :t, :c, 'draft')",
+            {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID, "c": channel},
+        )
+    with pytest.raises(IntegrityError, match="ck_content_items_channel"):
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+            "VALUES (:id, :b, :t, 'myspace', 'draft')",
+            {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID},
+        )
+
+    command.downgrade(cfg, "0006")  # must not fail (lesson 15: order)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
+    remaining = {r[0] for r in _rows("SELECT channel FROM content_items")}
+    assert remaining == {"facebook_page", "instagram"}  # new-channel rows archived+removed
+    assert _run("SELECT COUNT(*) FROM content_revisions", scalar=True) == 0  # cascaded
+    assert (
+        _run("SELECT status FROM content_items WHERE id = :id", {"id": fb_id}, scalar=True)
+        == "draft"
+    )
+    with pytest.raises(IntegrityError, match="ck_content_items_channel"):
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+            "VALUES (:id, :b, :t, 'x', 'draft')",
+            {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID},
+        )
+
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"
+    _run(
+        "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+        "VALUES (:id, :b, :t, 'tiktok', 'draft')",
+        {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID},
+    )
+    checks = {
+        r[0]
+        for r in _rows(
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'publish_jobs'::regclass "
+            "AND contype = 'c'"
+        )
+    }
+    assert not any("channel" in c for c in checks)  # nothing else in 0007
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")

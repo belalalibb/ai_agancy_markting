@@ -189,7 +189,7 @@ def _scheduler(
 ) -> PostgresScheduler:
     return PostgresScheduler(
         lambda: factory,
-        publisher,
+        lambda _channel: publisher,  # SPRINT-08 B-1: PublisherResolver
         PostgresStatusMarker(lambda: factory),
         settings,
         encryption=encryption,
@@ -516,3 +516,83 @@ async def test_b6_instagram_retry_passes_last_creation_id_to_publisher(
     assert publisher.seen_creation_ids == [None, "creation-77"]
     assert (await _job_row(engine, job.id))[0] == "succeeded"
     assert (await _item_row(engine, item.id))[0] == "published"
+
+
+# -------------------------------------------------------------------- B2-I1 ---
+async def test_b2_i1_publisher_resolver_routes_meta_and_structural_jobs_on_pg(
+    engine: AsyncEngine,
+    session_factory: SessionFactory,
+    integration_settings: Settings,
+    encryption: TokenEncryptionService,
+    world: UUID,
+) -> None:
+    """B2-I1 (SPRINT-08) — the scheduler takes a ``PublisherResolver``: a ``facebook_page`` job
+    is published through the Meta-slot publisher (``FakePublisher`` here) while a ``linkedin``
+    job inserted behind the API's back (``schedule`` refuses it with 422) is resolved to
+    ``StructuralPublisher`` ⇒ ``failed`` / ``channel_not_activated`` (final, no retry), item
+    ``publish_failed`` + system event ``publish_failed``; the Meta publisher is never called
+    for it and no token is read."""
+    from src.modules.publishing.channels.structural import StructuralPublisher
+    from src.modules.publishing.scheduler import PublisherResolver
+
+    now = datetime.now(tz=UTC)
+    fb_item, fb_job = await _scheduled_item(session_factory, run_at=now - timedelta(minutes=2))
+    li_item, li_job = await _scheduled_item(
+        session_factory, run_at=now - timedelta(minutes=1), channel="linkedin"
+    )
+    meta = FakePublisher()
+    structural_calls: list[str] = []
+
+    class _Spy(StructuralPublisher):
+        async def publish(self, job, revision, page_token_provider, *, last_creation_id=None):  # noqa: ANN001, ANN201
+            structural_calls.append(job.channel)
+            return await super().publish(
+                job, revision, page_token_provider, last_creation_id=last_creation_id
+            )
+
+    def resolver(channel):  # noqa: ANN001, ANN202
+        if channel.value in {"facebook_page", "instagram"}:
+            return meta
+        return _Spy(channel)
+
+    typed: PublisherResolver = resolver
+    scheduler = PostgresScheduler(
+        lambda: session_factory,
+        typed,
+        PostgresStatusMarker(lambda: session_factory),
+        integration_settings,
+        encryption=encryption,
+        lease_owner="test-host:b2i1",
+    )
+
+    assert await scheduler.run_once(now) == 2
+    assert meta.calls == {fb_job.id: 1}  # the linkedin job never reached the Meta slot
+    assert structural_calls == ["linkedin"]
+
+    # facebook_page ⇒ as SPRINT-07 B6-I1.
+    assert (await _job_row(engine, fb_job.id))[0] == "succeeded"
+    assert (await _item_row(engine, fb_item.id))[0] == "published"
+
+    # linkedin ⇒ final failure with the new class; item publish_failed; system event.
+    (
+        status_,
+        attempts,
+        leased_until,
+        owner,
+        next_attempt,
+        post_id,
+        _permalink,
+        err,
+    ) = await _job_row(engine, li_job.id)
+    assert status_ == "failed" and attempts == 1 and err == "channel_not_activated"
+    assert leased_until is None and owner is None and next_attempt is None and post_id is None
+    rows = await _attempts(engine, li_job.id)
+    assert [a[:4] for a in rows] == [(1, "permanent_failure", "channel_not_activated", None)]
+    item_status, scheduled_for, published_at = await _item_row(engine, li_item.id)
+    assert item_status == "publish_failed" and scheduled_for is None and published_at is None
+    assert await _events(engine, li_item.id) == [("publish_failed", None)]
+    assert counters["publish_succeeded"] == 1 and counters["publish_failed"] == 1
+
+    # Nothing left to do: no retry is ever scheduled for a channel_not_activated failure.
+    assert await scheduler.run_once(now + timedelta(hours=1)) == 0
+    assert meta.calls == {fb_job.id: 1} and structural_calls == ["linkedin"]

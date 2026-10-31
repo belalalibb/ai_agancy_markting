@@ -90,6 +90,13 @@ ignore = [
 "anthropic".msg = "Use AIGateway (D-068)"
 "litellm".msg = "Use AIGateway (D-068)"
 "google.generativeai".msg = "Use AIGateway (D-068)"
+# SPRINT-08 §2-0 (د): no platform SDK / ad-hoc HTTP client for the structural channels either —
+# LinkedIn / X / TikTok adapters are declarative until activated (mirrored by B2-U5).
+"linkedin".msg = "No platform SDK: channel adapters are structural until activated (SPRINT-08)"
+"tweepy".msg = "No platform SDK: channel adapters are structural until activated (SPRINT-08)"
+"tiktok".msg = "No platform SDK: channel adapters are structural until activated (SPRINT-08)"
+"facebook_business".msg = "No platform SDK: Meta goes through social_connect.meta_client (SPRINT-08)"
+"requests".msg = "Use src.core.http shared client"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "ANN", "SLF001", "TID251"]
@@ -107,6 +114,10 @@ indent-style = "space"
 [tool.coverage.run]
 source = ["src"]
 branch = true
+# SPRINT-08 A-2: SQLAlchemy async runs every flush()/execute() inside greenlet_spawn; without
+# greenlet tracing that code is invisible to coverage (greenlet ships with SQLAlchemy — no new
+# dependency).
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 show_missing = true

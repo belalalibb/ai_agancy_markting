@@ -40,6 +40,7 @@ from src.modules.content.domain.models import Channel, ContentItem, ContentStatu
 from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.exceptions import (
     BodyTooLongError,
+    ChannelNotActivatedError,
     ContentError,
     GenerationBudgetExceededError,
     GenerationRateLimitedError,
@@ -114,6 +115,7 @@ def get_content_service(
         connections,
         publish_jobs,
         daily_token_budget=settings.ai_daily_token_budget_per_brand,
+        publish_max_attempts=settings.publish_max_attempts,  # SPRINT-08 A-3
     )
 
 
@@ -155,6 +157,8 @@ def to_http(exc: ContentError) -> HTTPException:
         headers = {"Retry-After": str(exc.retry_after_seconds)}
     elif isinstance(exc, ReauthRequiredError):  # SPRINT-07 B2
         detail.update(required_action=exc.required_action, missing_scopes=exc.missing_scopes)
+    elif isinstance(exc, ChannelNotActivatedError):  # SPRINT-08 B-1
+        detail.update(channel=exc.channel.value, requirements=exc.requirements)
     return HTTPException(exc.http_status, detail=detail, headers=headers)
 
 

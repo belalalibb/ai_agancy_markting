@@ -20,13 +20,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.modules.content.domain.models import (
     ApprovalEvent,
+    Channel,
     ContentItem,
     ContentRevision,
     public_provenance,
 )
 from src.modules.publishing.domain.models import PublishAttempt, PublishJob
 
-ChannelLiteral = Literal["facebook_page", "instagram"]
+# SPRINT-08 B-1 (B1-U2): derived from the enum — ``Literal[("a", "b")]`` is ``Literal["a", "b"]``.
+ChannelLiteral = Literal[tuple(c.value for c in Channel)]  # type: ignore[valid-type]
 StatusLiteral = Literal[
     "draft",
     "pending_approval",

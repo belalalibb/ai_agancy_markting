@@ -180,3 +180,65 @@ def test_b6_u1_scheduler_loop_started_and_cancelled_when_enabled(
         assert client.get("/health").status_code == 200
     assert task.cancelled() or task.done()
     assert calls == ["PostgresScheduler", "cancelled"]
+
+
+# ------------------------------------------------------------ SPRINT-08 A-1 encryption guard
+def test_a1_u1_scheduler_enabled_without_encryption_key_refuses_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A-1: ``SCHEDULER_ENABLED=true`` + no ``TOKEN_ENCRYPTION_KEY`` ⇒ ``lifespan`` raises
+    ``RuntimeError`` *before* any scheduler object is built (no loop, no silent failures)."""
+    from src import main as main_module
+    from src.modules.publishing.scheduler import SCHEDULER_REQUIRES_ENCRYPTION_KEY
+
+    built: list[str] = []
+    monkeypatch.setattr(
+        main_module,
+        "PostgresScheduler",
+        lambda *a, **k: built.append("scheduler"),  # must never be reached
+    )
+    monkeypatch.delenv("TOKEN_ENCRYPTION_KEY", raising=False)
+    broken = Settings(_env_file=None, scheduler_enabled=True, token_encryption_key=None)  # type: ignore[call-arg]
+    assert broken.token_encryption_key is None
+    with pytest.raises(RuntimeError, match="SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"):
+        with TestClient(create_app(broken)):
+            pass  # pragma: no cover - lifespan must fail before serving
+    assert SCHEDULER_REQUIRES_ENCRYPTION_KEY == "SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"
+    assert built == []
+
+
+def test_a1_u1_postgres_scheduler_rejects_encryption_none(settings: Settings) -> None:
+    """A-1 second layer: ``PostgresScheduler.__init__`` refuses ``encryption=None``."""
+    from src.modules.publishing.scheduler import PostgresScheduler
+    from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
+
+    from tests.fakes import FakePublisher
+
+    with pytest.raises(RuntimeError, match="SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"):
+        PostgresScheduler(
+            database.get_session_factory,
+            lambda _channel: FakePublisher(),  # SPRINT-08 B-1: PublisherResolver
+            PostgresStatusMarker(),
+            settings,
+            encryption=None,
+        )
+
+
+def test_a1_u2_scheduler_enabled_with_encryption_key_creates_task(
+    monkeypatch: pytest.MonkeyPatch, fernet_key: str
+) -> None:
+    """A-1: with a key the task is created (complements B6-U1, which already passes a key
+    through the environment); the task is cancelled on shutdown."""
+    import asyncio
+
+    from src import main as main_module
+
+    async def fake_loop(scheduler: Any, poll_seconds: float) -> None:
+        await asyncio.sleep(3600)  # cancelled by lifespan shutdown
+
+    monkeypatch.setattr(main_module, "scheduler_loop", fake_loop)
+    enabled = Settings(_env_file=None, scheduler_enabled=True, token_encryption_key=fernet_key)  # type: ignore[call-arg]
+    with TestClient(create_app(enabled)) as client:
+        task = client.app.state.scheduler_task  # type: ignore[attr-defined]
+        assert task is not None and not task.done()
+    assert task.cancelled() or task.done()

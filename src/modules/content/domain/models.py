@@ -20,12 +20,16 @@ def _utcnow() -> datetime:
 
 
 class Channel(StrEnum):
+    """The only enumeration of channels (SPRINT-08 B-1). Everything *about* a channel —
+    limits, scopes, media rules, activation — lives in ``publishing.channels`` registry;
+    ``schemas.ChannelLiteral`` is derived from this enum, never duplicated."""
+
     FACEBOOK_PAGE = "facebook_page"
     INSTAGRAM = "instagram"
+    LINKEDIN = "linkedin"
+    X = "x"
+    TIKTOK = "tiktok"
 
-
-# SPRINT-07 A-2: single source of the per-channel hard length limits (service + prompts).
-CHANNEL_LIMITS: Final[dict[Channel, int]] = {Channel.INSTAGRAM: 2200, Channel.FACEBOOK_PAGE: 5000}
 
 # SPRINT-07 A-1 (D-066): the only provenance keys every role may see. Everything else
 # (provider, model, prompt_hash, tokens, latency, credential_mode, truncated) is **private**

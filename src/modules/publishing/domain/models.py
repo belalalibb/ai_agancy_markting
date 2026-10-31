@@ -43,6 +43,9 @@ class ErrorClass(StrEnum):
     CONNECTION_UNAVAILABLE = "connection_unavailable"
     AMBIGUOUS_OUTCOME = "ambiguous_outcome"
     UNKNOWN = "unknown"
+    # SPRINT-08 B-1: the channel is in the registry but not activated (structural adapter).
+    # **Final** — never retried (not in RETRYABLE_ERROR_CLASSES).
+    CHANNEL_NOT_ACTIVATED = "channel_not_activated"
 
 
 RETRYABLE_ERROR_CLASSES: Final[frozenset[ErrorClass]] = frozenset(
