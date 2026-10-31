@@ -155,22 +155,36 @@ class PostgresContentRepository:
         created_at: datetime,
         media_refs: list[dict[str, Any]] | None = None,
     ) -> ContentRevision:
-        """A-3: ``revision_no`` is computed here, under the caller's row lock."""
+        """A-3: ``revision_no`` is computed here, under the caller's row lock.
+
+        SPRINT-09 A-3 (F3): ``media_refs=None`` means *keep* the current revision's refs
+        (copied here); ``[]`` means *remove* them explicitly.
+        """
         current = await self._session.scalar(
             select(func.coalesce(func.max(ContentRevisionRow.revision_no), 0)).where(
                 ContentRevisionRow.item_id == item_id
             )
         )
+        if media_refs is None:
+            media_refs = await self._current_media_refs(item_id)
         revision = ContentRevision(
             item_id=item_id,
             revision_no=int(current or 0) + 1,
             body=body,
-            media_refs=list(media_refs or []),
+            media_refs=list(media_refs),
             provenance=provenance,
             created_by_tenant_id=created_by_tenant_id,
             created_at=created_at,
         )
         return await self._insert_revision(revision)
+
+    async def _current_media_refs(self, item_id: UUID) -> list[dict[str, Any]]:
+        refs = await self._session.scalar(
+            select(ContentRevisionRow.media_refs)
+            .join(ContentItemRow, ContentItemRow.current_revision_id == ContentRevisionRow.id)
+            .where(ContentItemRow.id == item_id)
+        )
+        return list(refs or [])
 
     async def _insert_revision(self, revision: ContentRevision) -> ContentRevision:
         self._session.add(

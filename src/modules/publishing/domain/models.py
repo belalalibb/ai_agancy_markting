@@ -142,3 +142,23 @@ class PublishOutcome(BaseModel):
             external_post_id=external_post_id,
             connection_id_to_mark=connection_id_to_mark,
         )
+
+    @classmethod
+    def ambiguous(
+        cls,
+        *,
+        graph_error_code: int | None = None,
+        graph_error_subcode: int | None = None,
+        graph_trace_id: str | None = None,
+        external_post_id: str | None = None,
+    ) -> PublishOutcome:
+        """SPRINT-09 A-2 / D-070: the side-effecting Graph POST was sent once and its outcome
+        is unknown (the post may be live). Recorded as ``ambiguous`` — never retried."""
+        return cls(
+            kind=AttemptOutcome.AMBIGUOUS,
+            error_class=ErrorClass.AMBIGUOUS_OUTCOME,
+            graph_error_code=graph_error_code,
+            graph_error_subcode=graph_error_subcode,
+            graph_trace_id=graph_trace_id,
+            external_post_id=external_post_id,
+        )

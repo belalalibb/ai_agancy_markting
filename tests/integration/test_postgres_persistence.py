@@ -517,7 +517,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -922,7 +922,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1943,7 +1943,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2013,7 +2013,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2434,7 +2434,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2563,7 +2563,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"  # SPRINT-08 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2710,7 +2710,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2760,7 +2760,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2774,4 +2774,274 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
     }
     assert not any("channel" in c for c in checks)  # nothing else in 0007
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ================================================================ SPRINT-09 A-1 (F1) ===
+# 0008 relaxes ``ck_content_items_published_at_iff_published`` so an item archived *after*
+# publishing keeps its ``published_at`` (history), while every non-published / non-archived
+# status still requires ``published_at IS NULL``.
+
+
+def _run_scheduler_once(run_at_delta_minutes: int) -> UUID:
+    """Seed a scheduled item + queued job and drive ``PostgresScheduler.run_once`` with a
+    ``FakePublisher`` (success) on a fresh loop. Returns the item id."""
+    from cryptography.fernet import Fernet
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.core.config import Settings
+    from src.modules.content.domain.models import ContentItem, ContentRevision, ContentStatus
+    from src.modules.content.infrastructure.postgres_repository import PostgresContentRepository
+    from src.modules.publishing.domain.models import PublishJob
+    from src.modules.publishing.infrastructure.postgres_repository import (
+        PostgresPublishJobRepository,
+    )
+    from src.modules.publishing.scheduler import PostgresScheduler
+    from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
+    from tests.fakes import FakePublisher
+
+    async def _go() -> UUID:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        factory = async_sessionmaker(eng, expire_on_commit=False)
+        try:
+            now = datetime.now(tz=UTC)
+            run_at = now + timedelta(minutes=run_at_delta_minutes)
+            async with factory() as session, session.begin():
+                content = PostgresContentRepository(session)
+                item = ContentItem(
+                    brand_id=BRAND_ID,
+                    created_by_tenant_id=OWNER_ID,
+                    channel="facebook_page",
+                    target_page_id="1001",
+                    status=ContentStatus.SCHEDULED,
+                    scheduled_for=run_at,
+                    created_at=now,
+                    updated_at=now,
+                )
+                revision = ContentRevision(
+                    item_id=item.id,
+                    revision_no=1,
+                    body="Scheduled body",
+                    media_refs=[],
+                    provenance={"kind": "human"},
+                    created_by_tenant_id=OWNER_ID,
+                    created_at=now,
+                )
+                item = await content.create_item(item, revision)
+                await PostgresPublishJobRepository(session).create_job(
+                    PublishJob(
+                        item_id=item.id,
+                        revision_id=revision.id,
+                        brand_id=BRAND_ID,
+                        channel="facebook_page",
+                        target_page_id="1001",
+                        run_at=run_at,
+                        scheduled_by_tenant_id=OWNER_ID,
+                        scheduled_by_user_id=USER_BY_TENANT[OWNER_ID],
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            settings = Settings(_env_file=None).model_copy(  # type: ignore[call-arg]
+                update={"database_url": TEST_DATABASE_URL}
+            )
+            scheduler = PostgresScheduler(
+                lambda: factory,
+                lambda _channel: FakePublisher(),
+                PostgresStatusMarker(lambda: factory),
+                settings,
+                encryption=TokenEncryptionService(Fernet.generate_key().decode("ascii")),
+                lease_owner="a1-test:1",
+            )
+            await scheduler.run_once(now)
+            return item.id
+        finally:
+            await eng.dispose()
+
+    return asyncio.run(_go())
+
+
+def _item_status_published_at(item_id: UUID) -> tuple[str, datetime | None]:
+    row = _rows("SELECT status, published_at FROM content_items WHERE id = :id", {"id": item_id})[
+        0
+    ]
+    return row[0], row[1]
+
+
+def test_a1_i1_published_item_archived_via_api_keeps_published_at_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A1-I1 — scheduler (``FakePublisher``) ⇒ ``published`` ⇒ ``POST …/archive`` ⇒ 200;
+    the row is ``archived`` and ``published_at`` is **kept** (0008 CHECK allows it)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    item_id = _run_scheduler_once(-1)
+    status_, published_at = _item_status_published_at(item_id)
+    assert status_ == "published" and published_at is not None
+
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        res = client.post(
+            f"{API}/brands/{BRAND_ID}/content/items/{item_id}/archive", headers=owner
+        )
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "archived"
+
+    status_, kept = _item_status_published_at(item_id)
+    assert status_ == "archived"
+    assert kept == published_at  # intended: history is not erased by archiving
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+def test_a1_i2_scheduled_item_archived_via_api_has_null_published_at_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A1-I2 — a *future* scheduled item (never published) ⇒ ``archive`` ⇒ 200 with
+    ``published_at IS NULL``."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    item_id = _run_scheduler_once(+60)  # not due ⇒ stays scheduled
+    assert _item_status_published_at(item_id) == ("scheduled", None)
+
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        res = client.post(
+            f"{API}/brands/{BRAND_ID}/content/items/{item_id}/archive", headers=owner
+        )
+    assert res.status_code == 200, res.text
+    assert _item_status_published_at(item_id) == ("archived", None)
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> None:
+    """A1-M1 — ``head ⇒ 0007 ⇒ head`` with an ``archived`` row carrying ``published_at``:
+    the downgrade nulls it (the 0006 CHECK would otherwise reject it) and does not fail;
+    at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
+    without ``published_at`` is accepted."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    archived_with, archived_without = uuid4(), uuid4()
+    _run(
+        "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
+        "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
+        {"id": archived_with, "b": BRAND_ID, "t": OWNER_ID},
+    )
+    _run(
+        "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+        "VALUES (:id, :b, :t, 'facebook_page', 'archived')",
+        {"id": archived_without, "b": BRAND_ID, "t": OWNER_ID},
+    )
+    # Still enforced at head: a draft may not carry ``published_at``; published must.
+    with pytest.raises(IntegrityError, match="ck_content_items_published_at_iff_published"):
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
+            "published_at) VALUES (:id, :b, :t, 'facebook_page', 'draft', now())",
+            {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID},
+        )
+    with pytest.raises(IntegrityError, match="ck_content_items_published_at_iff_published"):
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+            "VALUES (:id, :b, :t, 'facebook_page', 'published')",
+            {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID},
+        )
+
+    command.downgrade(cfg, "0007")  # must not fail: archived+published_at is nulled first
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0007"
+    assert (
+        _run(
+            "SELECT published_at FROM content_items WHERE id = :id",
+            {"id": archived_with},
+            scalar=True,
+        )
+        is None
+    )
+    assert _run("SELECT COUNT(*) FROM content_items", scalar=True) == 2  # rows survive
+    with pytest.raises(IntegrityError, match="ck_content_items_published_at_iff_published"):
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
+            "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
+            {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID},
+        )
+
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
+    _run(
+        "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
+        "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
+        {"id": uuid4(), "b": BRAND_ID, "t": OWNER_ID},
+    )
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ================================================================ SPRINT-09 A-3 (F3) ===
+def test_a3_i1_generate_holds_no_row_lock_during_gateway_call_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A3-I1 — while ``gateway.complete()`` runs, a *second* session can take
+    ``SELECT … FOR UPDATE NOWAIT`` on the item row (no lock is held across the network
+    call); the generation still succeeds afterwards and revision 2 keeps the media refs."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.dependencies import get_ai_gateway
+    from src.modules.ai_gateway.gateway import CompletionResult
+
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    seen: dict[str, object] = {}
+
+    class ProbingGateway:
+        """Opens its own session and locks the row with NOWAIT during ``complete()``."""
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            eng = create_async_engine(TEST_DATABASE_URL)
+            try:
+                async with async_sessionmaker(eng)() as session, session.begin():
+                    row = (
+                        await session.execute(
+                            text(
+                                "SELECT status FROM content_items WHERE id = :id FOR UPDATE NOWAIT"
+                            ),
+                            {"id": seen["item_id"]},
+                        )
+                    ).one()
+                    seen["locked_status"] = row[0]
+            finally:
+                await eng.dispose()
+            return CompletionResult(
+                text="نص مولّد",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=3, completion_tokens=4),
+            )
+
+    integration_app.dependency_overrides[get_ai_gateway] = lambda: ProbingGateway()
+    try:
+        with TestClient(integration_app) as client:
+            item = _content_create(
+                client,
+                owner,
+                channel="instagram",
+                media_refs=[{"url": "https://cdn.example.com/a3.jpg"}],
+            )
+            seen["item_id"] = UUID(item["id"])
+            res = client.post(
+                f"{CONTENT}/items/{item['id']}/generate",
+                json={"brief": "افتتاح فرع جديد لمقهى النيل في الزمالك"},
+                headers=owner,
+            )
+            assert res.status_code == 200, res.text  # NOWAIT did not raise ⇒ no lock held
+    finally:
+        integration_app.dependency_overrides.pop(get_ai_gateway, None)
+    assert seen["locked_status"] == "draft"
+    rows = _rows(
+        "SELECT revision_no, media_refs, provenance->>'kind' FROM content_revisions "
+        "WHERE item_id = :id ORDER BY revision_no",
+        {"id": seen["item_id"]},
+    )
+    assert [(r[0], r[2]) for r in rows] == [(1, "human"), (2, "ai_generated")]
+    assert rows[1][1] == rows[0][1] == [{"url": "https://cdn.example.com/a3.jpg", "kind": "image"}]
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")

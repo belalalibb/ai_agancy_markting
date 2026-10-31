@@ -32,6 +32,7 @@ import httpx
 
 from src.core.config import Settings, get_settings
 from src.modules.social_connect.exceptions import (
+    MetaAmbiguousError,
     MetaGraphError,
     MetaNetworkError,
     MetaTransientError,
@@ -446,7 +447,15 @@ class MetaGraphClient:
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
-        return await self._request_absolute(method, url, params=params, data=data, headers=headers)
+        return await self._request_absolute(
+            method,
+            url,
+            params=params,
+            data=data,
+            headers=headers,
+            # D-070 (SPRINT-09 A-2): retries are *semantic* — only reads are idempotent.
+            idempotent=method.upper() == "GET",
+        )
 
     async def _request_absolute(
         self,
@@ -456,7 +465,24 @@ class MetaGraphClient:
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        idempotent: bool = True,
     ) -> dict[str, Any]:
+        """Single transport entry point.
+
+        ``idempotent=True`` (GET) keeps the SPRINT-02 retry loop verbatim: timeouts and
+        ``MetaTransientError`` are retried ``max_retries`` times with exponential backoff.
+
+        ``idempotent=False`` (POST — D-070): **exactly one attempt**. A failure that provably
+        happened *before* the request reached Meta (``ConnectError`` / ``ConnectTimeout``)
+        raises :class:`MetaTransientError` (the caller may schedule a *new* attempt); any
+        failure that may have happened *after* the request was sent (read/write timeout,
+        ``RemoteProtocolError``, HTTP 5xx, Graph codes 1/2) raises
+        :class:`MetaAmbiguousError` — the post may be live, so it is never retried.
+        """
+        if not idempotent:
+            return await self._request_once_side_effecting(
+                method, url, params=params, data=data, headers=headers
+            )
         attempt = 0
         while True:
             try:
@@ -492,6 +518,55 @@ class MetaGraphClient:
                 attempt += 1
                 continue
             raise error
+
+    async def _request_once_side_effecting(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None,
+        data: dict[str, Any] | None,
+        headers: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        """D-070: one network attempt, classified *not sent* vs *maybe sent*."""
+        try:
+            response = await self._http.request(
+                method, url, params=params, data=data, headers=headers
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            # The TCP/TLS handshake never completed ⇒ Meta did not receive the request.
+            logger.warning("Meta Graph API connect failure: %s", type(exc).__name__)
+            raise MetaTransientError(
+                "Meta Graph API connect failure (request not sent)", http_status=None
+            ) from exc
+        except httpx.HTTPError as exc:
+            # ReadTimeout / WriteTimeout / RemoteProtocolError / … — the request may have
+            # been processed. H2: never forward ``str(exc)`` (may embed the URL).
+            logger.warning("Meta Graph API ambiguous transport failure: %s", type(exc).__name__)
+            raise MetaAmbiguousError(
+                "Meta Graph API side-effecting request outcome unknown"
+            ) from exc
+
+        payload = _safe_json(response)
+        if response.is_success and "error" not in payload:
+            return payload
+        error = map_graph_error(
+            payload,
+            response.status_code,
+            retry_after_seconds=_retry_after(response),
+        )
+        if isinstance(error, MetaTransientError):
+            # HTTP 5xx / codes 1, 2 after a POST: Meta *may* have applied the write.
+            raise MetaAmbiguousError(
+                error.message,
+                code=error.code,
+                subcode=error.subcode,
+                error_type=error.error_type,
+                http_status=error.http_status,
+                fbtrace_id=error.fbtrace_id,
+                raw=error.raw,
+            ) from None
+        raise error
 
     async def _backoff(self, attempt: int) -> None:
         await self._sleep(min(0.5 * (2**attempt), 8.0))

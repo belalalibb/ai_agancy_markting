@@ -345,7 +345,11 @@ async def update_body(
             body=payload.body,
             actor_tenant_id=actor.tenant_id,
             actor_user_id=actor.user_id,
-            media_refs=[ref.model_dump() for ref in payload.media_refs],
+            media_refs=(
+                None
+                if payload.media_refs is None
+                else [ref.model_dump() for ref in payload.media_refs]
+            ),
         )
     except ContentError as exc:
         raise to_http(exc) from exc

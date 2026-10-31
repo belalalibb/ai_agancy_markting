@@ -540,11 +540,21 @@ class FakeContentRepository:
     ):
         from src.modules.content.domain.models import ContentRevision
 
+        if media_refs is None:  # SPRINT-09 A-3: None ⇒ keep the current revision's refs
+            item = self.items[item_id]
+            media_refs = next(
+                (
+                    list(rev.media_refs)
+                    for rev in self.revisions.get(item_id, [])
+                    if rev.id == item.current_revision_id
+                ),
+                [],
+            )
         revision = ContentRevision(
             item_id=item_id,
             revision_no=len(self.revisions.get(item_id, [])) + 1,
             body=body,
-            media_refs=list(media_refs or []),
+            media_refs=list(media_refs),
             provenance=provenance,
             created_by_tenant_id=created_by_tenant_id,
             created_at=created_at,

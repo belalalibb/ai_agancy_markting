@@ -59,6 +59,7 @@ from src.modules.social_connect.domain.status_marker import StatusMarker
 from src.modules.social_connect.exceptions import (
     ConnectionRevokedError,
     InstagramNotLinkedError,
+    MetaAmbiguousError,
     MetaGraphError,
     MetaNetworkError,
     MetaOAuthError,
@@ -508,7 +509,9 @@ def _to_http(exc: MetaGraphError) -> HTTPException:
     ``{"provider": "meta", "error": "upstream_unavailable", "required_action": null}``.
     """
     action = _required_action(exc)
-    if isinstance(exc, MetaTransientError | MetaNetworkError):
+    # SPRINT-09 A-2 / D-070: an OAuth POST whose outcome is unknown (5xx / read timeout) is
+    # still an upstream failure for the caller — same fixed 502, no provider details.
+    if isinstance(exc, MetaTransientError | MetaNetworkError | MetaAmbiguousError):
         return HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             detail={"provider": "meta", "error": "upstream_unavailable", "required_action": None},

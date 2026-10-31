@@ -71,6 +71,17 @@ class MetaNetworkError(MetaGraphError):
     """Connection / timeout failure before an HTTP response was received."""
 
 
+class MetaAmbiguousError(MetaGraphError):
+    """SPRINT-09 A-2 / D-070: a **side-effecting** request (``POST``) failed *after* it may
+    have reached Meta — read/write timeout, broken connection mid-response, HTTP 5xx or
+    Graph codes 1/2. The post may or may not be live, so the client never retries and the
+    caller must record the attempt as ``ambiguous`` (never auto-retry).
+
+    Base class is :class:`MetaGraphError` (the directive names it ``MetaClientError``; the
+    codebase's root exception is ``MetaGraphError`` — see SPRINT-09 §6 deviations).
+    """
+
+
 # --- Error-code tables (Graph API documented codes) -------------------------
 _TOKEN_EXPIRED_SUBCODES: frozenset[int] = frozenset({458, 459, 460, 463, 464, 467})
 _RATE_LIMIT_CODES: frozenset[int] = frozenset({4, 17, 32, 613, 80001, 80002, 80004, 80005})

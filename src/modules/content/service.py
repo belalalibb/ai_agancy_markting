@@ -494,9 +494,15 @@ class ContentService:
         20 generations / hour / brand (429 ``generation_rate_limited``) and a daily token
         budget per brand (A-5, 429 ``generation_budget_exceeded``). Usage is logged as a
         structured INFO line (ids + token counts only, never the text) and counted in
-        ``counters["ai_completions"]`` / ``["ai_failures"]``. A-3: the item row is locked
-        before the revision is numbered."""
-        item = await self._lock_item(brand_id, item_id)
+        ``counters["ai_completions"]`` / ``["ai_failures"]``.
+
+        SPRINT-09 A-3 (F3): the row is **not** locked while the gateway call is in flight.
+        Order: plain read ⇒ state check ⇒ limiter ⇒ budget ⇒ ``gateway.complete()`` ⇒ lock
+        ⇒ **re-check** the state (changed concurrently ⇒ 409 ``invalid_transition``) ⇒
+        CAS / ``add_revision``. The revision is numbered under the lock as before; the new
+        revision keeps the current revision's ``media_refs``.
+        """
+        item = await self.get_item(brand_id, item_id)
         if item.status not in GENERATION_STATES:
             raise InvalidTransitionError(item.status, "generate")
         retry_after = limiter.hit(
@@ -534,6 +540,10 @@ class ContentService:
             result.completion_tokens,
             result.latency_ms,
         )
+        # A-3 (F3): lock only now — after the slow network call — and re-validate.
+        item = await self._lock_item(brand_id, item_id)
+        if item.status not in GENERATION_STATES:
+            raise InvalidTransitionError(item.status, "generate", "item changed concurrently")
         now = datetime.now(tz=UTC)
         text = result.text.strip()
         limit = channel_definition(item.channel).limits
@@ -570,6 +580,7 @@ class ContentService:
             provenance=provenance,
             created_by_tenant_id=actor_tenant_id,
             created_at=now,
+            media_refs=None,  # A-3 (F3): keep the current revision's media_refs
         )
         return await self.get_item(brand_id, item_id)
 

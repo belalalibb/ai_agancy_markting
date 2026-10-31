@@ -1585,3 +1585,96 @@ def test_meta_channels_schedule_path_unchanged(
     res = _act(client, owner, fb2, "schedule", scheduled_for=later, target_page_id="1002")
     assert res.status_code == 409
     assert res.json()["detail"]["missing_scopes"] == ["pages_manage_posts"]
+
+
+# ================================================================ SPRINT-09 A-3 (F3) ===
+# ``generate()`` keeps the current revision's ``media_refs``; ``PUT body`` without
+# ``media_refs`` keeps them, with ``[]`` removes them; the row lock is taken **after** the
+# gateway call and the state is re-checked under it.
+IMG = "https://cdn.example.com/a3.jpg"
+IMG_REF = {"url": IMG, "kind": "image"}  # ``MediaRef`` default kind
+
+
+def test_a3_u1_generate_keeps_media_refs_of_current_revision(
+    client: TestClient, as_: Headers
+) -> None:
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner, channel="instagram", media_refs=[{"url": IMG}])["id"]
+    assert _generate(client, owner, item_id).status_code == 200
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert [r["revision_no"] for r in detail["revisions"]] == [2, 1]
+    assert detail["revisions"][0]["media_refs"] == [IMG_REF]
+    assert detail["revisions"][0]["provenance"]["kind"] == "ai_generated"
+
+
+def test_a3_u2_put_body_without_media_refs_keeps_them_and_empty_list_removes_them(
+    client: TestClient, as_: Headers
+) -> None:
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner, channel="instagram", media_refs=[{"url": IMG}])["id"]
+    kept = client.put(f"{BASE}/items/{item_id}/body", json={"body": "نص جديد"}, headers=owner)
+    assert kept.status_code == 200, kept.text
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert detail["revisions"][0]["revision_no"] == 2
+    assert detail["revisions"][0]["media_refs"] == [IMG_REF]
+
+    removed = client.put(
+        f"{BASE}/items/{item_id}/body", json={"body": "بدون صورة", "media_refs": []}, headers=owner
+    )
+    assert removed.status_code == 200, removed.text
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert detail["revisions"][0]["revision_no"] == 3
+    assert detail["revisions"][0]["media_refs"] == []
+
+    # explicit ``null`` behaves like omission (keep — here: keep the now-empty list)
+    nulled = client.put(
+        f"{BASE}/items/{item_id}/body",
+        json={"body": "مرة أخرى", "media_refs": None},
+        headers=owner,
+    )
+    assert nulled.status_code == 200, nulled.text
+    assert (
+        client.get(f"{BASE}/items/{item_id}", headers=owner).json()["revisions"][0]["media_refs"]
+        == []
+    )
+
+
+def test_a3_u3_generate_recheck_after_gateway_returns_409_and_writes_no_revision(
+    client: TestClient, app: FastAPI, as_: Headers, content_repo: FakeContentRepository
+) -> None:
+    """The gateway call happens *without* the row lock; if the item left ``draft`` meanwhile
+    (here: moved to ``pending_approval`` inside ``complete()``), the re-check under the lock
+    raises 409 ``invalid_transition`` and **no** revision is written."""
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.dependencies import get_ai_gateway
+    from src.modules.ai_gateway.gateway import CompletionResult
+    from src.modules.content.domain.models import ContentStatus
+
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner)["id"]
+    uid = UUID(item_id)
+
+    class MovingGateway:
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            # Simulate a concurrent ``submit`` while the completion is in flight.
+            current = content_repo.items[uid]
+            content_repo.items[uid] = current.model_copy(
+                update={"status": ContentStatus.PENDING_APPROVAL}
+            )
+            return CompletionResult(
+                text="generated",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=1, completion_tokens=1),
+            )
+
+    app.dependency_overrides[get_ai_gateway] = lambda: MovingGateway()
+    try:
+        res = _generate(client, owner, item_id)
+    finally:
+        app.dependency_overrides.pop(get_ai_gateway)
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"]["error"] == "invalid_transition"
+    assert res.json()["detail"]["from"] == "pending_approval"
+    assert len(content_repo.revisions[uid]) == 1  # only the human revision

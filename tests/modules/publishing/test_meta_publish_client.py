@@ -17,6 +17,7 @@ import respx
 from src.modules.publishing.domain.models import ErrorClass
 from src.modules.publishing.infrastructure.meta_publisher import classify_graph_error
 from src.modules.social_connect.exceptions import (
+    MetaAmbiguousError,
     MetaGraphError,
     MetaNetworkError,
     MetaOAuthError,
@@ -219,3 +220,113 @@ def test_b4_u3_type_fallback_when_code_missing(exc: MetaGraphError, expected: Er
 def test_b4_u3_error_class_values_are_labels_not_messages() -> None:
     exc = _graph(190)
     assert "LEAK-MESSAGE" not in classify_graph_error(exc).value
+
+
+# ================================================================ SPRINT-09 A-2 (D-070) ===
+# Side-effecting Graph ``POST`` calls are sent **exactly once**. A failure that may have
+# happened after the request reached Meta ⇒ ``MetaAmbiguousError``; a failure that provably
+# happened before (connect) ⇒ ``MetaTransientError``. GET keeps the SPRINT-02 retry loop.
+
+
+async def test_a2_u1_publish_page_post_5xx_is_ambiguous_and_not_retried(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    route = graph_mock.post(f"/{PAGE_ID}/feed").mock(
+        side_effect=[
+            httpx.Response(502, json={"error": {"message": "Bad gateway", "code": 2}}),
+            httpx.Response(200, json={"id": "p-never"}),
+        ]
+    )
+    with pytest.raises(MetaAmbiguousError) as info:
+        await meta_client.publish_page_post(PAGE_TOKEN, PAGE_ID, "Hello")
+    assert len(route.calls) == 1
+    assert info.value.http_status == 502
+    assert info.value.code == 2
+    assert isinstance(info.value, MetaGraphError)
+    assert not isinstance(info.value, MetaTransientError)
+
+
+async def test_a2_u2_publish_page_post_read_timeout_is_ambiguous_single_call(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    route = graph_mock.post(f"/{PAGE_ID}/feed").mock(
+        side_effect=httpx.ReadTimeout("slow ?access_token=LEAK")
+    )
+    with pytest.raises(MetaAmbiguousError) as info:
+        await meta_client.publish_page_post(PAGE_TOKEN, PAGE_ID, "Hello")
+    assert len(route.calls) == 1
+    assert "LEAK" not in str(info.value)  # H2: the httpx message never leaks
+
+
+@pytest.mark.parametrize("exc", [httpx.WriteTimeout("w"), httpx.RemoteProtocolError("eof")])
+async def test_a2_u2_other_post_transport_failures_are_ambiguous(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter, exc: Exception
+) -> None:
+    route = graph_mock.post(f"/{PAGE_ID}/feed").mock(side_effect=exc)
+    with pytest.raises(MetaAmbiguousError):
+        await meta_client.publish_page_post(PAGE_TOKEN, PAGE_ID, "Hello")
+    assert len(route.calls) == 1
+
+
+@pytest.mark.parametrize("exc", [httpx.ConnectError("refused"), httpx.ConnectTimeout("hs")])
+async def test_a2_u3_publish_page_post_connect_failure_is_transient_single_call(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter, exc: Exception
+) -> None:
+    route = graph_mock.post(f"/{PAGE_ID}/feed").mock(side_effect=exc)
+    with pytest.raises(MetaTransientError):
+        await meta_client.publish_page_post(PAGE_TOKEN, PAGE_ID, "Hello")
+    assert len(route.calls) == 1
+
+
+async def test_a2_u4_get_me_accounts_5xx_then_200_still_retries(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    route = graph_mock.get("/me/accounts").mock(
+        side_effect=[
+            httpx.Response(502, json={}),
+            httpx.Response(200, json={"data": []}),
+        ]
+    )
+    pages = await meta_client.get_user_pages("T")
+    assert pages == []
+    assert len(route.calls) == 2
+
+
+async def test_a2_u5_instagram_container_and_publish_posts_are_single_shot(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    media = graph_mock.post(f"/{IG_USER_ID}/media").mock(
+        side_effect=[httpx.Response(503, json={}), httpx.Response(200, json={"id": "c-1"})]
+    )
+    publish = graph_mock.post(f"/{IG_USER_ID}/media_publish").mock(
+        side_effect=[httpx.Response(500, json={}), httpx.Response(200, json={"id": "m-1"})]
+    )
+    with pytest.raises(MetaAmbiguousError):
+        await meta_client.create_instagram_container(
+            PAGE_TOKEN, IG_USER_ID, "https://cdn.example.com/a.jpg", "cap"
+        )
+    with pytest.raises(MetaAmbiguousError):
+        await meta_client.publish_instagram_container(PAGE_TOKEN, IG_USER_ID, "c-1")
+    assert len(media.calls) == 1
+    assert len(publish.calls) == 1
+
+
+async def test_a2_u5_post_non_transient_graph_error_still_maps_by_code(
+    meta_client: MetaGraphClient, graph_mock: respx.MockRouter
+) -> None:
+    """Non-5xx POST errors keep their SPRINT-02 typed mapping (not ambiguous)."""
+    route = graph_mock.post(f"/{PAGE_ID}/feed").mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": "slow", "code": 32, "type": "OAuthException"}}
+        )
+    )
+    with pytest.raises(MetaRateLimitError):
+        await meta_client.publish_page_post(PAGE_TOKEN, PAGE_ID, "Hello")
+    assert len(route.calls) == 1
+
+
+def test_a2_ambiguous_error_classifies_outside_b4_map() -> None:
+    """``classify_graph_error`` is only reached for non-ambiguous errors; the publisher maps
+    ``MetaAmbiguousError`` *before* it. Sanity: a code-less 5xx ambiguous still says transient
+    if ever passed through (defensive — no behaviour relies on it)."""
+    assert classify_graph_error(MetaAmbiguousError("x", http_status=502)) is ErrorClass.TRANSIENT
