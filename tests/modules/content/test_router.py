@@ -60,13 +60,32 @@ def _to_approved(client: TestClient, owner: dict[str, str]) -> str:
     return item_id
 
 
-def _active_connection(fake_repo: FakeConnectedAccountRepository) -> None:
-    fake_repo.rows[uuid4()] = ConnectedAccount(
+PUBLISH_SCOPES = [
+    "pages_show_list",
+    "pages_read_engagement",
+    "pages_manage_posts",
+    "instagram_basic",
+    "instagram_content_publish",
+]
+IMAGE_URL = "https://cdn.example.com/media/offer.jpg"
+
+
+def _active_connection(
+    fake_repo: FakeConnectedAccountRepository,
+    *,
+    scopes: list[str] | None = None,
+    scopes_verified: bool = True,
+) -> UUID:
+    """A verified connection with the SPRINT-07 publishing scopes (B3) unless told otherwise."""
+    cid = uuid4()
+    fake_repo.rows[cid] = ConnectedAccount(
         brand_id=BRAND_ID,
         connected_by_tenant_id=OWNER_ID,
         provider_user_id="90001",
         encrypted_user_token="gAAAAA-user",
         status=AccountStatus.ACTIVE,
+        granted_scopes=list(PUBLISH_SCOPES if scopes is None else scopes),
+        scopes_verified=scopes_verified,
         pages=[
             PageAsset(
                 page_id="1001",
@@ -84,6 +103,7 @@ def _active_connection(fake_repo: FakeConnectedAccountRepository) -> None:
             PageAsset(page_id="1003", page_name="Giza"),  # not selected, no token
         ],
     )
+    return cid
 
 
 # ------------------------------------------------------------------ B3-U1 create --
@@ -330,7 +350,13 @@ def test_b2_u4_schedule_validations(
     res = _act(client, owner, fb, "schedule", scheduled_for=later, target_page_id="9999")
     assert res.status_code == 422 and res.json()["detail"]["error"] == "target_page_not_selected"
     # instagram channel needs a linked IG account on the page
-    ig_item = _create(client, owner, channel="instagram", target_page_id="1002")["id"]
+    ig_item = _create(
+        client,
+        owner,
+        channel="instagram",
+        target_page_id="1002",
+        media_refs=[{"url": IMAGE_URL}],
+    )["id"]
     _act(client, owner, ig_item, "submit")
     _act(client, owner, ig_item, "approve")
     res = _act(client, owner, ig_item, "schedule", scheduled_for=later)
@@ -346,6 +372,205 @@ def test_b2_u4_schedule_validations(
     draft = _create(client, owner)["id"]
     res = _act(client, owner, draft, "schedule", scheduled_for=later, target_page_id="1001")
     assert res.status_code == 409 and res.json()["detail"]["error"] == "invalid_transition"
+
+
+# ---------------------------------------------- SPRINT-07 B2-U2 publishing scopes --
+def test_b2_u2_missing_or_unverified_publish_scopes_require_reconnect(
+    client: TestClient, as_: Headers, fake_repo: FakeConnectedAccountRepository
+) -> None:
+    owner = as_(OWNER_ID)
+    later = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    # (a) scope absent ⇒ 409 with the exact missing list and the reconnect hint.
+    cid = _active_connection(fake_repo, scopes=["pages_show_list", "pages_read_engagement"])
+    fb = _to_approved(client, owner)
+    res = _act(client, owner, fb, "schedule", scheduled_for=later, target_page_id="1002")
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"] == {
+        "error": "reauth_required",
+        "message": "missing publishing scopes: pages_manage_posts",
+        "required_action": "reconnect",
+        "missing_scopes": ["pages_manage_posts"],
+    }
+    # Instagram lists both publishing scopes it needs.
+    ig = _create(client, owner, channel="instagram", media_refs=[{"url": IMAGE_URL}])["id"]
+    _act(client, owner, ig, "submit")
+    _act(client, owner, ig, "approve")
+    res = _act(client, owner, ig, "schedule", scheduled_for=later, target_page_id="1001")
+    assert res.status_code == 409
+    assert res.json()["detail"]["missing_scopes"] == [
+        "pages_manage_posts",
+        "instagram_content_publish",
+    ]
+    # (b) scope granted but **unverified** ⇒ still 409 (unknown ≠ confirmed, SPRINT-06 A-1).
+    del fake_repo.rows[cid]
+    _active_connection(fake_repo, scopes_verified=False)
+    res = _act(client, owner, fb, "schedule", scheduled_for=later, target_page_id="1002")
+    assert res.status_code == 409 and res.json()["detail"]["error"] == "reauth_required"
+    assert res.json()["detail"]["missing_scopes"] == ["pages_manage_posts"]
+    # The item never moved and no job was created.
+    assert client.get(f"{BASE}/items/{fb}", headers=owner).json()["status"] == "approved"
+
+
+# ---------------------------------------------- SPRINT-07 B2-U3 instagram needs image --
+@pytest.mark.parametrize(
+    "media_refs",
+    [
+        [],
+        [{"url": "http://cdn.example.com/offer.jpg"}],  # not https
+        [{"url": "https://cdn.example.com/offer.gif"}],  # not jpg|jpeg|png
+        [{"url": "https://cdn.example.com/offer.mp4"}],
+    ],
+    ids=["no-media", "http", "gif", "mp4"],
+)
+def test_b2_u3_instagram_schedule_requires_https_image(
+    client: TestClient,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    media_refs: list[dict[str, str]],
+) -> None:
+    owner = as_(OWNER_ID)
+    later = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    _active_connection(fake_repo)
+    ig = _create(client, owner, channel="instagram", media_refs=media_refs)["id"]
+    _act(client, owner, ig, "submit")
+    _act(client, owner, ig, "approve")
+    res = _act(client, owner, ig, "schedule", scheduled_for=later, target_page_id="1001")
+    assert res.status_code == 422, res.text
+    assert res.json()["detail"]["error"] == "instagram_requires_image"
+    # Facebook never needs an image.
+    fb = _to_approved(client, owner)
+    res = _act(client, owner, fb, "schedule", scheduled_for=later, target_page_id="1002")
+    assert res.status_code == 200, res.text
+
+
+def test_b2_u3_instagram_accepts_https_jpeg_png_with_query_string(
+    client: TestClient, as_: Headers, fake_repo: FakeConnectedAccountRepository
+) -> None:
+    owner = as_(OWNER_ID)
+    later = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    _active_connection(fake_repo)
+    for url in ("https://cdn.example.com/a.JPEG?w=1080", "https://cdn.example.com/b.png#x"):
+        ig = _create(client, owner, channel="instagram", media_refs=[{"url": url}])["id"]
+        _act(client, owner, ig, "submit")
+        _act(client, owner, ig, "approve")
+        res = _act(client, owner, ig, "schedule", scheduled_for=later, target_page_id="1001")
+        assert res.status_code == 200, res.text
+
+
+# ------------------------------------------- SPRINT-07 B2 schedule creates the job --
+def test_b2_schedule_creates_queued_job_and_unschedule_cancels_it(
+    client: TestClient,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    from src.modules.publishing.domain.models import JobStatus
+
+    owner = as_(OWNER_ID)
+    when = datetime.now(tz=UTC) + timedelta(hours=1)
+    _active_connection(fake_repo)
+    item_id = _to_approved(client, owner)
+    res = _act(
+        client, owner, item_id, "schedule", scheduled_for=when.isoformat(), target_page_id="1002"
+    )
+    assert res.status_code == 200, res.text
+    jobs = [j for j in publish_repo.jobs.values() if str(j.item_id) == item_id]
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.status is JobStatus.QUEUED
+    assert job.run_at == when
+    assert job.channel == "facebook_page" and job.target_page_id == "1002"
+    assert str(job.revision_id) == res.json()["current_revision_id"]
+    assert job.scheduled_by_tenant_id == OWNER_ID
+    # Event ``scheduled`` was recorded with the actor.
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert [e["action"] for e in detail["approval_events"]][-1] == "scheduled"
+    assert detail["approval_events"][-1]["actor_tenant_id"] == str(OWNER_ID)
+    # unschedule ⇒ job cancelled + event publish_cancelled.
+    res = _act(client, owner, item_id, "unschedule")
+    assert res.status_code == 200 and res.json()["status"] == "approved"
+    assert publish_repo.jobs[job.id].status is JobStatus.CANCELLED
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert [e["action"] for e in detail["approval_events"]][-1] == "publish_cancelled"
+    # Re-scheduling creates a fresh queued job (the cancelled one is not active).
+    res = _act(
+        client, owner, item_id, "schedule", scheduled_for=when.isoformat(), target_page_id="1002"
+    )
+    assert res.status_code == 200, res.text
+    active = [j for j in publish_repo.jobs.values() if j.status is JobStatus.QUEUED]
+    assert len(active) == 1 and active[0].id != job.id
+    # archive from scheduled cancels too.
+    res = _act(client, owner, item_id, "archive")
+    assert res.status_code == 200 and res.json()["status"] == "archived"
+    assert publish_repo.jobs[active[0].id].status is JobStatus.CANCELLED
+
+
+def test_b2_leased_job_blocks_unschedule_archive_and_edit_with_409(
+    client: TestClient,
+    store: FakeStore,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    from src.modules.publishing.domain.models import JobStatus
+
+    owner = as_(OWNER_ID)
+    when = datetime.now(tz=UTC) + timedelta(hours=1)
+    _active_connection(fake_repo)
+    item_id = _to_approved(client, owner)
+    assert (
+        _act(
+            client,
+            owner,
+            item_id,
+            "schedule",
+            scheduled_for=when.isoformat(),
+            target_page_id="1002",
+        ).status_code
+        == 200
+    )
+    (job,) = publish_repo.jobs.values()
+    publish_repo.jobs[job.id] = job.model_copy(
+        update={
+            "status": JobStatus.LEASED,
+            "leased_until": when,
+            "lease_owner": "worker-1",
+            "attempt_count": 1,
+        }
+    )
+    for action in ("unschedule", "archive"):
+        res = _act(client, owner, item_id, action)
+        assert res.status_code == 409, res.text
+        assert res.json()["detail"]["error"] == "publish_in_progress"
+    res = client.put(f"{BASE}/items/{item_id}/body", json={"body": "new"}, headers=owner)
+    assert res.status_code == 409 and res.json()["detail"]["error"] == "publish_in_progress"
+    # Nothing moved: item still scheduled, job still leased, no new event.
+    detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
+    assert detail["status"] == "scheduled" and detail["scheduled_for"] is not None
+    assert publish_repo.jobs[job.id].status is JobStatus.LEASED
+    assert [e["action"] for e in detail["approval_events"]][-1] == "scheduled"
+    # A VIEWER still gets 403 (role before job state).
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    res = _act(client, as_(STRANGER_ID), item_id, "unschedule")
+    assert res.status_code == 403
+
+
+# ---------------------------------------------- SPRINT-07 B3-U1 legacy connections --
+def test_b3_u1_legacy_connection_without_publish_scopes_still_reads(
+    client: TestClient, as_: Headers, fake_repo: FakeConnectedAccountRepository
+) -> None:
+    """Older connections (SPRINT-03 scopes only) keep working for every read path and for
+    drafting/approval; only ``schedule`` asks for a reconnect."""
+    owner = as_(OWNER_ID)
+    later = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    _active_connection(fake_repo, scopes=["pages_show_list", "pages_read_engagement"])
+    res = client.get(f"{API}/brands/{BRAND_ID}/social/meta/connections", headers=owner)
+    assert res.status_code == 200 and len(res.json()) == 1
+    item_id = _to_approved(client, owner)
+    assert client.get(f"{BASE}/items/{item_id}", headers=owner).status_code == 200
+    assert client.get(f"{BASE}/items", headers=owner).status_code == 200
+    res = _act(client, owner, item_id, "schedule", scheduled_for=later, target_page_id="1002")
+    assert res.status_code == 409 and res.json()["detail"]["required_action"] == "reconnect"
 
 
 # ------------------------------------------------------------- B3-U5 archive rules --

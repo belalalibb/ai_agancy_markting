@@ -91,9 +91,12 @@ class ContentRepository(Protocol):
         new: ContentStatus,
         scheduled_for: datetime | None,
         updated_at: datetime,
+        published_at: datetime | None = None,
     ) -> bool:
         """B3 optimistic concurrency: ``UPDATE … WHERE id = :id AND status = :expected``;
-        ``True`` iff exactly one row changed."""
+        ``True`` iff exactly one row changed. ``published_at`` is written only when
+        ``new == published`` (SPRINT-07 system transition); leaving ``scheduled`` always
+        nulls ``scheduled_for`` (DB CHECK)."""
         ...
 
     async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:

@@ -39,6 +39,8 @@ if not TEST_DATABASE_URL:
 ROOT = Path(__file__).resolve().parents[2]
 # Truncation order is irrelevant with CASCADE, but listed children-first for readability.
 TABLES = (
+    "publish_attempts",
+    "publish_jobs",
     "approval_events",
     "content_revisions",
     "content_items",

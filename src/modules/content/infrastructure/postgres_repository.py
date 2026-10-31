@@ -48,6 +48,7 @@ class PostgresContentRepository:
                 status=item.status.value,
                 current_revision_id=None,
                 scheduled_for=item.scheduled_for,
+                published_at=item.published_at,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
@@ -122,11 +123,24 @@ class PostgresContentRepository:
         new: ContentStatus,
         scheduled_for: datetime | None,
         updated_at: datetime,
+        published_at: datetime | None = None,
     ) -> bool:
+        # ``published_at`` is set iff ``new == published`` (DB CHECK) — the caller passes it
+        # for the system transition; every other move clears it unless archiving a
+        # published post (``keep``: the row's current value is preserved).
+        values: dict[str, object] = {
+            "status": new.value,
+            "scheduled_for": scheduled_for,
+            "updated_at": updated_at,
+        }
+        if new is ContentStatus.PUBLISHED:
+            values["published_at"] = published_at
+        elif not (expected is ContentStatus.PUBLISHED and new is ContentStatus.ARCHIVED):
+            values["published_at"] = None
         result = await self._session.execute(
             update(ContentItemRow)
             .where(ContentItemRow.id == item_id, ContentItemRow.status == expected.value)
-            .values(status=new.value, scheduled_for=scheduled_for, updated_at=updated_at)
+            .values(**values)
         )
         return (result.rowcount or 0) == 1
 
@@ -263,6 +277,7 @@ def _item_to_domain(row: ContentItemRow) -> ContentItem:
         status=ContentStatus(row.status),
         current_revision_id=row.current_revision_id,
         scheduled_for=row.scheduled_for,
+        published_at=row.published_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

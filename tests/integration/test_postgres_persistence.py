@@ -158,7 +158,24 @@ def _seed_fresh() -> None:
     asyncio.run(_go())
 
 
-def _mock_graph(graph_mock: respx.MockRouter, *, pages: int = 2, user_id: str = "90001") -> None:
+PUBLISH_SCOPES = [
+    "pages_show_list",
+    "pages_read_engagement",
+    "pages_manage_posts",
+    "instagram_basic",
+    "instagram_content_publish",
+]
+IMAGE_URL = "https://cdn.example.com/media/offer.jpg"
+
+
+def _mock_graph(
+    graph_mock: respx.MockRouter,
+    *,
+    pages: int = 2,
+    user_id: str = "90001",
+    scopes: list[str] | None = None,
+) -> None:
+    """SPRINT-07 B3: ``/debug_token`` answers with the publishing scopes unless told otherwise."""
     graph_mock.post(
         "/oauth/access_token", data__contains={"grant_type": "fb_exchange_token"}
     ).mock(return_value=httpx.Response(200, json=token_payload("LONG_LIVED", 5183944)))
@@ -169,7 +186,12 @@ def _mock_graph(graph_mock: respx.MockRouter, *, pages: int = 2, user_id: str = 
         return_value=httpx.Response(200, json=me_payload(user_id=user_id))
     )
     graph_mock.post("/debug_token").mock(
-        return_value=httpx.Response(200, json=debug_token_payload(user_id=user_id))
+        return_value=httpx.Response(
+            200,
+            json=debug_token_payload(
+                user_id=user_id, scopes=PUBLISH_SCOPES if scopes is None else scopes
+            ),
+        )
     )
     graph_mock.get("/me/accounts").mock(
         return_value=httpx.Response(200, json=pages_payload(pages))
@@ -495,7 +517,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"  # SPRINT-06
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"  # SPRINT-07
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -900,7 +922,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"  # SPRINT-06 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"  # SPRINT-07 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1921,7 +1943,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -1962,6 +1984,9 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     with pytest.raises(IntegrityError, match="ck_content_items_scheduled_for_iff_scheduled"):
         _run("UPDATE content_items SET scheduled_for = now() WHERE id = :id", {"id": item_id})
     with pytest.raises(IntegrityError, match="ck_content_items_status"):
+        _run("UPDATE content_items SET status = 'live' WHERE id = :id", {"id": item_id})
+    # SPRINT-07 (0006): ``published`` is legal now but needs ``published_at`` (B1-M1 below).
+    with pytest.raises(IntegrityError, match="ck_content_items_published_at_iff_published"):
         _run("UPDATE content_items SET status = 'published' WHERE id = :id", {"id": item_id})
     with pytest.raises(IntegrityError, match="ck_approval_events_action"):
         _run(
@@ -1988,7 +2013,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2004,7 +2029,9 @@ def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
     with TestClient(integration_app) as client:
         cid = _connect(client, owner)["id"]
         _select_1001(client, cid, owner)
-        item_id = _content_create(client, owner, channel="instagram")["id"]
+        item_id = _content_create(
+            client, owner, channel="instagram", media_refs=[{"url": IMAGE_URL}]
+        )["id"]
         assert client.post(f"{CONTENT}/items/{item_id}/submit", headers=owner).status_code == 200
         assert client.post(f"{CONTENT}/items/{item_id}/approve", headers=owner).status_code == 200
         res = client.post(
@@ -2030,7 +2057,12 @@ def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
         res = client.post(f"{CONTENT}/items/{item_id}/unschedule", headers=owner)
         assert res.status_code == 200 and res.json()["scheduled_for"] is None
         detail = client.get(f"{CONTENT}/items/{item_id}", headers=owner).json()
-        assert [e["action"] for e in detail["approval_events"]] == ["submitted", "approved"]
+        assert [e["action"] for e in detail["approval_events"]] == [
+            "submitted",
+            "approved",
+            "scheduled",
+            "publish_cancelled",
+        ]
         assert detail["revisions"][0]["provenance"] == {"kind": "human"}
 
 
@@ -2351,3 +2383,321 @@ def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
     assert res.status_code == 429, res.text
     assert res.json()["detail"]["error"] == "generation_budget_exceeded"
     assert res.json()["detail"]["used"] == 170_000
+
+
+# ============================================================ SPRINT-07 B1 / B2 ===
+def _schedule_on_pg(
+    client: TestClient, owner: dict[str, str], when: datetime, *, channel: str = "facebook_page"
+) -> str:
+    """Approve a fresh item and schedule it on Page ``1001`` (selected + IG linked)."""
+    extra: dict[str, object] = {}
+    if channel == "instagram":
+        extra["media_refs"] = [{"url": IMAGE_URL}]
+    item_id = _content_create(client, owner, channel=channel, **extra)["id"]
+    assert client.post(f"{CONTENT}/items/{item_id}/submit", headers=owner).status_code == 200
+    assert client.post(f"{CONTENT}/items/{item_id}/approve", headers=owner).status_code == 200
+    res = client.post(
+        f"{CONTENT}/items/{item_id}/schedule",
+        json={"scheduled_for": when.isoformat(), "target_page_id": "1001"},
+        headers=owner,
+    )
+    assert res.status_code == 200, res.text
+    return item_id
+
+
+def _action_len() -> int:
+    return _run(
+        "SELECT character_maximum_length FROM information_schema.columns "
+        "WHERE table_name='approval_events' AND column_name='action'",
+        scalar=True,
+    )
+
+
+def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
+    """B1-M1 (SPRINT-07) — ``head ⇒ 0005 ⇒ head`` plus the edge inserts: the two new statuses
+    are accepted; ``published`` without ``published_at`` violates the CHECK; a second active
+    job for one item hits the partial unique index; ``outcome='maybe'`` violates the CHECK;
+    a user action without an actor violates ``ck_approval_events_actor_required`` while a
+    worker ``published`` event without one is fine; ``action`` is VARCHAR(32) (16 before)."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    command.downgrade(cfg, "0005")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"
+    tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert not {"publish_jobs", "publish_attempts"} & tables
+    cols = {
+        r[0]
+        for r in _rows(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='content_items'"
+        )
+    }
+    assert "published_at" not in cols
+    assert _action_len() == 16
+
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
+    assert _action_len() == 32
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    item_id, rev_id = uuid4(), uuid4()
+    _run(
+        "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+        "VALUES (:id, :b, :t, 'facebook_page', 'draft')",
+        {"id": item_id, "b": BRAND_ID, "t": OWNER_ID},
+    )
+    _run(
+        "INSERT INTO content_revisions (id, item_id, revision_no, body, provenance, "
+        "created_by_tenant_id) VALUES (:id, :item, 1, 'x', CAST(:prov AS JSONB), :t)",
+        {"id": rev_id, "item": item_id, "prov": '{"kind": "human"}', "t": OWNER_ID},
+    )
+    # New statuses accepted — published needs published_at, publish_failed must not have it.
+    with pytest.raises(IntegrityError, match="ck_content_items_published_at_iff_published"):
+        _run("UPDATE content_items SET status = 'published' WHERE id = :id", {"id": item_id})
+    _run(
+        "UPDATE content_items SET status = 'published', published_at = now() WHERE id = :id",
+        {"id": item_id},
+    )
+    with pytest.raises(IntegrityError, match="ck_content_items_published_at_iff_published"):
+        _run("UPDATE content_items SET status = 'publish_failed' WHERE id = :id", {"id": item_id})
+    _run(
+        "UPDATE content_items SET status = 'publish_failed', published_at = NULL WHERE id = :id",
+        {"id": item_id},
+    )
+    # Events: the 8 actions fit; system events may lack an actor, user events may not.
+    for action in ("scheduled", "publish_cancelled"):
+        _run(
+            "INSERT INTO approval_events (id, item_id, revision_id, action, actor_tenant_id, "
+            "actor_user_id) VALUES (:id, :item, :rev, :a, :t, :u)",
+            {
+                "id": uuid4(),
+                "item": item_id,
+                "rev": rev_id,
+                "a": action,
+                "t": OWNER_ID,
+                "u": USER_BY_TENANT[OWNER_ID],
+            },
+        )
+    for action in ("published", "publish_failed"):
+        _run(
+            "INSERT INTO approval_events (id, item_id, revision_id, action) "
+            "VALUES (:id, :item, :rev, :a)",
+            {"id": uuid4(), "item": item_id, "rev": rev_id, "a": action},
+        )
+    with pytest.raises(IntegrityError, match="ck_approval_events_actor_required"):
+        _run(
+            "INSERT INTO approval_events (id, item_id, revision_id, action) "
+            "VALUES (:id, :item, :rev, 'approved')",
+            {"id": uuid4(), "item": item_id, "rev": rev_id},
+        )
+    with pytest.raises(IntegrityError, match="ck_approval_events_action"):
+        _run(
+            "INSERT INTO approval_events (id, item_id, revision_id, action) "
+            "VALUES (:id, :item, :rev, 'publish_retried_by_worker_xx')",
+            {"id": uuid4(), "item": item_id, "rev": rev_id},
+        )
+    # Jobs: one active job per item (partial unique index); lease columns iff leased.
+    job_sql = (
+        "INSERT INTO publish_jobs (id, item_id, revision_id, brand_id, channel, target_page_id, "
+        "run_at, status, scheduled_by_tenant_id, scheduled_by_user_id, created_at, updated_at) "
+        "VALUES (:id, :item, :rev, :b, 'facebook_page', '1001', now(), :st, :t, :u, now(), now())"
+    )
+    params = {
+        "item": item_id,
+        "rev": rev_id,
+        "b": BRAND_ID,
+        "t": OWNER_ID,
+        "u": USER_BY_TENANT[OWNER_ID],
+    }
+    job1 = uuid4()
+    _run(job_sql, {**params, "id": job1, "st": "queued"})
+    with pytest.raises(IntegrityError, match="uq_publish_jobs_active_item"):
+        _run(job_sql, {**params, "id": uuid4(), "st": "queued"})
+    _run(job_sql, {**params, "id": uuid4(), "st": "cancelled"})  # inactive rows may pile up
+    with pytest.raises(IntegrityError, match="ck_publish_jobs_status"):
+        _run("UPDATE publish_jobs SET status = 'done' WHERE id = :id", {"id": job1})
+    with pytest.raises(IntegrityError, match="ck_publish_jobs_lease_iff_leased"):
+        _run("UPDATE publish_jobs SET status = 'leased' WHERE id = :id", {"id": job1})
+    _run(
+        "UPDATE publish_jobs SET status = 'leased', leased_until = now() + interval '2 min', "
+        "lease_owner = 'w1', attempt_count = 1 WHERE id = :id",
+        {"id": job1},
+    )
+    with pytest.raises(IntegrityError, match="ck_publish_jobs_lease_iff_leased"):
+        _run("UPDATE publish_jobs SET status = 'queued' WHERE id = :id", {"id": job1})
+    # Attempts: outcome domain + (job, attempt_no) unique.
+    att_sql = (
+        "INSERT INTO publish_attempts (id, job_id, attempt_no, started_at, outcome) "
+        "VALUES (:id, :job, :n, now(), :o)"
+    )
+    _run(att_sql, {"id": uuid4(), "job": job1, "n": 1, "o": None})
+    with pytest.raises(IntegrityError, match="uq_publish_attempts_job_no"):
+        _run(att_sql, {"id": uuid4(), "job": job1, "n": 1, "o": "succeeded"})
+    with pytest.raises(IntegrityError, match="ck_publish_attempts_outcome"):
+        _run(att_sql, {"id": uuid4(), "job": job1, "n": 2, "o": "maybe"})
+    _run(att_sql, {"id": uuid4(), "job": job1, "n": 2, "o": "ambiguous"})
+    # Cascade: item ⇒ jobs ⇒ attempts.
+    _run("DELETE FROM content_items WHERE id = :id", {"id": item_id})
+    assert _run("SELECT COUNT(*) FROM publish_jobs", scalar=True) == 0
+    assert _run("SELECT COUNT(*) FROM publish_attempts", scalar=True) == 0
+
+    # Down again with rows that only 0006 understands ⇒ archived / deleted, not an error.
+    _run(
+        "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
+        "published_at) VALUES (:id, :b, :t, 'facebook_page', 'published', now())",
+        {"id": item_id, "b": BRAND_ID, "t": OWNER_ID},
+    )
+    _run(
+        "INSERT INTO content_revisions (id, item_id, revision_no, body, provenance, "
+        "created_by_tenant_id) VALUES (:id, :item, 1, 'x', CAST(:prov AS JSONB), :t)",
+        {"id": rev_id, "item": item_id, "prov": '{"kind": "human"}', "t": OWNER_ID},
+    )
+    _run(
+        "INSERT INTO approval_events (id, item_id, revision_id, action) "
+        "VALUES (:id, :item, :rev, 'published')",
+        {"id": uuid4(), "item": item_id, "rev": rev_id},
+    )
+    command.downgrade(cfg, "0005")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0005"
+    assert (
+        _run("SELECT status FROM content_items WHERE id = :id", {"id": item_id}, scalar=True)
+        == "archived"
+    )
+    assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0006"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+def test_b2_i1_schedule_creates_job_atomically_with_status_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """B2-I1 (SPRINT-07) — ``schedule`` writes the status CAS **and** the ``publish_jobs``
+    row in one transaction. When the job insert fails (an active job already exists for the
+    item — forced here by inserting one behind the API's back) the response is 409 and the
+    item is still ``approved`` with ``scheduled_for IS NULL`` and no ``scheduled`` event."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    when = datetime.now(tz=UTC) + timedelta(hours=2)
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        _select_1001(client, cid, owner)
+        # Happy path: job row created with run_at = scheduled_for, revision = current.
+        item_id = _schedule_on_pg(client, owner, when)
+        jobs = _rows(
+            "SELECT status, run_at, revision_id, channel, target_page_id, "
+            "scheduled_by_tenant_id FROM publish_jobs WHERE item_id = :id",
+            {"id": UUID(item_id)},
+        )
+        assert len(jobs) == 1
+        status_, run_at, revision_id, channel, page, by_tenant = jobs[0]
+        assert status_ == "queued" and run_at == when and channel == "facebook_page"
+        assert page == "1001" and by_tenant == OWNER_ID
+        detail = client.get(f"{CONTENT}/items/{item_id}", headers=owner).json()
+        assert str(revision_id) == detail["current_revision_id"]
+        assert detail["approval_events"][-1]["action"] == "scheduled"
+
+        # Forced failure: a second approved item whose job slot is already taken.
+        other = _content_create(client, owner)["id"]
+        assert client.post(f"{CONTENT}/items/{other}/submit", headers=owner).status_code == 200
+        assert client.post(f"{CONTENT}/items/{other}/approve", headers=owner).status_code == 200
+        rev = _run(
+            "SELECT current_revision_id FROM content_items WHERE id = :id",
+            {"id": UUID(other)},
+            scalar=True,
+        )
+        _run(
+            "INSERT INTO publish_jobs (id, item_id, revision_id, brand_id, channel, "
+            "target_page_id, run_at, status, scheduled_by_tenant_id, scheduled_by_user_id, "
+            "created_at, updated_at) VALUES (:id, :item, :rev, :b, 'facebook_page', '1001', "
+            "now(), 'queued', :t, :u, now(), now())",
+            {
+                "id": uuid4(),
+                "item": UUID(other),
+                "rev": rev,
+                "b": BRAND_ID,
+                "t": OWNER_ID,
+                "u": USER_BY_TENANT[OWNER_ID],
+            },
+        )
+        res = client.post(
+            f"{CONTENT}/items/{other}/schedule",
+            json={"scheduled_for": when.isoformat(), "target_page_id": "1001"},
+            headers=owner,
+        )
+        assert res.status_code == 409, res.text
+        assert res.json()["detail"]["error"] == "publish_in_progress"
+        row = _rows(
+            "SELECT status, scheduled_for FROM content_items WHERE id = :id", {"id": UUID(other)}
+        )
+        assert row == [("approved", None)]  # the CAS was rolled back with the failed insert
+        events = [
+            r[0]
+            for r in _rows(
+                "SELECT action FROM approval_events WHERE item_id = :id ORDER BY created_at",
+                {"id": UUID(other)},
+            )
+        ]
+        assert events == ["submitted", "approved"]
+        assert (
+            _run(
+                "SELECT COUNT(*) FROM publish_jobs WHERE item_id = :id",
+                {"id": UUID(other)},
+                scalar=True,
+            )
+            == 1
+        )
+
+
+def test_b2_i2_unschedule_of_leased_job_is_409_and_changes_nothing_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """B2-I2 (SPRINT-07) — a worker holds the lease ⇒ ``unschedule`` / ``archive`` / body
+    edit answer 409 ``publish_in_progress``; item, job and events are byte-for-byte
+    unchanged. Once the job is back to ``queued`` the cancel succeeds and the job row is
+    ``cancelled`` with a ``publish_cancelled`` event."""
+    _seed_fresh()
+    _mock_graph(graph_mock, pages=2)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    when = datetime.now(tz=UTC) + timedelta(hours=2)
+    with TestClient(integration_app) as client:
+        cid = _connect(client, owner)["id"]
+        _select_1001(client, cid, owner)
+        item_id = _schedule_on_pg(client, owner, when, channel="instagram")
+        _run(
+            "UPDATE publish_jobs SET status = 'leased', lease_owner = 'worker-a', "
+            "leased_until = now() + interval '2 minutes', attempt_count = 1 "
+            "WHERE item_id = :id",
+            {"id": UUID(item_id)},
+        )
+        q_item = "SELECT * FROM content_items WHERE id = :id"
+        q_job = "SELECT * FROM publish_jobs WHERE item_id = :id"
+        q_events = "SELECT action FROM approval_events WHERE item_id = :id ORDER BY created_at"
+        key = {"id": UUID(item_id)}
+        before = (_rows(q_item, key), _rows(q_job, key), _rows(q_events, key))
+        for action in ("unschedule", "archive"):
+            res = client.post(f"{CONTENT}/items/{item_id}/{action}", headers=owner)
+            assert res.status_code == 409, res.text
+            assert res.json()["detail"]["error"] == "publish_in_progress"
+        res = client.put(f"{CONTENT}/items/{item_id}/body", json={"body": "x"}, headers=owner)
+        assert res.status_code == 409 and res.json()["detail"]["error"] == "publish_in_progress"
+        assert (_rows(q_item, key), _rows(q_job, key), _rows(q_events, key)) == before
+        # Lease released ⇒ cancel goes through in the same transaction as the CAS.
+        _run(
+            "UPDATE publish_jobs SET status = 'queued', lease_owner = NULL, leased_until = NULL "
+            "WHERE item_id = :id",
+            key,
+        )
+        res = client.post(f"{CONTENT}/items/{item_id}/unschedule", headers=owner)
+        assert res.status_code == 200 and res.json()["status"] == "approved"
+        assert _rows("SELECT status, scheduled_for FROM content_items WHERE id = :id", key) == [
+            ("approved", None)
+        ]
+        assert _run("SELECT status FROM publish_jobs WHERE item_id = :id", key, scalar=True) == (
+            "cancelled"
+        )
+        assert [r[0] for r in _rows(q_events, key)] == [
+            "submitted",
+            "approved",
+            "scheduled",
+            "publish_cancelled",
+        ]

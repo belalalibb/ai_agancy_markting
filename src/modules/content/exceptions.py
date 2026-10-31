@@ -112,3 +112,29 @@ class GenerationRateLimitedError(ContentError):
     def __init__(self, retry_after_seconds: int) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__()
+
+
+class ReauthRequiredError(ContentError):
+    """The connection lacks (verified) publishing scopes — reconnect first (SPRINT-07 B2)."""
+
+    error = "reauth_required"
+    http_status = 409
+    required_action = "reconnect"
+
+    def __init__(self, missing_scopes: list[str]) -> None:
+        self.missing_scopes = list(missing_scopes)
+        super().__init__(f"missing publishing scopes: {', '.join(self.missing_scopes)}")
+
+
+class InstagramRequiresImageError(ContentError):
+    """Instagram posts need media_refs[0].url: an https URL ending in jpg/jpeg/png (B2)."""
+
+    error = "instagram_requires_image"
+    http_status = 422
+
+
+class PublishInProgressError(ContentError):
+    """The publish job is leased by a worker right now — try again when it finishes (B2)."""
+
+    error = "publish_in_progress"
+    http_status = 409

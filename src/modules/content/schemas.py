@@ -27,8 +27,25 @@ from src.modules.content.domain.models import (
 
 ChannelLiteral = Literal["facebook_page", "instagram"]
 StatusLiteral = Literal[
-    "draft", "pending_approval", "approved", "rejected", "scheduled", "archived"
+    "draft",
+    "pending_approval",
+    "approved",
+    "rejected",
+    "scheduled",
+    "published",
+    "publish_failed",
+    "archived",
 ]
+
+
+class MediaRef(BaseModel):
+    """SPRINT-07 B2: a link to an already-hosted image (no uploads in M4 — directive §1).
+    The Instagram ``jpg|jpeg|png`` rule is applied at ``schedule`` time, not here."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=12, max_length=2048, pattern=r"^https?://")
+    kind: Literal["image"] = "image"
 
 
 class ContentItemCreate(BaseModel):
@@ -37,12 +54,14 @@ class ContentItemCreate(BaseModel):
     channel: ChannelLiteral
     body: str = Field(min_length=1, max_length=5000)
     target_page_id: str | None = Field(default=None, min_length=1, max_length=64)
+    media_refs: list[MediaRef] = Field(default_factory=list, max_length=1)
 
 
 class ContentBodyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     body: str = Field(min_length=1, max_length=5000)
+    media_refs: list[MediaRef] = Field(default_factory=list, max_length=1)
 
 
 class RejectRequest(BaseModel):
@@ -96,8 +115,9 @@ class ApprovalEventPublic(BaseModel):
     id: UUID
     revision_id: UUID
     action: str
-    actor_tenant_id: UUID
-    actor_user_id: UUID
+    # ``None`` only for worker events (``published`` / ``publish_failed``, SPRINT-07 B1).
+    actor_tenant_id: UUID | None = None
+    actor_user_id: UUID | None = None
     note: str | None = None
     created_at: datetime
 
@@ -115,6 +135,7 @@ class ContentItemPublic(BaseModel):
     status: str
     current_revision_id: UUID | None = None
     scheduled_for: datetime | None = None
+    published_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     current_body: str | None = Field(

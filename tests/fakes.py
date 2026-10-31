@@ -584,13 +584,19 @@ class FakeContentRepository:
         new,
         scheduled_for,
         updated_at,  # noqa: ANN001
+        published_at=None,  # noqa: ANN001
     ) -> bool:
+        from src.modules.content.domain.models import ContentStatus
+
         item = self.items.get(item_id)
         if item is None or item.status is not expected:
             return False
-        self.items[item_id] = item.model_copy(
-            update={"status": new, "scheduled_for": scheduled_for, "updated_at": updated_at}
-        )
+        update = {"status": new, "scheduled_for": scheduled_for, "updated_at": updated_at}
+        if new is ContentStatus.PUBLISHED:
+            update["published_at"] = published_at
+        elif not (expected is ContentStatus.PUBLISHED and new is ContentStatus.ARCHIVED):
+            update["published_at"] = None
+        self.items[item_id] = item.model_copy(update=update)
         return True
 
     def _ai_revisions_since(self, brand_id: UUID, since):  # noqa: ANN001, ANN202
@@ -614,3 +620,226 @@ class FakeContentRepository:
     async def oldest_ai_generation_at(self, brand_id: UUID, since):  # noqa: ANN001, ANN201
         rows = self._ai_revisions_since(brand_id, since)
         return min((r.created_at for r in rows), default=None)
+
+
+class FakePublishJobRepository:
+    """In-memory :class:`PublishJobRepository` (SPRINT-07 B1/B6). Mirrors the PG conditional
+    ``UPDATE`` semantics: every mutation checks the *current* status first. ``create_job``
+    raises ``ValueError`` when the item already has an active job (the partial unique index
+    ``uq_publish_jobs_active_item``)."""
+
+    def __init__(self) -> None:
+        from src.modules.publishing.domain.models import PublishAttempt, PublishJob
+
+        self.jobs: dict[UUID, PublishJob] = {}
+        self.attempts: dict[UUID, PublishAttempt] = {}
+        # Tests may force the next ``create_job`` to fail (atomicity on the fake path).
+        self.fail_next_create = False
+
+    # ------------------------------------------------------------ jobs ---
+    async def create_job(self, job):  # noqa: ANN001, ANN201
+        from src.modules.publishing.domain.models import ACTIVE_JOB_STATUSES
+
+        if self.fail_next_create:
+            self.fail_next_create = False
+            raise ValueError("forced create_job failure")
+        from src.modules.publishing.exceptions import ActiveJobExistsError
+
+        for existing in self.jobs.values():
+            if existing.item_id == job.item_id and existing.status in ACTIVE_JOB_STATUSES:
+                raise ActiveJobExistsError()
+        self.jobs[job.id] = job
+        return job
+
+    async def get_job(self, job_id: UUID):  # noqa: ANN201
+        return self.jobs.get(job_id)
+
+    async def active_job_for_item(self, item_id: UUID):  # noqa: ANN201
+        from src.modules.publishing.domain.models import ACTIVE_JOB_STATUSES
+
+        for job in self.jobs.values():
+            if job.item_id == item_id and job.status in ACTIVE_JOB_STATUSES:
+                return job
+        return None
+
+    async def latest_job_for_item(self, item_id: UUID):  # noqa: ANN201
+        active = await self.active_job_for_item(item_id)
+        if active is not None:
+            return active
+        rows = [j for j in self.jobs.values() if j.item_id == item_id]
+        if not rows:
+            return None
+        return max(rows, key=lambda j: (j.created_at, str(j.id)))
+
+    async def cancel_queued_job(self, item_id: UUID, *, now: datetime):  # noqa: ANN201
+        from src.modules.publishing.domain.models import JobStatus
+
+        active = await self.active_job_for_item(item_id)
+        if active is None:
+            return None
+        if active.status is not JobStatus.QUEUED:
+            return JobStatus.LEASED
+        self.jobs[active.id] = active.model_copy(
+            update={"status": JobStatus.CANCELLED, "next_attempt_at": None, "updated_at": now}
+        )
+        return JobStatus.QUEUED
+
+    async def lease_due_jobs(  # noqa: ANN201
+        self, *, now: datetime, lease_until: datetime, owner: str, batch: int
+    ):
+        from src.modules.publishing.domain.models import JobStatus
+
+        due = sorted(
+            (
+                j
+                for j in self.jobs.values()
+                if j.status is JobStatus.QUEUED
+                and j.run_at <= now
+                and (j.next_attempt_at is None or j.next_attempt_at <= now)
+            ),
+            key=lambda j: (j.run_at, str(j.id)),
+        )[:batch]
+        leased = []
+        for job in due:
+            updated = job.model_copy(
+                update={
+                    "status": JobStatus.LEASED,
+                    "leased_until": lease_until,
+                    "lease_owner": owner,
+                    "attempt_count": job.attempt_count + 1,
+                    "updated_at": now,
+                }
+            )
+            self.jobs[job.id] = updated
+            leased.append(updated)
+        return leased
+
+    async def expired_leases(self, *, now: datetime):  # noqa: ANN201
+        from src.modules.publishing.domain.models import JobStatus
+
+        return sorted(
+            (
+                j
+                for j in self.jobs.values()
+                if j.status is JobStatus.LEASED
+                and j.leased_until is not None
+                and j.leased_until < now
+            ),
+            key=lambda j: (j.leased_until, str(j.id)),
+        )
+
+    async def requeue_expired(self, job_id: UUID, *, now: datetime) -> bool:
+        from src.modules.publishing.domain.models import JobStatus
+
+        job = self.jobs.get(job_id)
+        if (
+            job is None
+            or job.status is not JobStatus.LEASED
+            or job.leased_until is None
+            or job.leased_until >= now
+        ):
+            return False
+        self.jobs[job_id] = job.model_copy(
+            update={
+                "status": JobStatus.QUEUED,
+                "leased_until": None,
+                "lease_owner": None,
+                "updated_at": now,
+            }
+        )
+        return True
+
+    async def complete_job(
+        self,
+        job_id: UUID,
+        *,
+        status,  # noqa: ANN001
+        now: datetime,
+        external_post_id: str | None = None,
+        external_permalink: str | None = None,
+        last_error_class=None,  # noqa: ANN001
+        next_attempt_at: datetime | None = None,
+    ) -> bool:
+        from src.modules.publishing.domain.models import JobStatus
+
+        job = self.jobs.get(job_id)
+        if job is None or job.status is not JobStatus.LEASED:
+            return False
+        update: dict[str, object] = {
+            "status": status,
+            "leased_until": None,
+            "lease_owner": None,
+            "next_attempt_at": next_attempt_at,
+            "updated_at": now,
+        }
+        if external_post_id is not None:
+            update["external_post_id"] = external_post_id
+        if external_permalink is not None:
+            update["external_permalink"] = external_permalink
+        if last_error_class is not None:
+            update["last_error_class"] = last_error_class
+        self.jobs[job_id] = job.model_copy(update=update)
+        return True
+
+    # -------------------------------------------------------- attempts ---
+    async def start_attempt(self, attempt):  # noqa: ANN001, ANN201
+        if any(
+            a.job_id == attempt.job_id and a.attempt_no == attempt.attempt_no
+            for a in self.attempts.values()
+        ):
+            raise ValueError("uq_publish_attempts_job_no")
+        self.attempts[attempt.id] = attempt
+        return attempt
+
+    async def finish_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        outcome,  # noqa: ANN001
+        finished_at: datetime,
+        error_class=None,  # noqa: ANN001
+        graph_error_code: int | None = None,
+        graph_error_subcode: int | None = None,
+        graph_trace_id: str | None = None,
+        external_post_id: str | None = None,
+    ) -> bool:
+        attempt = self.attempts.get(attempt_id)
+        if attempt is None or attempt.outcome is not None:
+            return False
+        self.attempts[attempt_id] = attempt.model_copy(
+            update={
+                "outcome": outcome,
+                "finished_at": finished_at,
+                "error_class": error_class,
+                "graph_error_code": graph_error_code,
+                "graph_error_subcode": graph_error_subcode,
+                "graph_trace_id": graph_trace_id,
+                "external_post_id": external_post_id,
+            }
+        )
+        return True
+
+    async def list_attempts(self, job_id: UUID):  # noqa: ANN201
+        return sorted(
+            (a for a in self.attempts.values() if a.job_id == job_id), key=lambda a: a.attempt_no
+        )
+
+    async def open_attempt(self, job_id: UUID):  # noqa: ANN201
+        rows = [a for a in self.attempts.values() if a.job_id == job_id and a.outcome is None]
+        return max(rows, key=lambda a: a.attempt_no) if rows else None
+
+    async def last_creation_id(self, job_id: UUID) -> str | None:
+        from src.modules.publishing.domain.models import AttemptOutcome
+
+        rows = sorted(
+            (
+                a
+                for a in self.attempts.values()
+                if a.job_id == job_id
+                and a.outcome is not None
+                and a.outcome is not AttemptOutcome.SUCCEEDED
+                and a.external_post_id is not None
+            ),
+            key=lambda a: a.attempt_no,
+        )
+        return rows[-1].external_post_id if rows else None

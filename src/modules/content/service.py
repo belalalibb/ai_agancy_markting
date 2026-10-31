@@ -1,8 +1,13 @@
-"""Use-case layer of ``content`` (SPRINT-06 B2/B3).
+"""Use-case layer of ``content`` (SPRINT-06 B2/B3, SPRINT-07 B2).
 
 All status changes go: pure :func:`transition` ⇒ ``compare_and_set_status`` (optimistic;
 ``False`` ⇒ ``InvalidTransitionError`` 409 because somebody else moved the item first) ⇒
 ``ApprovalEvent`` where the action is part of the approval loop.
+
+SPRINT-07 B2: ``schedule`` also creates the ``publish_jobs`` row **in the same transaction**
+as the status CAS (the request session commits both or neither); leaving ``scheduled`` cancels
+the ``queued`` job in the same transaction, or refuses with 409 ``publish_in_progress`` when a
+worker already leased it.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from src.core.metrics import counters
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import (
+    EDIT_FORBIDDEN,
     EDIT_RESETS_TO_DRAFT,
     Action,
     LifecycleError,
@@ -39,7 +45,10 @@ from src.modules.content.exceptions import (
     GenerationBudgetExceededError,
     GenerationRateLimitedError,
     InstagramNotLinkedError,
+    InstagramRequiresImageError,
     InvalidTransitionError,
+    PublishInProgressError,
+    ReauthRequiredError,
     RejectNoteRequiredError,
     ScheduleTooSoonError,
     TargetPageNotSelectedError,
@@ -52,7 +61,10 @@ from src.modules.content.prompts import (
     system_prompt,
     user_prompt,
 )
-from src.modules.social_connect.domain.models import AccountStatus
+from src.modules.publishing.domain.models import JobStatus, PublishJob
+from src.modules.publishing.domain.repository import PublishJobRepository
+from src.modules.publishing.exceptions import ActiveJobExistsError
+from src.modules.social_connect.domain.models import AccountStatus, ConnectedAccount, PageAsset
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
 from src.modules.tenancy.domain.access import BrandRole
 
@@ -68,6 +80,14 @@ GENERATION_WINDOW_SECONDS = 3600
 GENERATION_STATES = frozenset({ContentStatus.DRAFT, ContentStatus.REJECTED})
 # A-5: daily token budget window (per brand; summed from revision provenance).
 TOKEN_BUDGET_WINDOW = timedelta(hours=24)
+# B2: publishing scopes a connection must hold (**verified**) before ``schedule`` is allowed.
+REQUIRED_PUBLISH_SCOPES: dict[Channel, tuple[str, ...]] = {
+    Channel.FACEBOOK_PAGE: ("pages_manage_posts",),
+    Channel.INSTAGRAM: ("pages_manage_posts", "instagram_content_publish"),
+}
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
+# Actions that take the item out of ``scheduled`` by hand (the job must be cancelled).
+_CANCELLING_ACTIONS = frozenset({Action.UNSCHEDULE, Action.ARCHIVE})
 
 
 def enforce_channel_limit(channel: Channel, body: str) -> None:
@@ -77,11 +97,33 @@ def enforce_channel_limit(channel: Channel, body: str) -> None:
         raise BodyTooLongError(channel, limit, len(body))
 
 
+def missing_publish_scopes(account: ConnectedAccount, channel: Channel) -> list[str]:
+    """B2: the publishing scopes the connection cannot *prove* it holds. Unverified scopes
+    count as missing (unknown ≠ confirmed, SPRINT-06 A-1)."""
+    required = REQUIRED_PUBLISH_SCOPES[channel]
+    if not account.scopes_verified:
+        return list(required)
+    granted = set(account.granted_scopes)
+    return [scope for scope in required if scope not in granted]
+
+
+def instagram_image_url(media_refs: list[dict[str, Any]]) -> str | None:
+    """B2: ``media_refs[0].url`` when it is an ``https`` URL ending in ``jpg|jpeg|png``."""
+    if not media_refs:
+        return None
+    url = media_refs[0].get("url")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return None
+    path = url.split("?", 1)[0].split("#", 1)[0].lower()
+    return url if path.endswith(IMAGE_SUFFIXES) else None
+
+
 _EVENT_FOR_ACTION: dict[Action, ApprovalAction] = {
     Action.SUBMIT: ApprovalAction.SUBMITTED,
     Action.APPROVE: ApprovalAction.APPROVED,
     Action.REJECT: ApprovalAction.REJECTED,
     Action.WITHDRAW: ApprovalAction.WITHDRAWN,
+    Action.SCHEDULE: ApprovalAction.SCHEDULED,
 }
 
 
@@ -90,11 +132,13 @@ class ContentService:
         self,
         repository: ContentRepository,
         connections: ConnectedAccountRepository,
+        publish_jobs: PublishJobRepository,
         *,
         daily_token_budget: int = 200_000,
     ) -> None:
         self._repo = repository
         self._connections = connections
+        self._jobs = publish_jobs
         self._daily_token_budget = daily_token_budget
 
     # ------------------------------------------------------------ create ---
@@ -106,6 +150,7 @@ class ContentService:
         channel: Channel,
         body: str,
         target_page_id: str | None,
+        media_refs: list[dict[str, Any]] | None = None,
     ) -> ContentItem:
         """Draft + revision 1 with ``provenance={"kind": "human"}``."""
         enforce_channel_limit(channel, body)
@@ -123,6 +168,7 @@ class ContentService:
             item_id=item.id,
             revision_no=1,
             body=body,
+            media_refs=list(media_refs or []),
             provenance={"kind": "human"},
             created_by_tenant_id=actor_tenant_id,
             created_at=now,
@@ -174,17 +220,22 @@ class ContentService:
         actor_tenant_id: UUID,
         actor_user_id: UUID,
         provenance: dict[str, Any] | None = None,
+        media_refs: list[dict[str, Any]] | None = None,
     ) -> ContentItem:
-        """New revision. From ``pending_approval``/``approved``/``rejected``/``scheduled`` the
-        item returns to ``draft`` with an automatic ``withdrawn`` event (B2-U2). ``archived``
-        items are immutable ⇒ 409 ``invalid_transition``. A-3: the item row is locked
-        (``get_for_update``) before the revision number is assigned."""
+        """New revision. From ``pending_approval``/``approved``/``rejected``/``scheduled``/
+        ``publish_failed`` the item returns to ``draft`` with an automatic ``withdrawn`` event
+        (B2-U2). ``archived`` and ``published`` items are immutable ⇒ 409
+        ``invalid_transition``. A-3: the item row is locked (``get_for_update``) before the
+        revision number is assigned. From ``scheduled`` the queued publish job is cancelled
+        too (409 ``publish_in_progress`` while a worker holds it)."""
         item = await self._lock_item(brand_id, item_id)
-        if item.status is ContentStatus.ARCHIVED:
+        if item.status in EDIT_FORBIDDEN:
             raise InvalidTransitionError(item.status, "edit")
         enforce_channel_limit(item.channel, body)
         now = datetime.now(tz=UTC)
         if item.status in EDIT_RESETS_TO_DRAFT:
+            if item.status is ContentStatus.SCHEDULED:
+                await self._cancel_active_job(item, now)
             moved = await self._repo.compare_and_set_status(
                 item.id,
                 expected=item.status,
@@ -200,6 +251,7 @@ class ContentService:
                 provenance=provenance or {"kind": "human"},
                 created_by_tenant_id=actor_tenant_id,
                 created_at=now,
+                media_refs=media_refs,
             )
             await self._repo.add_event(
                 ApprovalEvent(
@@ -219,8 +271,17 @@ class ContentService:
                 provenance=provenance or {"kind": "human"},
                 created_by_tenant_id=actor_tenant_id,
                 created_at=now,
+                media_refs=media_refs,
             )
         return await self.get_item(brand_id, item_id)
+
+    async def _cancel_active_job(self, item: ContentItem, now: datetime) -> JobStatus | None:
+        """B2: ``queued → cancelled`` for the item's publish job in the current transaction.
+        A ``leased`` job belongs to a worker right now ⇒ 409 and **nothing** changes."""
+        previous = await self._jobs.cancel_queued_job(item.id, now=now)
+        if previous is JobStatus.LEASED:
+            raise PublishInProgressError()
+        return previous
 
     async def _lock_item(self, brand_id: UUID, item_id: UUID) -> ContentItem:
         item = await self._repo.get_for_update(brand_id, item_id)
@@ -244,6 +305,7 @@ class ContentService:
     ) -> ContentItem:
         item = await self.get_item(brand_id, item_id)
         now = datetime.now(tz=UTC)
+        page: PageAsset | None = None
         if action is Action.REJECT and (note is None or len(note.strip()) < REJECT_NOTE_MIN_CHARS):
             # Role first (a MANAGER gets 403, not 422), then the note rule.
             _raise_if_error(
@@ -269,9 +331,17 @@ class ContentService:
                 )
             )
             page_id = target_page_id or item.target_page_id
-            await self._validate_schedule(item, scheduled_for, page_id, now)
+            page = await self._validate_schedule(item, scheduled_for, page_id, now)
             if page_id != item.target_page_id:
                 await self._repo.set_target_page(item.id, page_id)
+        if action in _CANCELLING_ACTIONS and item.status is ContentStatus.SCHEDULED:
+            # Role + state first (a VIEWER gets 403, not 409), then the job.
+            _raise_if_error(
+                transition(
+                    item, action, actor_role=actor_role, actor_tenant_id=actor_tenant_id, now=now
+                )
+            )
+            await self._cancel_active_job(item, now)
         result = transition(
             item,
             action,
@@ -291,7 +361,18 @@ class ContentService:
         )
         if not moved:
             raise InvalidTransitionError(item.status, action.value, "item changed concurrently")
+        if action is Action.SCHEDULE and page is not None:
+            # B2 (ج): the job rides on the same session/transaction as the CAS above — if the
+            # insert fails (``uq_publish_jobs_active_item``) nothing of this request commits.
+            try:
+                await self._jobs.create_job(
+                    _job_for(item, result, page, actor_tenant_id, actor_user_id, now)
+                )
+            except ActiveJobExistsError as exc:
+                raise PublishInProgressError() from exc
         event_action = _EVENT_FOR_ACTION.get(action)
+        if action in _CANCELLING_ACTIONS and item.status is ContentStatus.SCHEDULED:
+            event_action = ApprovalAction.PUBLISH_CANCELLED
         if event_action is not None and item.current_revision_id is not None:
             await self._repo.add_event(
                 ApprovalEvent(
@@ -434,13 +515,17 @@ class ContentService:
         scheduled_for: datetime | None,
         page_id: str | None,
         now: datetime,
-    ) -> None:
+    ) -> PageAsset:
+        """SPRINT-06 B2-U4 rules, then SPRINT-07 B2 (أ) verified publishing scopes ⇒ 409
+        ``reauth_required`` and (ب) Instagram needs an https jpg/jpeg/png in
+        ``media_refs[0].url`` ⇒ 422 ``instagram_requires_image``."""
         if scheduled_for is None or scheduled_for <= now + SCHEDULE_MIN_LEAD:
             raise ScheduleTooSoonError()
         if page_id is None:
             raise TargetPageNotSelectedError()
         accounts = await self._connections.list_by_brand(item.brand_id)
-        page = None
+        page: PageAsset | None = None
+        owner: ConnectedAccount | None = None
         for account in accounts:
             if account.status is not AccountStatus.ACTIVE:
                 continue
@@ -450,11 +535,46 @@ class ContentService:
                     and candidate.is_selected
                     and candidate.encrypted_page_token
                 ):
-                    page = candidate
-        if page is None:
+                    page, owner = candidate, account
+        if page is None or owner is None:
             raise TargetPageNotSelectedError()
         if item.channel is Channel.INSTAGRAM and page.instagram is None:
             raise InstagramNotLinkedError()
+        missing = missing_publish_scopes(owner, item.channel)
+        if missing:
+            raise ReauthRequiredError(missing)
+        if item.channel is Channel.INSTAGRAM:
+            revisions = await self._repo.list_revisions(item.id, limit=1)
+            refs = revisions[0].media_refs if revisions else []
+            if instagram_image_url(refs) is None:
+                raise InstagramRequiresImageError()
+        return page
+
+
+def _job_for(
+    item: ContentItem,
+    scheduled: ContentItem,
+    page: PageAsset,
+    actor_tenant_id: UUID,
+    actor_user_id: UUID,
+    now: datetime,
+) -> PublishJob:
+    """The ``queued`` job for a freshly scheduled item (B2: ``run_at = scheduled_for``,
+    ``revision_id = current_revision_id``; D-055: who authorised it)."""
+    assert scheduled.scheduled_for is not None  # noqa: S101 - guaranteed by transition()
+    assert item.current_revision_id is not None  # noqa: S101 - approved ⇒ has a revision
+    return PublishJob(
+        item_id=item.id,
+        revision_id=item.current_revision_id,
+        brand_id=item.brand_id,
+        channel=item.channel.value,
+        target_page_id=page.page_id,
+        run_at=scheduled.scheduled_for,
+        scheduled_by_tenant_id=actor_tenant_id,
+        scheduled_by_user_id=actor_user_id,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def _raise_if_error(result: ContentItem | LifecycleError) -> None:

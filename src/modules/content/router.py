@@ -44,6 +44,7 @@ from src.modules.content.exceptions import (
     GenerationBudgetExceededError,
     GenerationRateLimitedError,
     InvalidTransitionError,
+    ReauthRequiredError,
 )
 from src.modules.content.infrastructure.postgres_repository import PostgresContentRepository
 from src.modules.content.schemas import (
@@ -63,6 +64,10 @@ from src.modules.content.schemas import (
     StatusLiteral,
 )
 from src.modules.content.service import ContentService
+from src.modules.publishing.domain.repository import PublishJobRepository
+from src.modules.publishing.infrastructure.postgres_repository import (
+    PostgresPublishJobRepository,
+)
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
 from src.modules.social_connect.router import get_repository as get_connection_repository
 from src.modules.tenancy.dependencies import get_brand_access_resolver
@@ -88,13 +93,25 @@ def get_content_repository(
     return PostgresContentRepository(session)
 
 
+def get_publish_job_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PublishJobRepository:
+    """B2: same request session as the content repository ⇒ CAS + job insert are one
+    transaction."""
+    return PostgresPublishJobRepository(session)
+
+
 def get_content_service(
     repository: Annotated[ContentRepository, Depends(get_content_repository)],
     connections: Annotated[ConnectedAccountRepository, Depends(get_connection_repository)],
+    publish_jobs: Annotated[PublishJobRepository, Depends(get_publish_job_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ContentService:
     return ContentService(
-        repository, connections, daily_token_budget=settings.ai_daily_token_budget_per_brand
+        repository,
+        connections,
+        publish_jobs,
+        daily_token_budget=settings.ai_daily_token_budget_per_brand,
     )
 
 
@@ -134,6 +151,8 @@ def to_http(exc: ContentError) -> HTTPException:
         headers = {"Retry-After": str(exc.resets_in_seconds)}
     elif isinstance(exc, GenerationRateLimitedError):
         headers = {"Retry-After": str(exc.retry_after_seconds)}
+    elif isinstance(exc, ReauthRequiredError):  # SPRINT-07 B2
+        detail.update(required_action=exc.required_action, missing_scopes=exc.missing_scopes)
     return HTTPException(exc.http_status, detail=detail, headers=headers)
 
 
@@ -217,6 +236,7 @@ async def create_item(
             channel=Channel(payload.channel),
             body=payload.body,
             target_page_id=payload.target_page_id,
+            media_refs=[ref.model_dump() for ref in payload.media_refs],
         )
     except ContentError as exc:
         raise to_http(exc) from exc
@@ -319,6 +339,7 @@ async def update_body(
             body=payload.body,
             actor_tenant_id=actor.tenant_id,
             actor_user_id=actor.user_id,
+            media_refs=[ref.model_dump() for ref in payload.media_refs],
         )
     except ContentError as exc:
         raise to_http(exc) from exc
