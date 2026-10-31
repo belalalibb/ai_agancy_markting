@@ -53,6 +53,7 @@ def _concrete(template: str) -> str:
         "item_id",
         "conversation_id",  # SPRINT-09
         "draft_id",
+        "competitor_id",  # SPRINT-10 B-1
     ):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
     return template
