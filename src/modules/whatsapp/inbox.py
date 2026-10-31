@@ -14,6 +14,10 @@ Every outbound message is written **before** the network call with ``delivery_st
 
 §2-0 (أ): ``sent_by_user_id`` is always the acting human; §2-0 (ج): the token is decrypted
 per call and ``del``-ed in ``finally``; message text is never logged.
+
+SPRINT-10 A-1 (D-072 «ثبّت ثم أبلغ»): the outbound row is **created and updated inside an
+independent transaction** (:class:`IndependentWrites`) so ``failed`` / ``ambiguous`` rows and
+the account ``disabled`` flag survive the request transaction's rollback on the error path.
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from src.modules.whatsapp.domain.models import (
     MessageKind,
     ReplyDraft,
 )
-from src.modules.whatsapp.domain.repository import Cursor, WhatsAppRepository
+from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, WhatsAppRepository
 from src.modules.whatsapp.exceptions import (
     AccountNotFoundError,
     ConversationNotFoundError,
@@ -89,10 +93,12 @@ class WhatsAppInboxService:
         repo: WhatsAppRepository,
         client: WhatsAppCloudClient,
         tokens: PostgresWhatsAppTokenProvider,
+        independent: IndependentWrites,
     ) -> None:
         self._repo = repo
         self._client = client
         self._tokens = tokens
+        self._independent = independent  # SPRINT-10 A-1 (D-072)
 
     # ------------------------------------------------------------------ reads ----
     async def list_conversations(
@@ -193,7 +199,7 @@ class WhatsAppInboxService:
             reply_draft_id=reply_draft_id,
             created_at=now,
         )
-        await self._repo.insert_outbound(message)
+        await self._independent.run(lambda repo: repo.insert_outbound(message))  # D-072
 
         async def _call(token: str, phone_number_id: str) -> str:
             return (await self._client.send_text(token, phone_number_id, conv.wa_id, body)).wamid
@@ -229,7 +235,7 @@ class WhatsAppInboxService:
             sent_by_user_id=actor_user_id,
             created_at=now,
         )
-        await self._repo.insert_outbound(message)
+        await self._independent.run(lambda repo: repo.insert_outbound(message))  # D-072
 
         async def _call(token: str, phone_number_id: str) -> str:
             sent = await self._client.send_template(
@@ -247,43 +253,64 @@ class WhatsAppInboxService:
         return conv
 
     async def _deliver(self, conv: Conversation, message: Message, call) -> Message:  # noqa: ANN001
+        """Exactly one network call (D-070); the message row's outcome (``sent`` /
+        ``ambiguous`` / ``failed``) is committed independently (D-072) **before** any error
+        is raised to the request."""
         target = await self._tokens.resolve(conv.account_id)
         if target is None:
-            await self._repo.set_delivery_status(message.id, DeliveryStatus.FAILED)
+            await self._independent.run(
+                lambda repo: repo.set_delivery_status(message.id, DeliveryStatus.FAILED)
+            )
+            account = await self._repo.get_account_by_id(conv.account_id)
+            if account is not None and account.status is AccountStatus.DISABLED:
+                # A-1 (N1): the account was disabled after a Meta 190 — no Graph call is made
+                # again until the owner reconnects / rotates (409 ``reauth_required``).
+                raise ReauthRequiredError()
             raise AccountNotFoundError()
         now = datetime.now(tz=UTC)
         token = target.token
         try:
             wamid = await call(token, target.phone_number_id)
         except WhatsAppAmbiguousError as exc:
-            await self._repo.set_delivery_status(
-                message.id, DeliveryStatus.AMBIGUOUS, error_code=exc.code
+            code = exc.code
+            await self._independent.run(
+                lambda repo: repo.set_delivery_status(
+                    message.id, DeliveryStatus.AMBIGUOUS, error_code=code
+                )
             )
-            await self._repo.touch_outbound(conv.id, at=now)
+            await self._after_outbound(conv, now)
             counters.increment("wa_send_ambiguous")
             self._log(conv, message, "ambiguous")
-            # Pending suggestions are stale once a human replied (even ambiguously).
-            expired = await self._repo.expire_pending_drafts(conv.id, now=now)
-            await record_expired(self._repo, expired, now=now)  # B-3 (D-069)
             return message.model_copy(
-                update={"delivery_status": DeliveryStatus.AMBIGUOUS, "error_code": exc.code}
+                update={"delivery_status": DeliveryStatus.AMBIGUOUS, "error_code": code}
             )
         except WhatsAppClientError as exc:
-            await self._repo.set_delivery_status(
-                message.id, DeliveryStatus.FAILED, error_code=exc.code
+            code = exc.code
+            await self._independent.run(
+                lambda repo: repo.set_delivery_status(
+                    message.id, DeliveryStatus.FAILED, error_code=code
+                )
             )
             counters.increment("wa_send_failed")
             self._log(conv, message, f"failed:{type(exc).__name__}")
             raise self._to_service_error(conv, exc, now) from exc
         finally:
             del token
-        await self._repo.set_delivery_status(message.id, DeliveryStatus.SENT, wamid=wamid)
-        await self._repo.touch_outbound(conv.id, at=now)
-        expired = await self._repo.expire_pending_drafts(conv.id, now=now)
-        await record_expired(self._repo, expired, now=now)  # B-3 (D-069)
+        await self._independent.run(
+            lambda repo: repo.set_delivery_status(message.id, DeliveryStatus.SENT, wamid=wamid)
+        )
+        await self._after_outbound(conv, now)
         counters.increment("wa_sent")
         self._log(conv, message, "sent")
         return message.model_copy(update={"delivery_status": DeliveryStatus.SENT, "wamid": wamid})
+
+    async def _after_outbound(self, conv: Conversation, now: datetime) -> None:
+        """``touch_outbound`` + pending suggestions ⇒ ``expired`` (+ signals, B-3 / D-069).
+        Runs on the **request** session: it only happens on the returning (committing) paths
+        and the conversation row is locked there (``FOR NO KEY UPDATE``)."""
+        await self._repo.touch_outbound(conv.id, at=now)
+        expired = await self._repo.expire_pending_drafts(conv.id, now=now)
+        await record_expired(self._repo, expired, now=now)
 
     def _to_service_error(
         self, conv: Conversation, exc: WhatsAppClientError, now: datetime
@@ -299,8 +326,11 @@ class WhatsAppInboxService:
         return PermanentSendError(exc.code)
 
     async def disable_account_after_auth_failure(self, conv: Conversation) -> None:
-        await self._repo.set_account_status(
-            conv.account_id, AccountStatus.DISABLED, now=datetime.now(tz=UTC)
+        """A-1 (N1): committed independently so the ``disabled`` flag survives the 409 —
+        the next attempt resolves no active token and never hits Graph again."""
+        now = datetime.now(tz=UTC)
+        await self._independent.run(
+            lambda repo: repo.set_account_status(conv.account_id, AccountStatus.DISABLED, now=now)
         )
 
     @staticmethod

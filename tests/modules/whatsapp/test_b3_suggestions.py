@@ -381,6 +381,7 @@ async def test_b3_u5_approve_with_closed_window_is_422_draft_stays_approved_unse
         assert res.json()["detail"] == {
             "error": "whatsapp_window_closed",
             "template_required": True,
+            "draft_status": "approved",  # SPRINT-10 A-1 (D-072): the persisted decision
         }
     assert wa_repo.drafts[UUID(draft["id"])].status is DraftStatus.APPROVED
     assert not [m for m in wa_repo.messages.values() if m.direction is Direction.OUTBOUND]
