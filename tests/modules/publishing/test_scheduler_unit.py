@@ -99,7 +99,7 @@ class World:
         )
         self.scheduler = PostgresScheduler(
             lambda: _NullSession,  # type: ignore[arg-type,return-value]
-            self.publisher,
+            lambda _channel: self.publisher,  # SPRINT-08 B-1: PublisherResolver
             self.marker,
             settings,
             encryption=encryption,

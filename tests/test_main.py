@@ -217,7 +217,7 @@ def test_a1_u1_postgres_scheduler_rejects_encryption_none(settings: Settings) ->
     with pytest.raises(RuntimeError, match="SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"):
         PostgresScheduler(
             database.get_session_factory,
-            FakePublisher(),
+            lambda _channel: FakePublisher(),  # SPRINT-08 B-1: PublisherResolver
             PostgresStatusMarker(),
             settings,
             encryption=None,

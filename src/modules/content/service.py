@@ -28,7 +28,6 @@ from src.modules.content.domain.lifecycle import (
     transition,
 )
 from src.modules.content.domain.models import (
-    CHANNEL_LIMITS,
     ApprovalAction,
     ApprovalEvent,
     Channel,
@@ -40,6 +39,7 @@ from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.exceptions import (
     ApprovalRequiresOwnerError,
     BodyTooLongError,
+    ChannelNotActivatedError,
     ContentInsufficientRoleError,
     ContentNotFoundError,
     GenerationBudgetExceededError,
@@ -62,6 +62,12 @@ from src.modules.content.prompts import (
     prompt_hash,
     system_prompt,
     user_prompt,
+)
+from src.modules.publishing.channels import (
+    ChannelDefinition,
+    MediaRuleError,
+    get_registry,
+    missing_publish_scopes,
 )
 from src.modules.publishing.domain.models import (
     ErrorClass,
@@ -87,42 +93,21 @@ GENERATION_WINDOW_SECONDS = 3600
 GENERATION_STATES = frozenset({ContentStatus.DRAFT, ContentStatus.REJECTED})
 # A-5: daily token budget window (per brand; summed from revision provenance).
 TOKEN_BUDGET_WINDOW = timedelta(hours=24)
-# B2: publishing scopes a connection must hold (**verified**) before ``schedule`` is allowed.
-REQUIRED_PUBLISH_SCOPES: dict[Channel, tuple[str, ...]] = {
-    Channel.FACEBOOK_PAGE: ("pages_manage_posts",),
-    Channel.INSTAGRAM: ("pages_manage_posts", "instagram_content_publish"),
-}
-IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
 # Actions that take the item out of ``scheduled`` by hand (the job must be cancelled).
 _CANCELLING_ACTIONS = frozenset({Action.UNSCHEDULE, Action.ARCHIVE})
 
 
+def channel_definition(channel: Channel) -> ChannelDefinition:
+    """SPRINT-08 B-1: every channel fact (limits, scopes, media rule, activation) is read
+    from the publishing channel registry — ``content/`` owns no channel constants."""
+    return get_registry().get(channel)
+
+
 def enforce_channel_limit(channel: Channel, body: str) -> None:
     """A-2: 422 ``body_too_long`` when ``body`` exceeds the channel's hard limit."""
-    limit = CHANNEL_LIMITS[channel]
+    limit = channel_definition(channel).limits
     if len(body) > limit:
         raise BodyTooLongError(channel, limit, len(body))
-
-
-def missing_publish_scopes(account: ConnectedAccount, channel: Channel) -> list[str]:
-    """B2: the publishing scopes the connection cannot *prove* it holds. Unverified scopes
-    count as missing (unknown ≠ confirmed, SPRINT-06 A-1)."""
-    required = REQUIRED_PUBLISH_SCOPES[channel]
-    if not account.scopes_verified:
-        return list(required)
-    granted = set(account.granted_scopes)
-    return [scope for scope in required if scope not in granted]
-
-
-def instagram_image_url(media_refs: list[dict[str, Any]]) -> str | None:
-    """B2: ``media_refs[0].url`` when it is an ``https`` URL ending in ``jpg|jpeg|png``."""
-    if not media_refs:
-        return None
-    url = media_refs[0].get("url")
-    if not isinstance(url, str) or not url.startswith("https://"):
-        return None
-    path = url.split("?", 1)[0].split("#", 1)[0].lower()
-    return url if path.endswith(IMAGE_SUFFIXES) else None
 
 
 _EVENT_FOR_ACTION: dict[Action, ApprovalAction] = {
@@ -526,7 +511,7 @@ class ContentService:
             purpose="content_draft",
             system=system,
             user=user,
-            max_tokens=min(2000, CHANNEL_LIMITS[item.channel] // 2),
+            max_tokens=min(2000, channel_definition(item.channel).limits // 2),
             temperature=0.7,
             brand_id=brand_id,
             tenant_id=actor_tenant_id,
@@ -551,7 +536,7 @@ class ContentService:
         )
         now = datetime.now(tz=UTC)
         text = result.text.strip()
-        limit = CHANNEL_LIMITS[item.channel]
+        limit = channel_definition(item.channel).limits
         truncated = len(text) > limit  # A-2: the cut is kept but **recorded** (private field)
         body = text[:limit] or "…"
         provenance: dict[str, Any] = {
@@ -618,7 +603,15 @@ class ContentService:
         return await self._validate_target(item, page_id)
 
     async def _validate_target(self, item: ContentItem, page_id: str | None) -> PageAsset:
-        """Target checks shared by ``schedule`` and ``publish/retry`` (B7)."""
+        """Target checks shared by ``schedule`` and ``publish/retry`` (B7).
+
+        SPRINT-08 B-1: a channel that is not activated is refused **first** (422
+        ``channel_not_activated`` with its incomplete requirements) — before any
+        connection / page / scope check, so no brand data is consulted for it.
+        """
+        definition = channel_definition(item.channel)
+        if not definition.is_active:
+            raise ChannelNotActivatedError(item.channel, definition.incomplete_requirements())
         if page_id is None:
             raise TargetPageNotSelectedError()
         accounts = await self._connections.list_by_brand(item.brand_id)
@@ -638,14 +631,17 @@ class ContentService:
             raise TargetPageNotSelectedError()
         if item.channel is Channel.INSTAGRAM and page.instagram is None:
             raise InstagramNotLinkedError()
-        missing = missing_publish_scopes(owner, item.channel)
+        missing = missing_publish_scopes(owner, definition)
         if missing:
             raise ReauthRequiredError(missing)
-        if item.channel is Channel.INSTAGRAM:
+        if definition.capabilities.requires_media:
+            # SPRINT-07 B2 (ب) via the registry rule: Instagram ⇒ https jpg/jpeg/png image.
             revisions = await self._repo.list_revisions(item.id, limit=1)
             refs = revisions[0].media_refs if revisions else []
-            if instagram_image_url(refs) is None:
-                raise InstagramRequiresImageError()
+            try:
+                definition.validate_media(refs)
+            except MediaRuleError as exc:
+                raise InstagramRequiresImageError() from exc
         return page
 
 

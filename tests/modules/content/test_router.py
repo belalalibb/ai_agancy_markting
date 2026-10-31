@@ -132,9 +132,11 @@ def test_b3_u1_owner_and_manager_create_drafts_viewer_cannot(
 
 def test_b3_u1_create_validates_body_and_channel(client: TestClient, as_: Headers) -> None:
     owner = as_(OWNER_ID)
+    # SPRINT-08 B-1: ``tiktok`` is now a registered (structural) channel ⇒ drafts are allowed;
+    # an unknown value is still rejected by the enum-derived ``ChannelLiteral``.
     assert (
         client.post(
-            f"{BASE}/items", json={"channel": "tiktok", "body": BODY}, headers=owner
+            f"{BASE}/items", json={"channel": "myspace", "body": BODY}, headers=owner
         ).status_code
         == 422
     )

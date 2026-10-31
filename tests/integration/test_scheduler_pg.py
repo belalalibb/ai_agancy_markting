@@ -189,7 +189,7 @@ def _scheduler(
 ) -> PostgresScheduler:
     return PostgresScheduler(
         lambda: factory,
-        publisher,
+        lambda _channel: publisher,  # SPRINT-08 B-1: PublisherResolver
         PostgresStatusMarker(lambda: factory),
         settings,
         encryption=encryption,

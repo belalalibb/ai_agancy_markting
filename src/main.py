@@ -26,15 +26,17 @@ from src.core.http import build_http_client
 from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
 from src.modules.content import router as content_router
-from src.modules.publishing.infrastructure.meta_publisher import MetaPublisher
+from src.modules.content.domain.models import Channel
+from src.modules.publishing.channels import get_registry
+from src.modules.publishing.domain.publisher import Publisher
 from src.modules.publishing.scheduler import (
     SCHEDULER_REQUIRES_ENCRYPTION_KEY,
     PostgresScheduler,
+    PublisherResolver,
     scheduler_loop,
 )
 from src.modules.social_connect import router as social_connect_router
 from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
-from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.tenancy import router as tenancy_router
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await database.get_engine().dispose()
 
 
+def build_publisher_resolver(settings: Settings, http_client: object) -> PublisherResolver:
+    """SPRINT-08 B-1: one ``Publisher`` per registry channel, built once from the channel
+    definitions (Meta ⇒ ``MetaPublisher`` over the shared client; structural channels ⇒
+    ``StructuralPublisher``) and resolved by the scheduler per ``job.channel``."""
+    registry = get_registry()
+    publishers: dict[Channel, Publisher] = {
+        definition.channel: definition.build_publisher(settings, http_client)
+        for definition in registry.all()
+    }
+    return publishers.__getitem__
+
+
 def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | None:
     """B6: the publish worker runs in-process only when ``SCHEDULER_ENABLED=true``.
 
@@ -83,7 +97,7 @@ def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | N
     encryption = get_token_encryption_service(settings)
     scheduler = PostgresScheduler(
         database.get_session_factory,
-        MetaPublisher(MetaGraphClient(settings, app.state.http_client)),
+        build_publisher_resolver(settings, app.state.http_client),
         PostgresStatusMarker(),
         settings,
         encryption=encryption,

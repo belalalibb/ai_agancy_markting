@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from src.modules.content.domain.models import Channel, ContentStatus
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from src.modules.publishing.channels.definition import ActivationRequirement
 
 
 class ContentError(Exception):
@@ -112,6 +117,21 @@ class GenerationRateLimitedError(ContentError):
     def __init__(self, retry_after_seconds: int) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__()
+
+
+class ChannelNotActivatedError(ContentError):
+    """The channel exists in the registry but is not activated yet (SPRINT-08 B-1)."""
+
+    error = "channel_not_activated"
+    http_status = 422
+
+    def __init__(
+        self, channel: Channel, requirements: tuple[ActivationRequirement, ...] = ()
+    ) -> None:
+        self.channel = channel
+        # Only the incomplete rows (pending / not_started) — what remains to be done.
+        self.requirements = [r.model_dump(mode="json") for r in requirements]
+        super().__init__(f"channel {channel.value!r} is not activated")
 
 
 class ReauthRequiredError(ContentError):

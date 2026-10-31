@@ -36,7 +36,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.core.config import Settings
 from src.core.metrics import counters
 from src.core.security import TokenEncryptionService
-from src.modules.content.domain.models import ApprovalAction, ApprovalEvent, ContentStatus
+from src.modules.content.domain.models import (
+    ApprovalAction,
+    ApprovalEvent,
+    Channel,
+    ContentStatus,
+)
 from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.infrastructure.postgres_repository import PostgresContentRepository
 from src.modules.publishing.domain.models import (
@@ -74,6 +79,9 @@ ConnectionsRepoFactory = Callable[[AsyncSession], ConnectedAccountRepository]
 # SPRINT-08 A-1: shared message of the two-layer guard (``main._start_scheduler`` and
 # ``PostgresScheduler.__init__``) — a worker that cannot decrypt page tokens must not boot.
 SCHEDULER_REQUIRES_ENCRYPTION_KEY = "SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"
+# SPRINT-08 B-1: the scheduler no longer owns one publisher — it resolves one per job channel
+# (Meta ⇒ MetaPublisher, structural ⇒ StructuralPublisher) through the channel registry.
+PublisherResolver = Callable[[Channel], Publisher]
 
 
 def default_lease_owner() -> str:
@@ -90,7 +98,7 @@ class PostgresScheduler:
     def __init__(
         self,
         session_factory: SessionFactoryProvider,
-        publisher: Publisher,
+        publisher_resolver: PublisherResolver,
         status_marker: StatusMarker,
         settings: Settings,
         *,
@@ -105,11 +113,14 @@ class PostgresScheduler:
 
         ``encryption`` is mandatory (A-1): ``None`` raises ``RuntimeError`` with
         ``SCHEDULER_REQUIRES_ENCRYPTION_KEY`` — second layer behind ``main._start_scheduler``.
+
+        ``publisher_resolver`` (SPRINT-08 B-1) maps ``job.channel`` to the ``Publisher`` that
+        handles it; ``main`` builds it from the channel registry, tests pass a lambda.
         """
         if encryption is None:
             raise RuntimeError(SCHEDULER_REQUIRES_ENCRYPTION_KEY)
         self._session_factory = session_factory
-        self._publisher = publisher
+        self._resolve_publisher = publisher_resolver
         self._status_marker = status_marker
         self._settings = settings
         self._encryption = encryption
@@ -179,7 +190,7 @@ class PostgresScheduler:
         if revision is None:
             outcome = PublishOutcome.failure(ErrorClass.INVALID_REQUEST)
         else:
-            outcome = await self._publisher.publish(
+            outcome = await self._resolve_publisher(Channel(job.channel)).publish(
                 job,
                 revision,
                 self._page_token_provider(),
