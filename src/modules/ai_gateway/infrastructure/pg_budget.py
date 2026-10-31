@@ -3,9 +3,8 @@
 Sources (``prompt_tokens`` / ``completion_tokens`` read from the private provenance):
 
 * ``content_revisions.provenance`` where ``kind = 'ai_generated'`` (SPRINT-07);
-* ``wa_reply_drafts.provenance`` (SPRINT-09 — every draft is AI generated).
-
-Brand Brain calls are added in B-1 through ``ai_cost_log``.
+* ``wa_reply_drafts.provenance`` (SPRINT-09 — every draft is AI generated);
+* ``ai_cost_log`` (SPRINT-10 B-1 — every Brand Brain gateway call, ``ok`` or ``error``).
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from sqlalchemy import Integer, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 
+from src.modules.brand_brain.infrastructure.orm import AICostLogRow
 from src.modules.content.infrastructure.orm import ContentItemRow, ContentRevisionRow
 from src.modules.whatsapp.infrastructure.orm import ReplyDraftRow
 
@@ -29,7 +29,8 @@ def _tokens(prov: Any) -> Any:  # noqa: ANN401 - SQLAlchemy JSONB column express
 
 
 def ai_token_usage_sources(brand_id: UUID, since: datetime) -> Select:
-    """``SELECT tokens, created_at FROM <revisions> UNION ALL <reply drafts>``."""
+    """``SELECT tokens, created_at FROM <revisions> UNION ALL <reply drafts> UNION ALL
+    <ai_cost_log>``."""
     revisions = (
         select(
             _tokens(ContentRevisionRow.provenance).label("tokens"),
@@ -47,7 +48,14 @@ def ai_token_usage_sources(brand_id: UUID, since: datetime) -> Select:
         _tokens(ReplyDraftRow.provenance).label("tokens"),
         ReplyDraftRow.created_at.label("created_at"),
     ).where(ReplyDraftRow.brand_id == brand_id, ReplyDraftRow.created_at >= since)
-    return revisions.union_all(drafts)
+    cost_log = select(
+        (
+            func.coalesce(AICostLogRow.prompt_tokens, 0)
+            + func.coalesce(AICostLogRow.completion_tokens, 0)
+        ).label("tokens"),
+        AICostLogRow.created_at.label("created_at"),
+    ).where(AICostLogRow.brand_id == brand_id, AICostLogRow.created_at >= since)
+    return revisions.union_all(drafts, cost_log)
 
 
 class PgBudgetUsageReader:
