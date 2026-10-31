@@ -398,3 +398,12 @@ class PagePostsPage(_CursorPage):
 
 class InstagramMediaPage(_CursorPage):
     items: list[InstagramMediaPublic] = Field(default_factory=list)
+
+
+class MetaPublishResult(BaseModel):
+    """SPRINT-07 B4: what a successful publish call returns (ids only — never post text)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    post_id: str = Field(min_length=1, max_length=128)
+    permalink: str | None = None

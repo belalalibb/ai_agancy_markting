@@ -29,18 +29,22 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.modules.ai_gateway.contract import AIError, ErrorCategory
 from src.modules.ai_gateway.dependencies import Gateway
-from src.modules.ai_gateway.exceptions import AIRateLimitedError, AIUpstreamError
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import Action
 from src.modules.content.domain.models import Channel, ContentItem, ContentStatus
 from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.exceptions import (
+    BodyTooLongError,
     ContentError,
+    GenerationBudgetExceededError,
     GenerationRateLimitedError,
     InvalidTransitionError,
+    ReauthRequiredError,
 )
 from src.modules.content.infrastructure.postgres_repository import PostgresContentRepository
 from src.modules.content.schemas import (
@@ -49,15 +53,23 @@ from src.modules.content.schemas import (
     ContentBodyUpdate,
     ContentItemCreate,
     ContentItemDetail,
+    ContentItemDetailWithUsage,
     ContentItemPage,
     ContentItemPublic,
     ContentRevisionPublic,
     GenerateRequest,
+    GenerationLogEntry,
+    PublishStatusDetail,
+    PublishStatusPublic,
     RejectRequest,
     ScheduleRequest,
     StatusLiteral,
 )
 from src.modules.content.service import ContentService
+from src.modules.publishing.domain.repository import PublishJobRepository
+from src.modules.publishing.infrastructure.postgres_repository import (
+    PostgresPublishJobRepository,
+)
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
 from src.modules.social_connect.router import get_repository as get_connection_repository
 from src.modules.tenancy.dependencies import get_brand_access_resolver
@@ -83,11 +95,26 @@ def get_content_repository(
     return PostgresContentRepository(session)
 
 
+def get_publish_job_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PublishJobRepository:
+    """B2: same request session as the content repository ⇒ CAS + job insert are one
+    transaction."""
+    return PostgresPublishJobRepository(session)
+
+
 def get_content_service(
     repository: Annotated[ContentRepository, Depends(get_content_repository)],
     connections: Annotated[ConnectedAccountRepository, Depends(get_connection_repository)],
+    publish_jobs: Annotated[PublishJobRepository, Depends(get_publish_job_repository)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ContentService:
-    return ContentService(repository, connections)
+    return ContentService(
+        repository,
+        connections,
+        publish_jobs,
+        daily_token_budget=settings.ai_daily_token_budget_per_brand,
+    )
 
 
 Service = Annotated[ContentService, Depends(get_content_service)]
@@ -115,18 +142,50 @@ async def _authorise(
 
 def to_http(exc: ContentError) -> HTTPException:
     detail: dict[str, object] = {"error": exc.error, "message": exc.message}
+    headers: dict[str, str] | None = None
     if isinstance(exc, InvalidTransitionError):
         detail["from"] = exc.from_status.value
         detail["action"] = exc.action
-    headers = (
-        {"Retry-After": str(exc.retry_after_seconds)}
-        if isinstance(exc, GenerationRateLimitedError)
-        else None
-    )
+    elif isinstance(exc, BodyTooLongError):  # A-2
+        detail.update(channel=exc.channel.value, limit=exc.limit, length=exc.length)
+    elif isinstance(exc, GenerationBudgetExceededError):  # A-5
+        detail.update(budget=exc.budget, used=exc.used, resets_in_seconds=exc.resets_in_seconds)
+        headers = {"Retry-After": str(exc.resets_in_seconds)}
+    elif isinstance(exc, GenerationRateLimitedError):
+        headers = {"Retry-After": str(exc.retry_after_seconds)}
+    elif isinstance(exc, ReauthRequiredError):  # SPRINT-07 B2
+        detail.update(required_action=exc.required_action, missing_scopes=exc.missing_scopes)
     return HTTPException(exc.http_status, detail=detail, headers=headers)
 
 
 Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
+
+# B-0 (D-067): the single HTTP map for the twelve provider error categories. Anything not
+# listed is a fixed 502 ``ai_upstream_unavailable`` — no provider text ever reaches clients.
+_AI_HTTP: dict[ErrorCategory, tuple[int, str]] = {
+    ErrorCategory.RATE_LIMITED: (status.HTTP_429_TOO_MANY_REQUESTS, "ai_rate_limited"),
+    ErrorCategory.QUOTA_EXCEEDED: (status.HTTP_429_TOO_MANY_REQUESTS, "ai_quota_exceeded"),
+    ErrorCategory.INVALID_CREDENTIAL: (
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "ai_provider_misconfigured",
+    ),
+    ErrorCategory.AUTH_EXPIRED: (status.HTTP_503_SERVICE_UNAVAILABLE, "ai_provider_misconfigured"),
+    ErrorCategory.CONTENT_REJECTED: (
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "ai_content_rejected",
+    ),
+}
+_AI_HTTP_DEFAULT = (status.HTTP_502_BAD_GATEWAY, "ai_upstream_unavailable")
+
+
+def _ai_error_to_http(exc: AIError) -> HTTPException:
+    http_status, error = _AI_HTTP.get(exc.category, _AI_HTTP_DEFAULT)
+    headers = None
+    if exc.category is ErrorCategory.RATE_LIMITED and exc.retry_after_ms is not None:
+        headers = {"Retry-After": str(max(1, -(-exc.retry_after_ms // 1000)))}
+    return HTTPException(
+        http_status, detail={"error": error, "category": exc.category.value}, headers=headers
+    )
 
 
 # ------------------------------------------------------------------ cursor --
@@ -149,17 +208,17 @@ def _decode_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
         ) from exc
 
 
-async def _public(service: ContentService, item: ContentItem) -> ContentItemPublic:
-    return ContentItemPublic.from_domain(item, current_body=await service.current_body(item))
-
-
 # ------------------------------------------------------------------- routes --
 @router.post(
     f"{BRAND_PREFIX}/items",
     response_model=ContentItemPublic,
     status_code=status.HTTP_201_CREATED,
     summary="Create a draft (revision 1, provenance=human) — OWNER/MANAGER",
-    responses={403: {"description": "insufficient_role"}, 404: {"description": "brand_not_found"}},
+    responses={
+        403: {"description": "insufficient_role"},
+        404: {"description": "brand_not_found"},
+        422: {"description": "body_too_long {channel, limit, length}"},
+    },
 )
 async def create_item(
     brand_id: UUID,
@@ -168,15 +227,21 @@ async def create_item(
     service: Service,
     resolver: Resolver,
 ) -> ContentItemPublic:
-    """Roles: OWNER, MANAGER (VIEWER ⇒ 403 ``insufficient_role``). Result: ``draft``."""
+    """Roles: OWNER, MANAGER (VIEWER ⇒ 403 ``insufficient_role``). Result: ``draft``.
+    Body longer than the channel limit (Instagram 2200 / Facebook 5000) ⇒ 422
+    ``body_too_long`` (A-2)."""
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
-    item = await service.create_item(
-        brand_id,
-        actor_tenant_id=actor.tenant_id,
-        channel=Channel(payload.channel),
-        body=payload.body,
-        target_page_id=payload.target_page_id,
-    )
+    try:
+        item = await service.create_item(
+            brand_id,
+            actor_tenant_id=actor.tenant_id,
+            channel=Channel(payload.channel),
+            body=payload.body,
+            target_page_id=payload.target_page_id,
+            media_refs=[ref.model_dump() for ref in payload.media_refs],
+        )
+    except ContentError as exc:
+        raise to_http(exc) from exc
     return ContentItemPublic.from_domain(item, current_body=payload.body)
 
 
@@ -204,45 +269,46 @@ async def list_items(
         cursor=_decode_cursor(cursor),
     )
     return ContentItemPage(
-        items=[await _public(service, i) for i in items],
-        next_cursor=_encode_cursor(items[-1]) if has_more and items else None,
+        items=[ContentItemPublic.from_domain(item, current_body=body) for item, body in items],
+        next_cursor=_encode_cursor(items[-1][0]) if has_more and items else None,
         has_more=has_more,
     )
 
 
 @router.get(
     f"{BRAND_PREFIX}/items/{{item_id}}",
-    response_model=ContentItemDetail,
-    response_model_exclude_none=True,
+    response_model=ContentItemDetail | ContentItemDetailWithUsage,
     summary="Item detail with last 20 revisions and the approval log — all roles",
     responses={404: {"description": "content_not_found / brand_not_found"}},
 )
 async def get_item(
     brand_id: UUID, item_id: UUID, actor: CurrentUser, service: Service, resolver: Resolver
-) -> ContentItemDetail:
-    """Roles: OWNER, MANAGER, VIEWER. ``generation_log`` (provider/model/token usage of the AI
-    revisions) is present for OWNER/MANAGER and **removed** for VIEWER (§2-0 b)."""
+) -> ContentItemDetail | ContentItemDetailWithUsage:
+    """Roles: OWNER, MANAGER, VIEWER. Two response models (A-4): OWNER/MANAGER receive
+    ``ContentItemDetailWithUsage`` (``generation_log`` with provider/model/token usage of the
+    AI revisions); VIEWER receives ``ContentItemDetail`` — the key is absent, not ``null``
+    (§2-0 b). ``revisions[].provenance`` is the public projection for every role (A-1)."""
     role = await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
     try:
         item, revisions, events = await service.get_detail(brand_id, item_id)
     except ContentError as exc:
         raise to_http(exc) from exc
-    generation_log = (
-        [
-            {k: v for k, v in r.provenance.items() if k != "kind"} | {"revision_no": r.revision_no}
-            for r in revisions
-            if r.provenance.get("kind") == "ai_generated"
-        ]
-        if role is not BrandRole.VIEWER
-        else None
-    )
-    return ContentItemDetail(
+    base = ContentItemDetail(
         **ContentItemPublic.from_domain(
             item, current_body=revisions[0].body if revisions else None
         ).model_dump(),
         revisions=[ContentRevisionPublic.from_domain(r) for r in revisions],
         approval_events=[ApprovalEventPublic.from_domain(e) for e in events],
-        generation_log=generation_log,
+    )
+    if role is BrandRole.VIEWER:
+        return base
+    return ContentItemDetailWithUsage(
+        **base.model_dump(),
+        generation_log=[
+            GenerationLogEntry.from_revision(r)
+            for r in revisions
+            if r.provenance.get("kind") == "ai_generated"
+        ],
     )
 
 
@@ -254,6 +320,7 @@ async def get_item(
         403: {"description": "insufficient_role"},
         404: {"description": "content_not_found"},
         409: {"description": "invalid_transition (archived items are immutable)"},
+        422: {"description": "body_too_long {channel, limit, length}"},
     },
 )
 async def update_body(
@@ -274,6 +341,7 @@ async def update_body(
             body=payload.body,
             actor_tenant_id=actor.tenant_id,
             actor_user_id=actor.user_id,
+            media_refs=[ref.model_dump() for ref in payload.media_refs],
         )
     except ContentError as exc:
         raise to_http(exc) from exc
@@ -310,7 +378,12 @@ async def _act(
         )
     except ContentError as exc:
         raise to_http(exc) from exc
-    return await _public(service, item)
+    return ContentItemPublic.from_domain(item, current_body=await _body_of(service, item))
+
+
+async def _body_of(service: ContentService, item: ContentItem) -> str | None:
+    revisions = await service.list_revisions(item.id, limit=1)
+    return revisions[0].body if revisions else None
 
 
 _TRANSITION_RESPONSES = {
@@ -505,6 +578,67 @@ async def archive_item(
     )
 
 
+# ------------------------------------------------------ SPRINT-07 B7 publish status ---
+@router.get(
+    f"{BRAND_PREFIX}/items/{{item_id}}/publish",
+    response_model=PublishStatusPublic | PublishStatusDetail,
+    summary="Publish status: current/latest job + attempts — all roles (VIEWER: reduced)",
+    responses={404: {"description": "content_not_found / no_publish_job / brand_not_found"}},
+)
+async def get_publish_status(
+    brand_id: UUID, item_id: UUID, actor: CurrentUser, service: Service, resolver: Resolver
+) -> PublishStatusPublic | PublishStatusDetail:
+    """Roles: OWNER, MANAGER, VIEWER. Two response models (A-4): OWNER/MANAGER receive
+    ``PublishStatusDetail`` (error classes, Graph codes/trace ids, external ids, lease, who
+    authorised); VIEWER receives ``PublishStatusPublic`` — attempts carry only
+    ``attempt_no/started_at/finished_at/outcome``. 404 ``no_publish_job`` if never scheduled."""
+    role = await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
+    try:
+        job, attempts = await service.publish_status(brand_id, item_id)
+    except ContentError as exc:
+        raise to_http(exc) from exc
+    if role is BrandRole.VIEWER:
+        return PublishStatusPublic.from_domain(job, attempts)
+    return PublishStatusDetail.from_domain(job, attempts)
+
+
+@router.post(
+    f"{BRAND_PREFIX}/items/{{item_id}}/publish/retry",
+    response_model=ContentItemPublic,
+    summary="publish_failed → scheduled (new queued job, run_at=now) — OWNER/MANAGER",
+    responses={
+        **_TRANSITION_RESPONSES,
+        409: {
+            "description": "invalid_transition / manual_verification_required (ambiguous) / "
+            "reauth_required / publish_in_progress"
+        },
+        422: {"description": "target_page_not_selected / instagram_requires_image"},
+    },
+)
+async def retry_publish(
+    brand_id: UUID,
+    item_id: UUID,
+    actor: CurrentUserFresh,
+    service: Service,
+    resolver: Resolver,
+) -> ContentItemPublic:
+    """Roles: OWNER, MANAGER. Only for ``publish_failed`` items whose last outcome was **not**
+    ambiguous (else 409 ``manual_verification_required`` — the post may already be live).
+    Re-validates the target like ``schedule`` and records a new ``scheduled`` event."""
+    role = await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        item = await service.retry_publish(
+            brand_id,
+            item_id,
+            actor_role=role,
+            actor_tenant_id=actor.tenant_id,
+            actor_user_id=actor.user_id,
+        )
+    except ContentError as exc:
+        raise to_http(exc) from exc
+    return ContentItemPublic.from_domain(item, current_body=await _body_of(service, item))
+
+
 @router.post(
     f"{BRAND_PREFIX}/items/{{item_id}}/generate",
     response_model=ContentItemPublic,
@@ -513,9 +647,13 @@ async def archive_item(
         403: {"description": "insufficient_role"},
         404: {"description": "content_not_found"},
         409: {"description": "invalid_transition — only draft/rejected items can be generated"},
-        429: {"description": "generation_rate_limited (20/h per brand) / ai_rate_limited"},
-        502: {"description": "ai_upstream_unavailable (fixed body)"},
-        503: {"description": "ai_provider_not_configured"},
+        422: {"description": "ai_content_rejected"},
+        429: {
+            "description": "generation_rate_limited (20/h per brand) / "
+            "generation_budget_exceeded (daily tokens) / ai_rate_limited / ai_quota_exceeded"
+        },
+        502: {"description": "ai_upstream_unavailable (fixed body; every other category)"},
+        503: {"description": "ai_provider_not_configured / ai_provider_misconfigured"},
     },
 )
 async def generate_item(
@@ -547,18 +685,6 @@ async def generate_item(
         )
     except ContentError as exc:
         raise to_http(exc) from exc
-    except AIRateLimitedError as exc:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"error": exc.error, "message": exc.message},
-            headers=(
-                {"Retry-After": str(exc.retry_after_seconds)}
-                if exc.retry_after_seconds is not None
-                else None
-            ),
-        ) from exc
-    except AIUpstreamError as exc:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, detail={"error": "ai_upstream_unavailable"}
-        ) from exc
-    return await _public(service, item)
+    except AIError as exc:
+        raise _ai_error_to_http(exc) from exc
+    return ContentItemPublic.from_domain(item, current_body=await _body_of(service, item))

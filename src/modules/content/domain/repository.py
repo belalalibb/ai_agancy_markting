@@ -1,10 +1,22 @@
 """Persistence contract of the ``content`` module (D-013: Protocol here, PG impl in
-``infrastructure``, fakes only in ``tests``)."""
+``infrastructure``, fakes only in ``tests``).
+
+SPRINT-07 Part A changes:
+
+* **A-3** — the old "peek the next revision number" method is gone. Callers lock the aggregate with
+  :meth:`ContentRepository.get_for_update` (``SELECT … FOR UPDATE``) and then call
+  :meth:`ContentRepository.add_revision`, which assigns ``revision_no`` itself
+  (``COALESCE(MAX(revision_no), 0) + 1`` inside the same transaction — safe under the lock).
+* **A-4** — :meth:`ContentRepository.list_items` returns ``(item, current_body)`` pairs from
+  one ``LEFT JOIN`` (no N+1).
+* **A-5** — :meth:`ContentRepository.ai_token_usage_since` sums the private token counters of
+  ``ai_generated`` revisions for the daily budget.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from src.modules.content.domain.models import (
@@ -18,11 +30,17 @@ from src.modules.content.domain.models import (
 @runtime_checkable
 class ContentRepository(Protocol):
     async def create_item(self, item: ContentItem, revision: ContentRevision) -> ContentItem:
-        """Insert the item **and** its first revision; return the item with
-        ``current_revision_id`` set."""
+        """Insert the item **and** its first revision (``revision_no`` 1 — a brand-new
+        aggregate cannot race); return the item with ``current_revision_id`` set."""
         ...
 
     async def get_item(self, brand_id: UUID, item_id: UUID) -> ContentItem | None: ...
+
+    async def get_for_update(self, brand_id: UUID, item_id: UUID) -> ContentItem | None:
+        """A-3: read the item **and lock its row** (``SELECT … FOR UPDATE``) for the rest of
+        the transaction so revision numbering and the status CAS that follow are serialised
+        per aggregate. The in-memory fake serialises with an ``asyncio.Lock`` per item."""
+        ...
 
     async def list_items(
         self,
@@ -31,19 +49,32 @@ class ContentRepository(Protocol):
         status: ContentStatus | None,
         limit: int,
         cursor: tuple[datetime, UUID] | None,
-    ) -> list[ContentItem]:
+    ) -> list[tuple[ContentItem, str | None]]:
         """Keyset page ordered by ``(created_at DESC, id DESC)``; ``cursor`` = last seen pair.
-        Returns up to ``limit + 1`` rows so the caller can derive ``has_more``."""
+        Returns up to ``limit + 1`` ``(item, current_body)`` rows (A-4: one ``LEFT JOIN`` on
+        ``current_revision_id``) so the caller can derive ``has_more``."""
         ...
 
-    async def next_revision_no(self, item_id: UUID) -> int: ...
-
-    async def add_revision(self, revision: ContentRevision) -> ContentRevision:
-        """Insert a revision and point ``current_revision_id`` at it."""
+    async def add_revision(
+        self,
+        item_id: UUID,
+        *,
+        body: str,
+        provenance: dict[str, Any],
+        created_by_tenant_id: UUID,
+        created_at: datetime,
+        media_refs: list[dict[str, Any]] | None = None,
+    ) -> ContentRevision:
+        """Insert the next revision (``revision_no`` assigned here — the caller must hold the
+        aggregate lock from :meth:`get_for_update`) and point ``current_revision_id`` at it."""
         ...
 
     async def list_revisions(self, item_id: UUID, *, limit: int) -> list[ContentRevision]:
         """Newest first."""
+        ...
+
+    async def get_revision(self, revision_id: UUID) -> ContentRevision | None:
+        """SPRINT-07 B6: the exact revision a ``publish_jobs`` row points at."""
         ...
 
     async def add_event(self, event: ApprovalEvent) -> ApprovalEvent: ...
@@ -64,7 +95,20 @@ class ContentRepository(Protocol):
         new: ContentStatus,
         scheduled_for: datetime | None,
         updated_at: datetime,
+        published_at: datetime | None = None,
     ) -> bool:
         """B3 optimistic concurrency: ``UPDATE … WHERE id = :id AND status = :expected``;
-        ``True`` iff exactly one row changed."""
+        ``True`` iff exactly one row changed. ``published_at`` is written only when
+        ``new == published`` (SPRINT-07 system transition); leaving ``scheduled`` always
+        nulls ``scheduled_for`` (DB CHECK)."""
+        ...
+
+    async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:
+        """A-5: ``SUM(prompt_tokens + completion_tokens)`` over the ``ai_generated`` revisions
+        of this brand created at or after ``since`` (``human`` rows are never counted)."""
+        ...
+
+    async def oldest_ai_generation_at(self, brand_id: UUID, since: datetime) -> datetime | None:
+        """A-5 (429 path only): ``created_at`` of the oldest ``ai_generated`` revision in the
+        window — tells the client when the budget starts to free up."""
         ...

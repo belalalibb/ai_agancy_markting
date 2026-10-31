@@ -145,3 +145,38 @@ def test_health_liveness_unchanged(settings: Settings) -> None:
     with TestClient(create_app(settings)) as client:
         body = client.get("/health").json()
     assert body == {"status": "ok", "app": settings.app_name, "env": settings.app_env}
+
+
+# ------------------------------------------------------------ SPRINT-07 B6-U1 scheduler loop
+def test_b6_u1_scheduler_loop_not_started_when_disabled(settings: Settings) -> None:
+    assert settings.scheduler_enabled is False
+    with TestClient(create_app(settings)) as client:
+        assert client.app.state.scheduler_task is None  # type: ignore[attr-defined]
+
+
+def test_b6_u1_scheduler_loop_started_and_cancelled_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from src import main as main_module
+
+    calls: list[str] = []
+
+    async def fake_loop(scheduler: Any, poll_seconds: float) -> None:
+        calls.append(type(scheduler).__name__)
+        assert poll_seconds == 1
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            calls.append("cancelled")
+            raise
+
+    monkeypatch.setattr(main_module, "scheduler_loop", fake_loop)
+    enabled = Settings(_env_file=None, scheduler_enabled=True, scheduler_poll_seconds=1)  # type: ignore[call-arg]
+    with TestClient(create_app(enabled)) as client:
+        task = client.app.state.scheduler_task  # type: ignore[attr-defined]
+        assert task is not None and not task.done()
+        assert client.get("/health").status_code == 200
+    assert task.cancelled() or task.done()
+    assert calls == ["PostgresScheduler", "cancelled"]

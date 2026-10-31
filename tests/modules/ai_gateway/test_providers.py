@@ -1,4 +1,4 @@
-"""SPRINT-06 B4 — gateway providers (no SDK, no network: respx)."""
+"""SPRINT-06 B4 — gateway facades (no SDK, no network: respx); SPRINT-07 B-0 contract."""
 
 from __future__ import annotations
 
@@ -11,14 +11,11 @@ import respx
 from pydantic import SecretStr
 from src.core.config import Settings
 from src.core.logging import redact
+from src.modules.ai_gateway.contract import AIError, ErrorCategory
 from src.modules.ai_gateway.dependencies import build_gateway
-from src.modules.ai_gateway.exceptions import (
-    AIProviderNotConfiguredError,
-    AIRateLimitedError,
-    AIUpstreamError,
-)
+from src.modules.ai_gateway.exceptions import AIProviderNotConfiguredError
+from src.modules.ai_gateway.facades import FakeProvider, HttpOpenAICompatibleProvider
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
-from src.modules.ai_gateway.providers import FakeProvider, HttpOpenAICompatibleProvider
 
 BASE = "https://llm.example/v1"
 # Assembled at runtime so no secret-shaped literal lives in the repo (gitleaks full-history).
@@ -87,16 +84,18 @@ async def test_b4_u1_request_capture_key_only_in_authorization_header(
     assert all(r.levelno <= logging.DEBUG for r in caplog.records if "user_preview" in r.msg)
 
 
-# B4-U2 — 429 ⇒ AIRateLimitedError (Retry-After carried); 5xx ⇒ one retry then
-# AIUpstreamError; timeout ⇒ one retry then AIUpstreamError; 4xx ⇒ no retry.
+# B4-U2 — 429 ⇒ rate_limited (Retry-After carried); 5xx ⇒ one retry then
+# retryable_server_error; timeout ⇒ one retry then timeout; 4xx ⇒ no retry (B-0 categories).
 async def test_b4_u2_rate_limited_carries_retry_after(llm_mock: respx.MockRouter) -> None:
     route = llm_mock.post("/chat/completions").mock(
         return_value=httpx.Response(429, headers={"Retry-After": "17"}, json={"error": "slow"})
     )
-    with pytest.raises(AIRateLimitedError) as exc:
+    with pytest.raises(AIError) as exc:
         await _provider().complete(_req())
-    assert exc.value.retry_after_seconds == 17 and exc.value.error == "ai_rate_limited"
-    assert route.call_count == 1  # 4xx: never retried
+    assert exc.value.category is ErrorCategory.RATE_LIMITED
+    assert exc.value.retry_after_ms == 17_000 and exc.value.error == "ai_rate_limited"
+    assert exc.value.retryable is True
+    assert route.call_count == 1  # 429 is retryable *by the caller*, never by the facade
 
 
 async def test_b4_u2_5xx_is_retried_once_then_upstream_error(
@@ -105,9 +104,9 @@ async def test_b4_u2_5xx_is_retried_once_then_upstream_error(
     route = llm_mock.post("/chat/completions").mock(
         return_value=httpx.Response(503, json={"error": "down"})
     )
-    with pytest.raises(AIUpstreamError) as exc:
+    with pytest.raises(AIError) as exc:
         await _provider().complete(_req())
-    assert exc.value.error == "ai_upstream_unavailable"
+    assert exc.value.category is ErrorCategory.RETRYABLE_SERVER_ERROR
     assert route.call_count == 2
 
 
@@ -123,8 +122,9 @@ async def test_b4_u2_timeout_is_retried_once_then_upstream_error(
     llm_mock: respx.MockRouter,
 ) -> None:
     route = llm_mock.post("/chat/completions").mock(side_effect=httpx.ReadTimeout("slow"))
-    with pytest.raises(AIUpstreamError):
+    with pytest.raises(AIError) as exc:
         await _provider().complete(_req())
+    assert exc.value.category is ErrorCategory.TIMEOUT
     assert route.call_count == 2
 
 
@@ -134,16 +134,18 @@ async def test_b4_u2_4xx_and_malformed_bodies_are_upstream_errors_without_retry(
     route = llm_mock.post("/chat/completions").mock(
         return_value=httpx.Response(400, json={"error": "bad request"})
     )
-    with pytest.raises(AIUpstreamError):
+    with pytest.raises(AIError) as exc:
         await _provider().complete(_req())
+    assert exc.value.category is ErrorCategory.BAD_REQUEST
     assert route.call_count == 1
     for body in ({"choices": []}, {"choices": [{"message": {"content": "   "}}]}, {"x": 1}):
         llm_mock.post("/chat/completions").mock(return_value=httpx.Response(200, json=body))
-        with pytest.raises(AIUpstreamError):
+        with pytest.raises(AIError):
             await _provider().complete(_req())
     llm_mock.post("/chat/completions").mock(return_value=httpx.Response(200, text="not json"))
-    with pytest.raises(AIUpstreamError):
+    with pytest.raises(AIError) as exc:
         await _provider().complete(_req())
+    assert exc.value.category is ErrorCategory.NON_RETRYABLE_ERROR
 
 
 async def test_b4_u2_shared_client_is_used_and_not_closed(llm_mock: respx.MockRouter) -> None:
@@ -168,6 +170,7 @@ async def test_b4_u3_fake_provider_is_deterministic(llm_mock: respx.MockRouter) 
     assert a.provider == "fake" and a.model == "fake-1"
     assert a.text.startswith("[fake:content_draft:") and "brief one" in a.text
     assert a.prompt_tokens and a.completion_tokens and a.finish_reason == "stop"
+    assert a.usage.prompt_tokens == a.prompt_tokens and a.credential_mode == "platform"
     assert len(fake.calls) == 3
     assert not llm_mock.calls
 

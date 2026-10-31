@@ -36,12 +36,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.core.http import HttpClient
 from src.core.oauth_state import (
     InvalidOAuthStateError,
     OAuthStateSecretMissingError,
@@ -107,14 +107,9 @@ BRAND_PREFIX = "/brands/{brand_id}/social/meta"
 
 
 # ------------------------------------------------------------ dependencies --
-def get_http_client(request: Request) -> httpx.AsyncClient | None:
-    """Shared ``httpx.AsyncClient`` created in the app lifespan (``None`` → client owns one)."""
-    return getattr(request.app.state, "http_client", None)
-
-
 def get_meta_client(
     settings: Annotated[Settings, Depends(get_settings)],
-    http_client: Annotated[httpx.AsyncClient | None, Depends(get_http_client)],
+    http_client: HttpClient,
 ) -> MetaGraphClient:
     return MetaGraphClient(settings=settings, http_client=http_client)
 

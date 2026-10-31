@@ -10,10 +10,17 @@
 
     any non-archived ──archive──▶ archived (final)
 
-Every one of the 6 × 7 = 42 (state, action) cells is listed in :data:`TRANSITIONS` — a
+    scheduled ══(worker)══▶ published            (SYSTEM_TRANSITIONS — not user actions)
+    scheduled ══(worker)══▶ publish_failed ──unschedule──▶ approved   (re-target / re-time)
+                                           ──archive────▶ archived
+    published ──archive──▶ archived   (local only — the Meta post is **not** deleted)
+
+Every one of the 8 × 7 = 56 (state, action) cells is listed in :data:`TRANSITIONS` — a
 missing cell is a programming error, not an implicit "allowed". Role rules (D-055):
 ``approve`` / ``reject`` are **OWNER only**; everything else is OWNER or MANAGER; ``archive``
-additionally requires a MANAGER to be the creator of the item.
+additionally requires a MANAGER to be the creator of the item. The two **system**
+transitions (``scheduled → published`` / ``scheduled → publish_failed``) live in
+:data:`SYSTEM_TRANSITIONS`; only the scheduler worker performs them (CAS), never a request.
 """
 
 from __future__ import annotations
@@ -101,8 +108,32 @@ TRANSITIONS: Final[dict[tuple[ContentStatus, Action], ContentStatus | None]] = {
     (_S.ARCHIVED, _A.SCHEDULE): None,
     (_S.ARCHIVED, _A.UNSCHEDULE): None,
     (_S.ARCHIVED, _A.ARCHIVE): None,
+    # published (SPRINT-07 B2) — the post exists on Meta; only a *local* archive is allowed
+    (_S.PUBLISHED, _A.SUBMIT): None,
+    (_S.PUBLISHED, _A.WITHDRAW): None,
+    (_S.PUBLISHED, _A.APPROVE): None,
+    (_S.PUBLISHED, _A.REJECT): None,
+    (_S.PUBLISHED, _A.SCHEDULE): None,
+    (_S.PUBLISHED, _A.UNSCHEDULE): None,
+    (_S.PUBLISHED, _A.ARCHIVE): _S.ARCHIVED,
+    # publish_failed (SPRINT-07 B2) — back to approved (re-target / re-time) or archive
+    (_S.PUBLISH_FAILED, _A.SUBMIT): None,
+    (_S.PUBLISH_FAILED, _A.WITHDRAW): None,
+    (_S.PUBLISH_FAILED, _A.APPROVE): None,
+    (_S.PUBLISH_FAILED, _A.REJECT): None,
+    (_S.PUBLISH_FAILED, _A.SCHEDULE): None,
+    (_S.PUBLISH_FAILED, _A.UNSCHEDULE): _S.APPROVED,
+    (_S.PUBLISH_FAILED, _A.ARCHIVE): _S.ARCHIVED,
 }
-assert len(TRANSITIONS) == len(ContentStatus) * len(Action) == 42  # noqa: S101 - table integrity
+assert len(TRANSITIONS) == len(ContentStatus) * len(Action) == 56  # noqa: S101 - table integrity
+
+# SPRINT-07 B2: the closed list of transitions the scheduler worker performs by CAS. They are
+# **not** user actions, never appear in ``TRANSITIONS`` and have no role check — the
+# authorisation happened at ``schedule`` time (D-055).
+SYSTEM_TRANSITIONS: Final[frozenset[tuple[ContentStatus, ContentStatus]]] = frozenset(
+    {(_S.SCHEDULED, _S.PUBLISHED), (_S.SCHEDULED, _S.PUBLISH_FAILED)}
+)
+assert len(SYSTEM_TRANSITIONS) == 2  # noqa: S101 - closed list
 
 # Visibility table (directive §2-0 b): who may perform which action.
 OWNER_ONLY: Final[frozenset[Action]] = frozenset({Action.APPROVE, Action.REJECT})
@@ -111,8 +142,10 @@ OWNER_OR_MANAGER: Final[frozenset[BrandRole]] = frozenset({BrandRole.OWNER, Bran
 # States in which an edit of the body produces a new revision *and* returns to draft with an
 # automatic ``withdrawn`` event (B2-U2). Editing a plain draft just adds a revision.
 EDIT_RESETS_TO_DRAFT: Final[frozenset[ContentStatus]] = frozenset(
-    {_S.PENDING_APPROVAL, _S.APPROVED, _S.REJECTED, _S.SCHEDULED}
+    {_S.PENDING_APPROVAL, _S.APPROVED, _S.REJECTED, _S.SCHEDULED, _S.PUBLISH_FAILED}
 )
+# Editing is impossible once the post exists on Meta or the item is archived (409).
+EDIT_FORBIDDEN: Final[frozenset[ContentStatus]] = frozenset({_S.ARCHIVED, _S.PUBLISHED})
 
 
 def allowed_roles(action: Action) -> frozenset[BrandRole]:
@@ -169,4 +202,8 @@ def transition(
         update["scheduled_for"] = scheduled_for
     else:
         update["scheduled_for"] = None
+    # ``published_at`` is set only by the system transition; every user move clears it except
+    # the local archive of a published post, which keeps the publication evidence.
+    if not (item.status is ContentStatus.PUBLISHED and target is ContentStatus.ARCHIVED):
+        update["published_at"] = None
     return item.model_copy(update=update)

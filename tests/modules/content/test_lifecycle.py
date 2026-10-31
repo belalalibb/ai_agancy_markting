@@ -1,4 +1,4 @@
-"""SPRINT-06 B2 — pure lifecycle table (no I/O)."""
+"""SPRINT-06 B2 / SPRINT-07 B2 — pure lifecycle table (no I/O), 8 states × 7 actions."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ from uuid import uuid4
 
 import pytest
 from src.modules.content.domain.lifecycle import (
+    EDIT_FORBIDDEN,
+    EDIT_RESETS_TO_DRAFT,
+    SYSTEM_TRANSITIONS,
     TRANSITIONS,
     Action,
     LifecycleError,
@@ -22,7 +25,7 @@ NOW = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
 S = ContentStatus
 A = Action
 
-# The expected 42-cell matrix, written out explicitly (not derived from the code under test).
+# The expected 56-cell matrix, written out explicitly (not derived from the code under test).
 EXPECTED: dict[tuple[ContentStatus, Action], ContentStatus | None] = {
     (S.DRAFT, A.SUBMIT): S.PENDING_APPROVAL,
     (S.DRAFT, A.WITHDRAW): None,
@@ -59,6 +62,22 @@ EXPECTED: dict[tuple[ContentStatus, Action], ContentStatus | None] = {
     (S.SCHEDULED, A.SCHEDULE): None,
     (S.SCHEDULED, A.UNSCHEDULE): S.APPROVED,
     (S.SCHEDULED, A.ARCHIVE): S.ARCHIVED,
+    # SPRINT-07 B2: worker-owned states. ``published`` is final except for archiving;
+    # ``publish_failed`` can be unscheduled back to ``approved`` or archived.
+    (S.PUBLISHED, A.SUBMIT): None,
+    (S.PUBLISHED, A.WITHDRAW): None,
+    (S.PUBLISHED, A.APPROVE): None,
+    (S.PUBLISHED, A.REJECT): None,
+    (S.PUBLISHED, A.SCHEDULE): None,
+    (S.PUBLISHED, A.UNSCHEDULE): None,
+    (S.PUBLISHED, A.ARCHIVE): S.ARCHIVED,
+    (S.PUBLISH_FAILED, A.SUBMIT): None,
+    (S.PUBLISH_FAILED, A.WITHDRAW): None,
+    (S.PUBLISH_FAILED, A.APPROVE): None,
+    (S.PUBLISH_FAILED, A.REJECT): None,
+    (S.PUBLISH_FAILED, A.SCHEDULE): None,
+    (S.PUBLISH_FAILED, A.UNSCHEDULE): S.APPROVED,
+    (S.PUBLISH_FAILED, A.ARCHIVE): S.ARCHIVED,
     (S.ARCHIVED, A.SUBMIT): None,
     (S.ARCHIVED, A.WITHDRAW): None,
     (S.ARCHIVED, A.APPROVE): None,
@@ -78,17 +97,26 @@ def _item(status: ContentStatus, *, created_by=OWNER_ID) -> ContentItem:  # noqa
         channel=Channel.FACEBOOK_PAGE,
         status=status,
         scheduled_for=NOW if status is S.SCHEDULED else None,
+        published_at=NOW if status is S.PUBLISHED else None,
         current_revision_id=uuid4(),
     )
 
 
 def test_b2_u1_matrix_is_complete_and_matches_the_spec() -> None:
-    assert len(EXPECTED) == 42
+    assert len(EXPECTED) == 56 == len(ContentStatus) * len(Action)
     assert set(TRANSITIONS) == set(EXPECTED)
     assert TRANSITIONS == EXPECTED
 
 
-# B2-U1 — all 42 cells, named "<state>--<action>", driven as OWNER (no role interference).
+def test_b2_u1_system_transitions_and_edit_sets() -> None:
+    # Only the worker moves an item into the two new states (never a user action).
+    assert SYSTEM_TRANSITIONS == {(S.SCHEDULED, S.PUBLISHED), (S.SCHEDULED, S.PUBLISH_FAILED)}
+    assert not any(target in {S.PUBLISHED, S.PUBLISH_FAILED} for target in TRANSITIONS.values())
+    assert S.PUBLISH_FAILED in EDIT_RESETS_TO_DRAFT
+    assert EDIT_FORBIDDEN == {S.ARCHIVED, S.PUBLISHED}
+
+
+# B2-U1 — all 56 cells, named "<state>--<action>", driven as OWNER (no role interference).
 @pytest.mark.parametrize(("state", "action"), CELLS, ids=CELL_IDS)
 def test_b2_u1_cell(state: ContentStatus, action: Action) -> None:
     item = _item(state)
@@ -110,10 +138,12 @@ def test_b2_u1_cell(state: ContentStatus, action: Action) -> None:
         assert result.status is expected
         assert result.updated_at == NOW
         assert (result.scheduled_for is not None) == (expected is S.SCHEDULED)
+        # ``published_at`` survives only published → archived (evidence stays with the row).
+        keep_published_at = state is S.PUBLISHED and expected is S.ARCHIVED
+        assert (result.published_at is not None) == keep_published_at
         # Nothing else moved.
-        assert result.model_dump(exclude={"status", "updated_at", "scheduled_for"}) == (
-            item.model_dump(exclude={"status", "updated_at", "scheduled_for"})
-        )
+        skip = {"status", "updated_at", "scheduled_for", "published_at"}
+        assert result.model_dump(exclude=skip) == item.model_dump(exclude=skip)
 
 
 # B2-U3 — approve/reject are OWNER only; MANAGER ⇒ approval_requires_owner (even when the
@@ -192,10 +222,17 @@ async def test_b2_u3_service_reject_requires_note_after_role_check() -> None:
     )
     from src.modules.content.service import ContentService
 
-    from tests.fakes import FakeConnectedAccountRepository, FakeContentRepository, FakeStore
+    from tests.fakes import (
+        FakeConnectedAccountRepository,
+        FakeContentRepository,
+        FakePublishJobRepository,
+        FakeStore,
+    )
 
     repo = FakeContentRepository()
-    service = ContentService(repo, FakeConnectedAccountRepository(FakeStore()))
+    service = ContentService(
+        repo, FakeConnectedAccountRepository(FakeStore()), FakePublishJobRepository()
+    )
     item = await service.create_item(
         BRAND_ID,
         actor_tenant_id=OWNER_ID,

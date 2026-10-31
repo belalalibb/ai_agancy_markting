@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.modules.content.domain.models import ContentStatus
+from src.modules.content.domain.models import Channel, ContentStatus
 
 
 class ContentError(Exception):
@@ -77,6 +77,32 @@ class InstagramNotLinkedError(ContentError):
     http_status = 422
 
 
+class BodyTooLongError(ContentError):
+    """The body exceeds the hard character limit of the channel (SPRINT-07 A-2)."""
+
+    error = "body_too_long"
+    http_status = 422
+
+    def __init__(self, channel: Channel, limit: int, length: int) -> None:
+        self.channel = channel
+        self.limit = limit
+        self.length = length
+        super().__init__(f"body of {length} chars exceeds the {channel.value} limit of {limit}")
+
+
+class GenerationBudgetExceededError(ContentError):
+    """The brand's daily AI token budget is exhausted (SPRINT-07 A-5)."""
+
+    error = "generation_budget_exceeded"
+    http_status = 429
+
+    def __init__(self, budget: int, used: int, resets_in_seconds: int) -> None:
+        self.budget = budget
+        self.used = used
+        self.resets_in_seconds = resets_in_seconds
+        super().__init__()
+
+
 class GenerationRateLimitedError(ContentError):
     """Too many AI generations for this brand — try again later."""
 
@@ -86,3 +112,44 @@ class GenerationRateLimitedError(ContentError):
     def __init__(self, retry_after_seconds: int) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__()
+
+
+class ReauthRequiredError(ContentError):
+    """The connection lacks (verified) publishing scopes — reconnect first (SPRINT-07 B2)."""
+
+    error = "reauth_required"
+    http_status = 409
+    required_action = "reconnect"
+
+    def __init__(self, missing_scopes: list[str]) -> None:
+        self.missing_scopes = list(missing_scopes)
+        super().__init__(f"missing publishing scopes: {', '.join(self.missing_scopes)}")
+
+
+class InstagramRequiresImageError(ContentError):
+    """Instagram posts need media_refs[0].url: an https URL ending in jpg/jpeg/png (B2)."""
+
+    error = "instagram_requires_image"
+    http_status = 422
+
+
+class PublishInProgressError(ContentError):
+    """The publish job is leased by a worker right now — try again when it finishes (B2)."""
+
+    error = "publish_in_progress"
+    http_status = 409
+
+
+class NoPublishJobError(ContentError):
+    """This item has never been scheduled — there is no publish job to show (B7)."""
+
+    error = "no_publish_job"
+    http_status = 404
+
+
+class ManualVerificationRequiredError(ContentError):
+    """The last attempt ended ambiguous (worker died mid-call): the post may already be live.
+    Verify on the Page manually, then edit (⇒ draft) and re-approve to publish again (B7)."""
+
+    error = "manual_verification_required"
+    http_status = 409

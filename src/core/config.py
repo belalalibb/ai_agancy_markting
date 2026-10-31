@@ -93,8 +93,13 @@ class Settings(BaseSettings):
     meta_graph_base_url: str = "https://graph.facebook.com"
     meta_oauth_authorize_url: str = "https://www.facebook.com/{version}/dialog/oauth"
     meta_oauth_redirect_uri: str = "http://localhost:8000/api/v1/social/meta/callback"
-    # Read-only by default. Publishing scopes are added in a later sprint after App Review.
-    meta_oauth_scopes: str = "pages_show_list,pages_read_engagement,instagram_basic"
+    # SPRINT-07 B3: publishing scopes requested by default (narrow via the environment).
+    # Older connections without them keep working for reads; only ``schedule`` asks for a
+    # reconnect (409 ``reauth_required``).
+    meta_oauth_scopes: str = (
+        "pages_show_list,pages_read_engagement,pages_manage_posts,"
+        "instagram_basic,instagram_content_publish"
+    )
     meta_http_timeout_seconds: float = 15.0
     meta_http_max_retries: int = 3
 
@@ -109,6 +114,18 @@ class Settings(BaseSettings):
     )
     ai_default_model: str = "gpt-4o-mini"
     ai_http_timeout_seconds: float = 30.0
+    # SPRINT-07 A-5: daily token budget per brand (sum of prompt+completion tokens of the
+    # ``ai_generated`` revisions in the last 24 h) ⇒ 429 ``generation_budget_exceeded``.
+    ai_daily_token_budget_per_brand: int = 200_000
+
+    # --- Scheduler / publishing (SPRINT-07 B3) ------------------------------------------
+    # Off by default (tests, dev). The worker loop is started in ``lifespan`` only when on.
+    scheduler_enabled: bool = False
+    scheduler_poll_seconds: int = 15
+    scheduler_lease_seconds: int = 120
+    scheduler_batch_size: int = 10
+    # Backoff after retryable attempt n (1-based); the last value repeats.
+    publish_retry_backoff_seconds: tuple[int, ...] = (60, 300, 900)
 
     @field_validator("meta_graph_api_version")
     @classmethod

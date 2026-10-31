@@ -40,6 +40,7 @@ from src.modules.social_connect.exceptions import (
 from src.modules.social_connect.schemas import (
     MetaDebugTokenInfo,
     MetaPageInfo,
+    MetaPublishResult,
     MetaTokenResponse,
     MetaUserInfo,
 )
@@ -344,6 +345,75 @@ class MetaGraphClient:
             params=params,
             headers=_bearer(page_access_token),
         )
+
+    # ------------------------------------------------- SPRINT-07 B4 publishing ----
+    async def publish_page_post(
+        self, page_access_token: str, page_id: str, message: str, link: str | None = None
+    ) -> MetaPublishResult:
+        """``POST /{page_id}/feed`` with ``message`` (+ ``link``) in the **form body**; auth is
+        ``Authorization: Bearer <page token>`` + ``appsecret_proof`` (scope
+        ``pages_manage_posts``). Then a best-effort ``GET /{post_id}?fields=permalink_url`` —
+        its failure never fails the publish (the post *is* live)."""
+        data: dict[str, Any] = {"message": message}
+        if link:
+            data["link"] = link
+        payload = await self._request(
+            "POST",
+            f"/{page_id}/feed",
+            params={"appsecret_proof": self.appsecret_proof(page_access_token)},
+            data=data,
+            headers=_bearer(page_access_token),
+        )
+        post_id = _require_str(payload, "id")
+        permalink = await self._permalink(page_access_token, post_id, "permalink_url")
+        return MetaPublishResult(post_id=post_id, permalink=permalink)
+
+    async def create_instagram_container(
+        self, page_access_token: str, ig_user_id: str, image_url: str, caption: str
+    ) -> str:
+        """IG step 1 — ``POST /{ig_user_id}/media {image_url, caption}`` ⇒ ``creation_id``
+        (scope ``instagram_content_publish``; ``image_url`` must be a public https JPEG/PNG)."""
+        payload = await self._request(
+            "POST",
+            f"/{ig_user_id}/media",
+            params={"appsecret_proof": self.appsecret_proof(page_access_token)},
+            data={"image_url": image_url, "caption": caption},
+            headers=_bearer(page_access_token),
+        )
+        return _require_str(payload, "id")
+
+    async def publish_instagram_container(
+        self, page_access_token: str, ig_user_id: str, creation_id: str
+    ) -> MetaPublishResult:
+        """IG step 2 — ``POST /{ig_user_id}/media_publish {creation_id}`` ⇒ media ``id``; then a
+        best-effort ``GET /{id}?fields=permalink``."""
+        payload = await self._request(
+            "POST",
+            f"/{ig_user_id}/media_publish",
+            params={"appsecret_proof": self.appsecret_proof(page_access_token)},
+            data={"creation_id": creation_id},
+            headers=_bearer(page_access_token),
+        )
+        media_id = _require_str(payload, "id")
+        permalink = await self._permalink(page_access_token, media_id, "permalink")
+        return MetaPublishResult(post_id=media_id, permalink=permalink)
+
+    async def _permalink(self, page_access_token: str, object_id: str, field: str) -> str | None:
+        try:
+            payload = await self._request(
+                "GET",
+                f"/{object_id}",
+                params={
+                    "fields": field,
+                    "appsecret_proof": self.appsecret_proof(page_access_token),
+                },
+                headers=_bearer(page_access_token),
+            )
+        except MetaGraphError as exc:  # best-effort: the post exists, only the link is missing
+            logger.info("permalink lookup skipped: %s", type(exc).__name__)
+            return None
+        value = payload.get(field)
+        return value if isinstance(value, str) and value else None
 
     def _trusted_pagination_url(self, next_url: str, appsecret_proof: str) -> str:
         """H4 (SSRF) + H2: only ``https`` on the configured Graph host, secrets stripped.

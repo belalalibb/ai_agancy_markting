@@ -10,8 +10,8 @@ from fastapi import Depends, HTTPException, Request, status
 
 from src.core.config import Settings, get_settings
 from src.modules.ai_gateway.exceptions import AIProviderNotConfiguredError
+from src.modules.ai_gateway.facades import FakeProvider, HttpOpenAICompatibleProvider
 from src.modules.ai_gateway.gateway import AIGateway
-from src.modules.ai_gateway.providers import FakeProvider, HttpOpenAICompatibleProvider
 
 _FAKE = FakeProvider()
 

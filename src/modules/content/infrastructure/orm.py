@@ -38,12 +38,16 @@ class ContentItemRow(Base):
         ),
         CheckConstraint(
             "status IN ('draft', 'pending_approval', 'approved', 'rejected', "
-            "'scheduled', 'archived')",
+            "'scheduled', 'archived', 'published', 'publish_failed')",
             name="ck_content_items_status",
         ),
         CheckConstraint(
             "(status = 'scheduled') = (scheduled_for IS NOT NULL)",
             name="ck_content_items_scheduled_for_iff_scheduled",
+        ),
+        CheckConstraint(
+            "(status = 'published') = (published_at IS NOT NULL)",
+            name="ck_content_items_published_at_iff_published",
         ),
     )
 
@@ -63,6 +67,7 @@ class ContentItemRow(Base):
         nullable=True,
     )
     scheduled_for: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -103,8 +108,15 @@ class ApprovalEventRow(Base):
     __table_args__ = (
         Index("ix_approval_events_item_created", "item_id", "created_at"),
         CheckConstraint(
-            "action IN ('submitted', 'approved', 'rejected', 'withdrawn')",
+            "action IN ('submitted', 'approved', 'rejected', 'withdrawn', 'scheduled', "
+            "'published', 'publish_failed', 'publish_cancelled')",
             name="ck_approval_events_action",
+        ),
+        # SPRINT-07: worker events (published / publish_failed) have no human actor.
+        CheckConstraint(
+            "action IN ('published', 'publish_failed') "
+            "OR (actor_tenant_id IS NOT NULL AND actor_user_id IS NOT NULL)",
+            name="ck_approval_events_actor_required",
         ),
         CheckConstraint(
             "note IS NULL OR char_length(note) <= 1000", name="ck_approval_events_note_length"
@@ -120,12 +132,12 @@ class ApprovalEventRow(Base):
         ForeignKey("content_revisions.id", ondelete="CASCADE"),
         nullable=False,
     )
-    action: Mapped[str] = mapped_column(String(16), nullable=False)
-    actor_tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True
     )
-    actor_user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -2,14 +2,19 @@
 
 Status changes go through ``compare_and_set_status`` — a single ``UPDATE … WHERE status =
 :expected`` whose ``rowcount`` decides the race (B3 optimistic concurrency; B3-I1).
+
+SPRINT-07 A-3: revision numbering happens **after** ``get_for_update`` locked the item row
+(``SELECT … FOR UPDATE``), so ``COALESCE(MAX(revision_no), 0) + 1`` inside the same
+transaction can no longer collide (A3-I1 — no ``IntegrityError``, no 500).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import Integer, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.modules.content.domain.models import (
@@ -43,12 +48,13 @@ class PostgresContentRepository:
                 status=item.status.value,
                 current_revision_id=None,
                 scheduled_for=item.scheduled_for,
+                published_at=item.published_at,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
         )
         await self._session.flush()
-        await self.add_revision(revision)
+        await self._insert_revision(revision)
         stored = await self.get_item(item.brand_id, item.id)
         assert stored is not None  # noqa: S101 - just inserted in this transaction
         return stored
@@ -61,6 +67,15 @@ class PostgresContentRepository:
         )
         return _item_to_domain(row) if row is not None else None
 
+    async def get_for_update(self, brand_id: UUID, item_id: UUID) -> ContentItem | None:
+        """A-3: lock the aggregate row for the rest of the transaction."""
+        row = await self._session.scalar(
+            select(ContentItemRow)
+            .where(ContentItemRow.brand_id == brand_id, ContentItemRow.id == item_id)
+            .with_for_update()
+        )
+        return _item_to_domain(row) if row is not None else None
+
     async def list_items(
         self,
         brand_id: UUID,
@@ -68,8 +83,15 @@ class PostgresContentRepository:
         status: ContentStatus | None,
         limit: int,
         cursor: tuple[datetime, UUID] | None,
-    ) -> list[ContentItem]:
-        stmt = select(ContentItemRow).where(ContentItemRow.brand_id == brand_id)
+    ) -> list[tuple[ContentItem, str | None]]:
+        # A-4: one query — the current body comes from a LEFT JOIN on current_revision_id.
+        stmt = (
+            select(ContentItemRow, ContentRevisionRow.body)
+            .outerjoin(
+                ContentRevisionRow, ContentRevisionRow.id == ContentItemRow.current_revision_id
+            )
+            .where(ContentItemRow.brand_id == brand_id)
+        )
         if status is not None:
             stmt = stmt.where(ContentItemRow.status == status.value)
         if cursor is not None:
@@ -83,8 +105,8 @@ class PostgresContentRepository:
         stmt = stmt.order_by(ContentItemRow.created_at.desc(), ContentItemRow.id.desc()).limit(
             limit + 1
         )
-        rows = (await self._session.scalars(stmt)).all()
-        return [_item_to_domain(r) for r in rows]
+        rows = (await self._session.execute(stmt)).all()
+        return [(_item_to_domain(row), body) for row, body in rows]
 
     async def set_target_page(self, item_id: UUID, target_page_id: str | None) -> None:
         await self._session.execute(
@@ -101,24 +123,56 @@ class PostgresContentRepository:
         new: ContentStatus,
         scheduled_for: datetime | None,
         updated_at: datetime,
+        published_at: datetime | None = None,
     ) -> bool:
+        # ``published_at`` is set iff ``new == published`` (DB CHECK) — the caller passes it
+        # for the system transition; every other move clears it unless archiving a
+        # published post (``keep``: the row's current value is preserved).
+        values: dict[str, object] = {
+            "status": new.value,
+            "scheduled_for": scheduled_for,
+            "updated_at": updated_at,
+        }
+        if new is ContentStatus.PUBLISHED:
+            values["published_at"] = published_at
+        elif not (expected is ContentStatus.PUBLISHED and new is ContentStatus.ARCHIVED):
+            values["published_at"] = None
         result = await self._session.execute(
             update(ContentItemRow)
             .where(ContentItemRow.id == item_id, ContentItemRow.status == expected.value)
-            .values(status=new.value, scheduled_for=scheduled_for, updated_at=updated_at)
+            .values(**values)
         )
         return (result.rowcount or 0) == 1
 
     # -------------------------------------------------------- revisions ---
-    async def next_revision_no(self, item_id: UUID) -> int:
+    async def add_revision(
+        self,
+        item_id: UUID,
+        *,
+        body: str,
+        provenance: dict[str, Any],
+        created_by_tenant_id: UUID,
+        created_at: datetime,
+        media_refs: list[dict[str, Any]] | None = None,
+    ) -> ContentRevision:
+        """A-3: ``revision_no`` is computed here, under the caller's row lock."""
         current = await self._session.scalar(
-            select(func.max(ContentRevisionRow.revision_no)).where(
+            select(func.coalesce(func.max(ContentRevisionRow.revision_no), 0)).where(
                 ContentRevisionRow.item_id == item_id
             )
         )
-        return int(current or 0) + 1
+        revision = ContentRevision(
+            item_id=item_id,
+            revision_no=int(current or 0) + 1,
+            body=body,
+            media_refs=list(media_refs or []),
+            provenance=provenance,
+            created_by_tenant_id=created_by_tenant_id,
+            created_at=created_at,
+        )
+        return await self._insert_revision(revision)
 
-    async def add_revision(self, revision: ContentRevision) -> ContentRevision:
+    async def _insert_revision(self, revision: ContentRevision) -> ContentRevision:
         self._session.add(
             ContentRevisionRow(
                 id=revision.id,
@@ -149,6 +203,45 @@ class PostgresContentRepository:
             )
         ).all()
         return [_revision_to_domain(r) for r in rows]
+
+    async def get_revision(self, revision_id: UUID) -> ContentRevision | None:
+        row = await self._session.get(ContentRevisionRow, revision_id)
+        return _revision_to_domain(row) if row is not None else None
+
+    # ------------------------------------------------------- A-5 budget ---
+    async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:
+        """``SUM((provenance->>'prompt_tokens')::int + (provenance->>'completion_tokens')::int)``
+        over ``ai_generated`` revisions of the brand in the window (one query on JSONB)."""
+        prompt = func.coalesce(
+            ContentRevisionRow.provenance["prompt_tokens"].astext.cast(Integer), 0
+        )
+        completion = func.coalesce(
+            ContentRevisionRow.provenance["completion_tokens"].astext.cast(Integer), 0
+        )
+        stmt = (
+            select(func.coalesce(func.sum(prompt + completion), 0))
+            .select_from(ContentRevisionRow)
+            .join(ContentItemRow, ContentItemRow.id == ContentRevisionRow.item_id)
+            .where(
+                ContentItemRow.brand_id == brand_id,
+                ContentRevisionRow.created_at >= since,
+                ContentRevisionRow.provenance["kind"].astext == "ai_generated",
+            )
+        )
+        return int(await self._session.scalar(stmt) or 0)
+
+    async def oldest_ai_generation_at(self, brand_id: UUID, since: datetime) -> datetime | None:
+        stmt = (
+            select(func.min(ContentRevisionRow.created_at))
+            .select_from(ContentRevisionRow)
+            .join(ContentItemRow, ContentItemRow.id == ContentRevisionRow.item_id)
+            .where(
+                ContentItemRow.brand_id == brand_id,
+                ContentRevisionRow.created_at >= since,
+                ContentRevisionRow.provenance["kind"].astext == "ai_generated",
+            )
+        )
+        return await self._session.scalar(stmt)
 
     # ----------------------------------------------------------- events ---
     async def add_event(self, event: ApprovalEvent) -> ApprovalEvent:
@@ -188,6 +281,7 @@ def _item_to_domain(row: ContentItemRow) -> ContentItem:
         status=ContentStatus(row.status),
         current_revision_id=row.current_revision_id,
         scheduled_for=row.scheduled_for,
+        published_at=row.published_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

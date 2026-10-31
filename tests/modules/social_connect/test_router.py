@@ -874,7 +874,18 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
     schemas = spec.get("components", {}).get("schemas", {})
     forbidden = ("password", "hash", "secret", "token")
     # ``token_health`` (SPRINT-05 B1): derived closed-Literal health label, not a credential.
-    allowed = {"access_token", "token_type", "has_page_token", "token_health"}
+    # ``prompt_tokens`` / ``completion_tokens`` / ``prompt_hash`` (SPRINT-07 A-4): the explicit
+    # ``GenerationLogEntry`` model — LLM usage counters and a sha256 digest of the prompt,
+    # OWNER/MANAGER only (D-066); not credentials.
+    allowed = {
+        "access_token",
+        "token_type",
+        "has_page_token",
+        "token_health",
+        "prompt_tokens",
+        "completion_tokens",
+        "prompt_hash",
+    }
     structural = {"required", "properties", "title", "description", "type", "format"}
 
     def refs(node: object) -> set[str]:
