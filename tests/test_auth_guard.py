@@ -21,6 +21,10 @@ PUBLIC = {
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/refresh"),
     ("GET", "/api/v1/social/meta/callback"),
+    # SPRINT-09 B-1: Meta calls these without our JWT — GET is the hub.challenge handshake
+    # (verify_token hash), POST is protected by the mandatory X-Hub-Signature-256 HMAC.
+    ("GET", "/api/v1/webhooks/whatsapp"),
+    ("POST", "/api/v1/webhooks/whatsapp"),
     ("GET", "/health"),
     ("GET", "/health/ready"),
 }

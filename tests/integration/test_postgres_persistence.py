@@ -517,7 +517,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -922,7 +922,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1943,7 +1943,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2013,7 +2013,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2434,7 +2434,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2563,7 +2563,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2710,7 +2710,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2760,7 +2760,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2918,7 +2918,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -2965,7 +2965,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -3044,4 +3044,259 @@ def test_a3_i1_generate_holds_no_row_lock_during_gateway_call_on_pg(
     )
     assert [(r[0], r[2]) for r in rows] == [(1, "human"), (2, "ai_generated")]
     assert rows[1][1] == rows[0][1] == [{"url": "https://cdn.example.com/a3.jpg", "kind": "image"}]
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ================================================================ SPRINT-09 B-1 (M6) ===
+from src.modules.whatsapp.webhook import compute_signature  # noqa: E402
+
+WA_WEBHOOK = f"{API}/webhooks/whatsapp"
+WA_PHONE_NUMBER_ID = "PNID_PG_1001"
+WA_APP_SECRET = "pg-wa-app-secret"  # noqa: S105 - test fixture
+WA_SYSTEM_TOKEN = "EAAPgSystemTokenLEAK"  # noqa: S105 - test fixture
+WA_VERIFY_TOKEN = "pg-verify-token"  # noqa: S105 - test fixture
+WA_CUSTOMER = "201234567890"
+
+
+def _wa_account_row(
+    encryption: TokenEncryptionService,
+    *,
+    brand_id: UUID = BRAND_ID,
+    phone_number_id: str = WA_PHONE_NUMBER_ID,
+) -> UUID:
+    from src.modules.whatsapp.service import hash_verify_token
+
+    account_id = uuid4()
+    _run(
+        "INSERT INTO whatsapp_accounts (id, brand_id, phone_number_id, waba_id, display_phone, "
+        "encrypted_system_token, encrypted_app_secret, verify_token_hash, status, "
+        "created_by_user_id, created_at, updated_at) VALUES (:id, :b, :pnid, 'WABA_PG', "
+        "'+1 555 000 1111', :tok, :sec, :vh, 'active', :u, now(), now())",
+        {
+            "id": account_id,
+            "b": brand_id,
+            "pnid": phone_number_id,
+            "tok": encryption.encrypt_token(WA_SYSTEM_TOKEN),
+            "sec": encryption.encrypt_token(WA_APP_SECRET),
+            "vh": hash_verify_token(WA_VERIFY_TOKEN),
+            "u": USER_BY_TENANT[OWNER_ID],
+        },
+    )
+    return account_id
+
+
+def _wa_payload(wamid: str, *, ts: int = 1761900000, body: str = "مرحبا") -> dict:
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_PG",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "15550001111",
+                                "phone_number_id": WA_PHONE_NUMBER_ID,
+                            },
+                            "contacts": [{"profile": {"name": "Nour"}, "wa_id": WA_CUSTOMER}],
+                            "messages": [
+                                {
+                                    "from": WA_CUSTOMER,
+                                    "id": wamid,
+                                    "timestamp": str(ts),
+                                    "type": "text",
+                                    "text": {"body": body},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _wa_post(client: TestClient, payload: dict, *, secret: str | None = WA_APP_SECRET):
+    import json
+
+    raw = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if secret is not None:
+        headers["X-Hub-Signature-256"] = compute_signature(secret, raw)
+    return client.post(WA_WEBHOOK, content=raw, headers=headers)
+
+
+def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() -> None:
+    """B1-M1 — ``head ⇒ 0008 ⇒ head``: the five tables exist at head with their CHECKs
+    (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
+    at 0008 and come back; no other table is touched."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    wa_tables = {
+        "whatsapp_accounts",
+        "wa_conversations",
+        "wa_messages",
+        "wa_reply_drafts",
+        "wa_learning_signals",
+    }
+    present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert wa_tables <= present
+
+    from cryptography.fernet import Fernet
+
+    enc = TokenEncryptionService(Fernet.generate_key().decode("ascii"))
+    account_id = _wa_account_row(enc)
+    conv_id, msg_id = uuid4(), uuid4()
+    _run(
+        "INSERT INTO wa_conversations (id, brand_id, account_id, wa_id, last_inbound_at, "
+        "window_expires_at, unread_count, status, created_at, updated_at) VALUES "
+        "(:id, :b, :a, :w, now(), now() + interval '24 hours', 1, 'open', now(), now())",
+        {"id": conv_id, "b": BRAND_ID, "a": account_id, "w": WA_CUSTOMER},
+    )
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, body, "
+        "delivery_status, created_at) VALUES (:id, :c, :b, 'inbound', 'wamid.M1', 'text', "
+        "'hi', 'received', now())",
+        {"id": msg_id, "c": conv_id, "b": BRAND_ID},
+    )
+    # Partial unique index on wamid.
+    with pytest.raises(IntegrityError, match="uq_wa_messages_wamid"):
+        _run(
+            "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, "
+            "delivery_status, created_at) VALUES (:id, :c, :b, 'inbound', 'wamid.M1', 'text', "
+            "'received', now())",
+            {"id": uuid4(), "c": conv_id, "b": BRAND_ID},
+        )
+    # NULL wamids never collide (queued outbound rows before the send).
+    for _ in range(2):
+        _run(
+            "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, kind, "
+            "delivery_status, sent_by_user_id, created_at) VALUES (:id, :c, :b, 'outbound', "
+            "'text', 'queued', :u, now())",
+            {"id": uuid4(), "c": conv_id, "b": BRAND_ID, "u": USER_BY_TENANT[OWNER_ID]},
+        )
+    # §2-0 (أ): outbound without a human actor is rejected by the CHECK.
+    with pytest.raises(IntegrityError, match="ck_wa_messages_outbound_has_actor"):
+        _run(
+            "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, kind, "
+            "delivery_status, created_at) VALUES (:id, :c, :b, 'outbound', 'text', 'queued', "
+            "now())",
+            {"id": uuid4(), "c": conv_id, "b": BRAND_ID},
+        )
+    with pytest.raises(IntegrityError, match="ck_wa_messages_kind"):
+        _run(
+            "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, kind, "
+            "delivery_status, created_at) VALUES (:id, :c, :b, 'inbound', 'reaction', "
+            "'received', now())",
+            {"id": uuid4(), "c": conv_id, "b": BRAND_ID},
+        )
+    draft_id = uuid4()
+    _run(
+        "INSERT INTO wa_reply_drafts (id, conversation_id, brand_id, in_reply_to_message_id, "
+        "suggested_body, status, provenance, created_at) VALUES (:id, :c, :b, :m, 'suggested', "
+        "'suggested', '{}'::jsonb, now())",
+        {"id": draft_id, "c": conv_id, "b": BRAND_ID, "m": msg_id},
+    )
+    with pytest.raises(IntegrityError, match="ck_wa_reply_drafts_decided_has_actor"):
+        _run("UPDATE wa_reply_drafts SET status = 'approved' WHERE id = :id", {"id": draft_id})
+    _run(
+        "INSERT INTO wa_learning_signals (id, brand_id, reply_draft_id, signal, prompt_version, "
+        "model, credential_mode, features, created_at) VALUES (:id, :b, :d, 'rejected', "
+        "'wa-reply-v1', 'fake-1', 'platform', '{}'::jsonb, now())",
+        {"id": uuid4(), "b": BRAND_ID, "d": draft_id},
+    )
+    with pytest.raises(IntegrityError, match="uq_wa_learning_signals_reply_draft_id"):
+        _run(
+            "INSERT INTO wa_learning_signals (id, brand_id, reply_draft_id, signal, "
+            "prompt_version, model, credential_mode, features, created_at) VALUES (:id, :b, :d, "
+            "'expired', 'wa-reply-v1', 'fake-1', 'platform', '{}'::jsonb, now())",
+            {"id": uuid4(), "b": BRAND_ID, "d": draft_id},
+        )
+    with pytest.raises(IntegrityError, match="uq_whatsapp_accounts_phone_number_id"):
+        _wa_account_row(enc, brand_id=BRAND2_ID)  # a number belongs to one account
+    with pytest.raises(IntegrityError, match="uq_whatsapp_accounts_brand_id"):
+        _wa_account_row(enc, phone_number_id="PNID_PG_OTHER")  # one account per brand (V1)
+    # D-069: no text column on the signals table.
+    signal_columns = {
+        r[0]
+        for r in _rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'wa_learning_signals'"
+        )
+    }
+    assert not signal_columns & {"body", "text", "suggested_body", "final_body", "content"}
+
+    command.downgrade(cfg, "0008")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0008"
+    present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert not (wa_tables & present)
+    assert "content_items" in present and "publish_jobs" in present  # untouched
+    assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
+
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert wa_tables <= present
+    assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+def test_b1_i1_signed_webhook_persists_inbound_and_dedupes_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """B1-I1 — the real ``POST /webhooks/whatsapp`` through ``TestClient`` against PostgreSQL:
+    bad signature ⇒ 401 and no rows; valid ⇒ conversation + message; redelivery ⇒ 200 with
+    ``ON CONFLICT (wamid) DO NOTHING``; a second wamid bumps ``unread_count``; the GET
+    handshake answers the challenge."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    first = _wa_payload("wamid.PG0001")
+    with TestClient(integration_app) as client:
+        assert _wa_post(client, first, secret="wrong").status_code == 401
+        assert _wa_post(client, first, secret=None).status_code == 401
+        assert _run("SELECT COUNT(*) FROM wa_messages", scalar=True) == 0
+
+        ok = _wa_post(client, first)
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["inbound"] == 1
+        dup = _wa_post(client, first)
+        assert dup.status_code == 200 and dup.json()["duplicates"] == 1
+        second = _wa_post(client, _wa_payload("wamid.PG0002", ts=1761900600, body="ثانية"))
+        assert second.status_code == 200 and second.json()["inbound"] == 1
+
+        handshake = client.get(
+            WA_WEBHOOK,
+            params={
+                "hub.mode": "subscribe",
+                "hub.verify_token": WA_VERIFY_TOKEN,
+                "hub.challenge": "777",
+            },
+        )
+        assert handshake.status_code == 200 and handshake.text == "777"
+
+    rows = _rows(
+        "SELECT c.account_id, c.wa_id, c.profile_name, c.unread_count, c.status, "
+        "c.window_expires_at - c.last_inbound_at, "
+        "(SELECT COUNT(*) FROM wa_messages m WHERE m.conversation_id = c.id) "
+        "FROM wa_conversations c"
+    )
+    assert len(rows) == 1
+    acc, wa_id, name, unread, status_, window, count = rows[0]
+    assert acc == account_id and wa_id == WA_CUSTOMER and name == "Nour"
+    assert unread == 2 and status_ == "open" and count == 2
+    assert window == timedelta(hours=24)
+    messages = _rows(
+        "SELECT wamid, direction, kind, body, delivery_status, platform_timestamp "
+        "FROM wa_messages ORDER BY platform_timestamp"
+    )
+    assert [(m[0], m[1], m[2], m[3], m[4]) for m in messages] == [
+        ("wamid.PG0001", "inbound", "text", "مرحبا", "received"),
+        ("wamid.PG0002", "inbound", "text", "ثانية", "received"),
+    ]
+    assert messages[0][5] == datetime.fromtimestamp(1761900000, tz=UTC)
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
