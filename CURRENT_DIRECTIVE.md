@@ -193,8 +193,8 @@ pytest -k "b7_u3 or b1_u or b2_u or b2_i1 or a1_u or a3_u" -q
 ## 6. تقرير المنفذ (يملؤه المنفذ)
 
 - **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي`
-- **Commit SHA Part A:** `e2b55a4` — **B-1:** `e5ed7bc` — **B-2:** `7ec7fed` — **docs:** (كوميت هذا التقرير — يُسجَّل في `WORK_STATE.md` §6)
-- **PR:** #— (`work/implementation` ⇒ `main` @ `e73e9cc`) — **CI:** —/5 على الكوميت الأعلى (يُحدَّث بعد فتح الـPR)
+- **Commit SHA Part A:** `e2b55a4` — **B-1:** `e5ed7bc` — **B-2:** `7ec7fed` — **docs:** `dbb87c8` (§6) + `7721b4f` (`WORK_STATE.md`) + كوميت هذا السطر
+- **PR:** [#26](https://github.com/belalalibb/ai_agancy_markting/pull/26) (`work/implementation` ⇒ `main` @ `e73e9cc`) — **CI: 5/5** على `7721b4f` (lint / unit / integration / secrets / licenses — كلها `success`، تشغيلان)
 - **الاختبارات:** وحدة **776** / تكامل **54** / الكل **830** ناجحاً، **0** فشل (`pytest --cov=src --cov-report=term-missing --cov-fail-under=95` على PG 17 حقيقي، 343s) — **التغطية:** **98.87%** (قبل A-2: TOTAL **94.30%** و`src/modules/publishing/infrastructure/postgres_repository.py` **76%** (95 عبارة، 20 مفقودة: 62-67,71-72,79,82-92,96-98,104,258-265)؛ بعد A-2: TOTAL **98.97%** على كود Part A وحده / **98.87%** على الكل، والملف نفسه **84%** (13 مفقودة: 67,71-72,82-92,97,258-265) ⇒ A2-M1 ≥ 84 ✓). `pytest -k "b7_u3 or b1_u or b2_u or b2_i1 or a1_u or a3_u" -q` ⇒ **107 passed**. ruff check + format --check على `src tests alembic scripts` ⇒ `All checks passed!` / `151 files already formatted`.
 - **A-1..A-4:**
   - **A-1:** `src/modules/publishing/scheduler.py:81` ثابت `SCHEDULER_REQUIRES_ENCRYPTION_KEY = "SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"`؛ `PostgresScheduler.__init__` يرفض `encryption is None` (`scheduler.py:120`)؛ `src/main.py::_start_scheduler` (`main.py:84`) يرفع `RuntimeError(SCHEDULER_REQUIRES_ENCRYPTION_KEY)` عند `main.py:95` **قبل** بناء أي شيء. اختبارات: `tests/test_main.py:186 test_a1_u1_scheduler_enabled_without_encryption_key_refuses_boot`، `tests/test_main.py:210 test_a1_u1_postgres_scheduler_rejects_encryption_none`، `tests/test_main.py:227 test_a1_u2_scheduler_enabled_with_encryption_key_creates_task`.
