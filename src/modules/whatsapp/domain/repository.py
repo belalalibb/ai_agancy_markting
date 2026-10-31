@@ -1,9 +1,15 @@
-"""Repository protocol for ``whatsapp`` — one request session, PostgreSQL only in V1."""
+"""Repository protocol for ``whatsapp`` — one request session, PostgreSQL only in V1.
+
+SPRINT-10 A-1 (D-072 «ثبّت ثم أبلغ»): :class:`IndependentWrites` runs a callback against a
+repository bound to an **independent, committed** transaction, so human decisions, account
+disabling and ``failed``/``ambiguous`` rows survive a later failure of the request.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from uuid import UUID
 
 from src.modules.whatsapp.domain.models import (
@@ -20,6 +26,7 @@ from src.modules.whatsapp.domain.models import (
 )
 
 Cursor = tuple[datetime, UUID]
+T = TypeVar("T")
 
 
 class WhatsAppRepository(Protocol):
@@ -27,6 +34,11 @@ class WhatsAppRepository(Protocol):
     async def create_account(self, account: WhatsAppAccount) -> WhatsAppAccount: ...
 
     async def get_account(self, brand_id: UUID) -> WhatsAppAccount | None: ...
+
+    async def update_account(self, account: WhatsAppAccount) -> None:
+        """A-2: rewrite every mutable column of the row with ``account.id`` (secrets, phone,
+        status, ``updated_at``). Flushes so a unique violation surfaces here."""
+        ...
 
     async def get_account_by_id(self, account_id: UUID) -> WhatsAppAccount | None: ...
 
@@ -125,13 +137,21 @@ class WhatsAppRepository(Protocol):
     ) -> None: ...
 
     async def update_status_by_wamid(
-        self, wamid: str, status: DeliveryStatus, *, error_code: int | None
-    ) -> bool: ...
+        self, wamid: str, status: DeliveryStatus, *, brand_id: UUID, error_code: int | None
+    ) -> bool:
+        """A-3: ``WHERE wamid = :w AND direction = 'outbound' AND brand_id = :brand_id`` and
+        the transition is allowed by :func:`delivery_transition_allowed` (monotonic ranks).
+        ``False`` ⇒ ignored (unknown wamid, other brand, or backwards transition)."""
+        ...
 
     # --------------------------------------------------------- reply drafts ----
     async def create_draft(self, draft: ReplyDraft) -> ReplyDraft: ...
 
     async def get_draft(self, brand_id: UUID, draft_id: UUID) -> ReplyDraft | None: ...
+
+    async def get_draft_for_update(self, brand_id: UUID, draft_id: UUID) -> ReplyDraft | None:
+        """``SELECT … FOR UPDATE`` — serialises concurrent decisions on one draft (A-1)."""
+        ...
 
     async def pending_draft(self, conversation_id: UUID) -> ReplyDraft | None: ...
 
@@ -157,14 +177,11 @@ class WhatsAppRepository(Protocol):
     # ------------------------------------------------------------- signals ----
     async def add_signal(self, signal: LearningSignal) -> LearningSignal: ...
 
-    async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:
-        """Tokens recorded in ``wa_reply_drafts.provenance`` since ``since`` (B-3 budget)."""
-        ...
-
-    async def ai_token_usage_combined_since(self, brand_id: UUID, since: datetime) -> int:
-        """B-3: the A-5 daily budget shared by both AI features — **one** ``UNION ALL`` query
-        over ``content_revisions.provenance`` (``kind = ai_generated``) and
-        ``wa_reply_drafts.provenance`` for the brand since ``since``."""
-        ...
-
     async def learning_signals(self, brand_id: UUID) -> list[dict[str, Any]]: ...
+
+
+class IndependentWrites(Protocol):
+    """D-072: run ``fn`` against a repository on an independent transaction that is
+    **committed before** ``run`` returns (rolled back only if ``fn`` raises)."""
+
+    async def run(self, fn: Callable[[WhatsAppRepository], Awaitable[T]]) -> T: ...

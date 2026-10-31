@@ -7,8 +7,11 @@ from typing import Annotated
 
 import httpx
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
+from src.core.database import get_db_session
+from src.modules.ai_gateway.budget import BudgetUsageReader
 from src.modules.ai_gateway.exceptions import AIProviderNotConfiguredError
 from src.modules.ai_gateway.facades import FakeProvider, HttpOpenAICompatibleProvider
 from src.modules.ai_gateway.gateway import AIGateway
@@ -46,3 +49,15 @@ def get_ai_gateway(
 
 
 Gateway = Annotated[AIGateway, Depends(get_ai_gateway)]
+
+
+def get_budget_usage_reader(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> BudgetUsageReader:
+    """A-4: the one PostgreSQL token-usage reader shared by every AI feature."""
+    from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
+
+    return PgBudgetUsageReader(session)
+
+
+BudgetReader = Annotated[BudgetUsageReader, Depends(get_budget_usage_reader)]

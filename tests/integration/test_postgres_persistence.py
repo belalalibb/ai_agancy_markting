@@ -519,7 +519,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -924,7 +924,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1945,7 +1945,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2015,7 +2015,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2323,9 +2323,10 @@ def test_a4_i1_list_of_25_items_uses_at_most_two_queries_on_pg(integration_app: 
 def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
     integration_app: FastAPI,
 ) -> None:
-    """A5-I1 — ``ai_token_usage_since`` sums ``prompt_tokens + completion_tokens`` from the
-    JSONB provenance of ``ai_generated`` revisions only; ``human`` rows (even with stray
-    token keys) and rows outside the window are not counted; the 429 fires on PG."""
+    """A5-I1 — the shared budget reader (SPRINT-10 A-4 ``PgBudgetUsageReader``) sums
+    ``prompt_tokens + completion_tokens`` from the JSONB provenance of ``ai_generated``
+    revisions only; ``human`` rows (even with stray token keys) and rows outside the window
+    are not counted; the 429 fires on PG."""
     from src.core.config import Settings
 
     _seed_fresh()
@@ -2356,15 +2357,13 @@ def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
         )
 
     async def _usage() -> int:
-        from src.modules.content.infrastructure.postgres_repository import (
-            PostgresContentRepository,
-        )
+        from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
 
         eng = create_async_engine(TEST_DATABASE_URL)
         try:
             async with AsyncSession(eng) as session:
-                repo = PostgresContentRepository(session)
-                return await repo.ai_token_usage_since(BRAND_ID, now - timedelta(hours=24))
+                reader = PgBudgetUsageReader(session)
+                return await reader.combined_usage_since(BRAND_ID, now - timedelta(hours=24))
         finally:
             await eng.dispose()
 
@@ -2436,7 +2435,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2565,7 +2564,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2712,7 +2711,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2762,7 +2761,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2920,7 +2919,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -2967,7 +2966,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -3133,7 +3132,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
     at 0008 and come back; no other table is touched."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     wa_tables = {
@@ -3238,7 +3237,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
     present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert wa_tables <= present
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
@@ -3448,7 +3447,8 @@ def test_b2_i2_send_text_persists_outbound_with_actor_and_replays_idempotently_o
         body = sent.json()
         assert body["delivery_status"] == "sent" and body["duplicate"] is False
         assert body["message"]["sent_by_user_id"] == str(USER_BY_TENANT[OWNER_ID])
-        assert "wamid" not in body["message"]  # platform ids stay server-side
+        # SPRINT-10 A-6: ``wamid`` is private — visible to OWNER/MANAGER, ``None`` for VIEWER.
+        assert body["message"]["wamid"] == "wamid.PGOUT1"
         assert len(route.calls) == 1
         request = route.calls[0].request
         assert request.headers["Authorization"] == f"Bearer {WA_SYSTEM_TOKEN}"
@@ -3506,19 +3506,17 @@ def test_b2_i2_send_text_persists_outbound_with_actor_and_replays_idempotently_o
 
 # ================================================================ SPRINT-09 B-3 (M6) ===
 def _wa_combined_usage(brand_id: UUID) -> int:
-    """The one ``UNION ALL`` budget query, run through the real PG repository."""
+    """The one ``UNION ALL`` budget query (SPRINT-10 A-4 shared reader) on the real PG."""
 
     async def _go() -> int:
-        from src.modules.whatsapp.infrastructure.postgres_repository import (
-            PostgresWhatsAppRepository,
-        )
+        from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
 
         eng = create_async_engine(TEST_DATABASE_URL)
         try:
             async with AsyncSession(eng) as session:
-                repo = PostgresWhatsAppRepository(session)
+                reader = PgBudgetUsageReader(session)
                 since = datetime.now(tz=UTC) - timedelta(hours=24)
-                return await repo.ai_token_usage_combined_since(brand_id, since)
+                return await reader.combined_usage_since(brand_id, since)
         finally:
             await eng.dispose()
 
@@ -3670,4 +3668,562 @@ def test_b3_i2_budget_of_one_token_makes_suggest_reply_429_on_pg(
         integration_app.state.settings = settings
     assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 1
     assert _wa_combined_usage(BRAND_ID) >= 1
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ================================================================ SPRINT-10 Part A (PG) ===
+# D-072 «ثبّت ثم أبلغ»: every test below checks the **rows after the response** — the fake
+# repositories cannot see transactions (SPRINT-09 review, lesson 22).
+
+
+def _wa_override_budget(integration_app: FastAPI, budget: int):  # noqa: ANN202
+    from src.core.config import get_settings
+
+    settings = integration_app.state.settings
+    integration_app.state.settings = settings.model_copy(
+        update={"ai_daily_token_budget_per_brand": budget}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
+    return settings
+
+
+def _wa_restore_budget(integration_app: FastAPI, settings) -> None:  # noqa: ANN001
+    from src.core.config import get_settings
+
+    integration_app.dependency_overrides.pop(get_settings, None)
+    integration_app.state.settings = settings
+
+
+def _wa_draft_row(conv_id: UUID, *, status: str = "suggested", prompt_tokens: int = 0) -> UUID:
+    (msg_id,) = _rows(
+        "SELECT id FROM wa_messages WHERE conversation_id = :c AND direction = 'inbound' "
+        "ORDER BY created_at DESC LIMIT 1",
+        {"c": conv_id},
+    )[0]
+    draft_id = uuid4()
+    _run(
+        "INSERT INTO wa_reply_drafts (id, conversation_id, brand_id, in_reply_to_message_id, "
+        "suggested_body, status, provenance, created_at) VALUES (:id, :c, :b, :m, 'مرحباً', "
+        ":st, CAST(:prov AS JSONB), now())",
+        {
+            "id": draft_id,
+            "c": conv_id,
+            "b": BRAND_ID,
+            "m": msg_id,
+            "st": status,
+            "prov": json.dumps(
+                {"kind": "ai_suggested", "prompt_tokens": prompt_tokens, "completion_tokens": 0}
+            ),
+        },
+    )
+    return draft_id
+
+
+def test_a1_i1_approve_on_closed_window_keeps_decision_and_signal_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A1-I1 — approve on a closed window ⇒ 422 ``whatsapp_window_closed`` + ``draft_status``;
+    **after** the response the draft row is ``approved`` and one ``approved_unchanged``
+    signal exists (committed independently — D-072); approving again ⇒ 409
+    ``draft_not_pending``."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(hours=30)
+    )
+    draft_id = _wa_draft_row(conv)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        res = client.post(f"{WA_BRAND}/reply-drafts/{draft_id}/approve", json={}, headers=owner)
+        assert res.status_code == 422, res.text
+        assert res.json()["detail"] == {
+            "error": "whatsapp_window_closed",
+            "template_required": True,
+            "draft_status": "approved",
+        }
+        again = client.post(f"{WA_BRAND}/reply-drafts/{draft_id}/approve", json={}, headers=owner)
+        assert again.status_code == 409, again.text
+        assert again.json()["detail"] == {
+            "error": "draft_not_pending",
+            "current_status": "approved",
+        }
+    assert (
+        _run("SELECT status FROM wa_reply_drafts WHERE id = :id", {"id": draft_id}, scalar=True)
+        == "approved"
+    )
+    assert _run("SELECT COUNT(*) FROM wa_learning_signals", scalar=True) == 1
+    assert _run("SELECT signal FROM wa_learning_signals", scalar=True) == "approved_unchanged"
+    assert _run("SELECT COUNT(*) FROM wa_messages WHERE direction = 'outbound'", scalar=True) == 0
+
+
+def test_a1_i2_graph_190_disables_account_persistently_and_next_send_skips_graph_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+) -> None:
+    """A1-I2 — Meta 401/190 ⇒ 409 ``whatsapp_reauth_required`` **and** the row is
+    ``disabled`` after the response; the next send ⇒ 409 with **no** Graph call
+    (``len(route.calls)`` unchanged); the failed outbound row survives too."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(hours=1)
+    )
+    route = graph_mock.post(WA_MESSAGES_PATH).mock(
+        return_value=httpx.Response(
+            401, json={"error": {"message": "x", "code": 190, "fbtrace_id": "t"}}
+        )
+    )
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        first = client.post(
+            f"{WA_BRAND}/conversations/{conv}/messages", json={"body": "hi"}, headers=owner
+        )
+        assert first.status_code == 409, first.text
+        assert first.json()["detail"]["error"] == "whatsapp_reauth_required"
+        assert len(route.calls) == 1
+        assert (
+            _run(
+                "SELECT status FROM whatsapp_accounts WHERE id = :id",
+                {"id": account_id},
+                scalar=True,
+            )
+            == "disabled"
+        )
+        second = client.post(
+            f"{WA_BRAND}/conversations/{conv}/messages", json={"body": "hi again"}, headers=owner
+        )
+        assert second.status_code == 409, second.text
+        assert second.json()["detail"]["error"] == "whatsapp_reauth_required"
+        assert len(route.calls) == 1  # no second Graph call with a dead token
+    rows = _rows(
+        "SELECT delivery_status, error_code FROM wa_messages WHERE direction = 'outbound' "
+        "ORDER BY created_at"
+    )
+    assert rows == [("failed", 190), ("failed", None)]
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "expected_status", "expected_row", "expected_code"),
+    [
+        (httpx.ConnectError("refused"), 503, "failed", None),
+        (
+            httpx.Response(
+                429, json={"error": {"message": "x", "code": 130429, "fbtrace_id": "t"}}
+            ),
+            429,
+            "failed",
+            130429,
+        ),
+        (httpx.ReadTimeout("slow"), 202, "ambiguous", None),
+    ],
+    ids=["connect-error-503", "rate-limit-429", "read-timeout-202-ambiguous"],
+)
+def test_a1_i3_failure_rows_survive_the_error_response_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+    side_effect,  # noqa: ANN001
+    expected_status: int,
+    expected_row: str,
+    expected_code: int | None,
+) -> None:
+    """A1-I3 — ``ConnectError`` ⇒ 503 + row ``failed``; 429 ⇒ row ``failed`` with
+    ``error_code=130429``; ``ReadTimeout`` after the send ⇒ 202 + row ``ambiguous`` — every
+    row is read **after** the response (independent transaction, D-072)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(hours=1)
+    )
+    if isinstance(side_effect, httpx.Response):
+        graph_mock.post(WA_MESSAGES_PATH).mock(return_value=side_effect)
+    else:
+        graph_mock.post(WA_MESSAGES_PATH).mock(side_effect=side_effect)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        res = client.post(
+            f"{WA_BRAND}/conversations/{conv}/messages", json={"body": "hi"}, headers=owner
+        )
+        assert res.status_code == expected_status, res.text
+    rows = _rows(
+        "SELECT delivery_status, error_code FROM wa_messages WHERE direction = 'outbound'"
+    )
+    assert rows == [(expected_row, expected_code)]
+    assert (
+        _run(
+            "SELECT status FROM whatsapp_accounts WHERE id = :id", {"id": account_id}, scalar=True
+        )
+        == "active"
+    )
+
+
+def test_a2_i1_delete_then_post_reconnects_the_same_row_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+) -> None:
+    """A2-I1 — ``DELETE /account`` ⇒ ``POST /account`` for the same brand ⇒ **200** (not 201),
+    ``status='active'`` and the **same** ``id``; one ``whatsapp_accounts`` row in total."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    graph_mock.get(f"/{WA_PHONE_NUMBER_ID}").mock(
+        return_value=httpx.Response(200, json={"display_phone_number": "+1 555 000 2222"})
+    )
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    body = {
+        "phone_number_id": WA_PHONE_NUMBER_ID,
+        "waba_id": "WABA_PG",
+        "display_phone": "",
+        "system_token": "EAARotatedSystemTokenPG",
+        "app_secret": "rotated-app-secret",
+        "verify_token": "rotated-verify-token",
+    }
+    with TestClient(integration_app) as client:
+        deleted = client.delete(f"{WA_BRAND}/account", headers=owner)
+        assert deleted.status_code == 200 and deleted.json()["status"] == "disabled"
+        again = client.post(f"{WA_BRAND}/account", json=body, headers=owner)
+        assert again.status_code == 200, again.text
+        assert again.json()["id"] == str(account_id)
+        assert again.json()["status"] == "active"
+        assert again.json()["display_phone"] == "+1 555 000 2222"
+        third = client.post(f"{WA_BRAND}/account", json=body, headers=owner)
+        assert third.status_code == 409 and third.json()["detail"]["error"] == (
+            "whatsapp_account_exists"
+        )
+    assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 1
+    (status, token_cipher) = _rows(
+        "SELECT status, encrypted_system_token FROM whatsapp_accounts WHERE id = :id",
+        {"id": account_id},
+    )[0]
+    assert status == "active"
+    assert integration_encryption.decrypt_token(token_cipher) == "EAARotatedSystemTokenPG"
+
+
+def test_a2_i2_two_brands_connecting_one_phone_number_concurrently_is_201_409_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """A2-I2 — two brands race on one ``phone_number_id`` through two ASGI apps ⇒
+    deterministically ``[201, 409]`` (``whatsapp_phone_number_in_use`` — the unique
+    constraint is caught, never a 500) and exactly one row."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    settings = integration_app.state.settings
+    graph_mock.get("/PNID_RACE").mock(
+        return_value=httpx.Response(200, json={"display_phone_number": "+1 555 000 3333"})
+    )
+    owner = integration_headers(settings, OWNER_ID)
+    body = {
+        "phone_number_id": "PNID_RACE",
+        "waba_id": "WABA_PG",
+        "display_phone": "",
+        "system_token": "EAARaceSystemTokenPG",
+        "app_secret": "race-app-secret",
+        "verify_token": "race-verify-token",
+    }
+    from src.main import create_app
+
+    async def _race() -> list[tuple[int, str]]:
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            async with httpx.AsyncClient() as http:
+                for a in apps:
+                    a.state.http_client = http
+                responses = await asyncio.gather(
+                    c1.post(f"{API}/brands/{BRAND_ID}/whatsapp/account", json=body, headers=owner),
+                    c2.post(
+                        f"{API}/brands/{BRAND2_ID}/whatsapp/account", json=body, headers=owner
+                    ),
+                )
+        return [(r.status_code, r.json().get("detail", {}).get("error", "")) for r in responses]
+
+    results = asyncio.run(_race())
+    assert sorted(code for code, _ in results) == [201, 409], results
+    assert [err for code, err in results if code == 409] == ["whatsapp_phone_number_in_use"]
+    assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 1
+
+
+def test_a3_i1_status_signed_by_brand_a_cannot_touch_brand_b_row_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A3-I1 — a status payload signed with brand A's secret for a wamid owned by brand B ⇒
+    200 with ``status_updates: 0`` and ``ignored_status_updates: 1``; B's row is unchanged."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_a = _wa_account_row(integration_encryption)
+    account_b = _wa_account_row(
+        integration_encryption, brand_id=BRAND2_ID, phone_number_id="PNID_PG_2002"
+    )
+    assert account_a != account_b
+    now = datetime.now(tz=UTC)
+    conv_b = uuid4()
+    _run(
+        "INSERT INTO wa_conversations (id, brand_id, account_id, wa_id, last_inbound_at, "
+        "window_expires_at, unread_count, status, created_at, updated_at) VALUES "
+        "(:id, :b, :a, :w, :at, :exp, 0, 'open', :at, :at)",
+        {
+            "id": conv_b,
+            "b": BRAND2_ID,
+            "a": account_b,
+            "w": "201999999999",
+            "at": now,
+            "exp": now + timedelta(hours=24),
+        },
+    )
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, body, "
+        "delivery_status, sent_by_user_id, created_at) VALUES (:id, :c, :b, 'outbound', "
+        "'wamid.B.OUT1', 'text', 'x', 'sent', :u, :at)",
+        {"id": uuid4(), "c": conv_b, "b": BRAND2_ID, "u": USER_BY_TENANT[OWNER_ID], "at": now},
+    )
+    payload = _wa_payload("unused")
+    payload["entry"][0]["changes"][0]["value"].pop("messages")
+    payload["entry"][0]["changes"][0]["value"].pop("contacts")
+    payload["entry"][0]["changes"][0]["value"]["statuses"] = [
+        {"id": "wamid.B.OUT1", "status": "delivered", "timestamp": str(int(now.timestamp()))}
+    ]
+    with TestClient(integration_app) as client:
+        res = _wa_post(client, payload)  # signed with brand A's secret, A's phone_number_id
+        assert res.status_code == 200, res.text
+        assert res.json()["status_updates"] == 0
+        assert res.json()["ignored_status_updates"] == 1
+    assert (
+        _run("SELECT delivery_status FROM wa_messages WHERE wamid = 'wamid.B.OUT1'", scalar=True)
+        == "sent"
+    )
+
+
+def test_a3_i2_read_then_sent_stays_read_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A3-I2 — ``sent ⇒ read`` is applied, a late ``sent`` (and ``delivered``) afterwards is
+    ignored: the row stays ``read`` (monotonic ranks)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(account_id, wa_id=WA_CUSTOMER, last_inbound_at=now)
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, body, "
+        "delivery_status, sent_by_user_id, created_at) VALUES (:id, :c, :b, 'outbound', "
+        "'wamid.A.OUT1', 'text', 'x', 'sent', :u, :at)",
+        {"id": uuid4(), "c": conv, "b": BRAND_ID, "u": USER_BY_TENANT[OWNER_ID], "at": now},
+    )
+
+    def _status(label: str) -> dict:
+        payload = _wa_payload("unused")
+        value = payload["entry"][0]["changes"][0]["value"]
+        value.pop("messages")
+        value.pop("contacts")
+        value["statuses"] = [{"id": "wamid.A.OUT1", "status": label, "timestamp": "1"}]
+        return payload
+
+    with TestClient(integration_app) as client:
+        assert _wa_post(client, _status("read")).json()["status_updates"] == 1
+        late = _wa_post(client, _status("sent")).json()
+        assert late["status_updates"] == 0 and late["ignored_status_updates"] == 1
+        late = _wa_post(client, _status("delivered")).json()
+        assert late["status_updates"] == 0 and late["ignored_status_updates"] == 1
+    assert (
+        _run("SELECT delivery_status FROM wa_messages WHERE wamid = 'wamid.A.OUT1'", scalar=True)
+        == "read"
+    )
+
+
+def test_a4_i1_whatsapp_draft_tokens_block_content_generate_with_same_retry_after_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A4-I1 — one WhatsApp draft holding ``budget + 1`` tokens ⇒ ``/generate`` **429** and
+    ``suggest-reply`` 429 with the same ``Retry-After`` (±1s) — one shared reader (N4)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv_a = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(minutes=5)
+    )
+    conv_b = _wa_conversation_row(
+        account_id, wa_id="201111111111", last_inbound_at=now - timedelta(minutes=4)
+    )
+    budget = 1_000
+    _wa_draft_row(conv_a, status="expired", prompt_tokens=budget + 1)
+    settings = _wa_override_budget(integration_app, budget)
+    owner = integration_headers(settings, OWNER_ID)
+    try:
+        with TestClient(integration_app) as client:
+            item_id = _content_create(client, owner)["id"]
+            gen = client.post(
+                f"{CONTENT}/items/{item_id}/generate",
+                json={"brief": "اكتب منشوراً قصيراً عن العرض الجديد"},
+                headers=owner,
+            )
+            assert gen.status_code == 429, gen.text
+            assert gen.json()["detail"]["error"] == "generation_budget_exceeded"
+            assert gen.json()["detail"]["used"] == budget + 1
+            sug = client.post(
+                f"{WA_BRAND}/conversations/{conv_b}/suggest-reply", json={}, headers=owner
+            )
+            assert sug.status_code == 429, sug.text
+            assert abs(int(gen.headers["Retry-After"]) - int(sug.headers["Retry-After"])) <= 1
+    finally:
+        _wa_restore_budget(integration_app, settings)
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 1
+
+
+def test_a4_i2_content_revision_tokens_block_whatsapp_suggest_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A4-I2 — the reverse: one ``ai_generated`` content revision with ``budget + 1`` tokens
+    ⇒ ``suggest-reply`` 429 (and ``/generate`` 429) through the same reader."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(minutes=5)
+    )
+    budget = 1_000
+    settings = _wa_override_budget(integration_app, budget)
+    owner = integration_headers(settings, OWNER_ID)
+    try:
+        with TestClient(integration_app) as client:
+            item_id = _content_create(client, owner)["id"]
+            _run(
+                "INSERT INTO content_revisions (id, item_id, revision_no, body, media_refs, "
+                "provenance, created_by_tenant_id, created_at) VALUES (:id, :item, 2, 'x', "
+                "CAST('[]' AS JSONB), CAST(:prov AS JSONB), :tenant, now())",
+                {
+                    "id": uuid4(),
+                    "item": UUID(item_id),
+                    "prov": json.dumps(
+                        {
+                            "kind": "ai_generated",
+                            "prompt_tokens": budget + 1,
+                            "completion_tokens": 0,
+                        }
+                    ),
+                    "tenant": OWNER_ID,
+                },
+            )
+            sug = client.post(
+                f"{WA_BRAND}/conversations/{conv}/suggest-reply", json={}, headers=owner
+            )
+            assert sug.status_code == 429, sug.text
+            assert sug.json()["detail"]["error"] == "generation_budget_exceeded"
+            assert sug.json()["detail"]["used"] == budget + 1
+            gen = client.post(
+                f"{CONTENT}/items/{item_id}/generate",
+                json={"brief": "اكتب منشوراً قصيراً عن العرض الجديد"},
+                headers=owner,
+            )
+            assert gen.status_code == 429, gen.text
+    finally:
+        _wa_restore_budget(integration_app, settings)
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 0
+
+
+def test_a5_i1_concurrent_suggest_reply_is_201_409_with_one_pending_row_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A5-I1 — two concurrent ``suggest-reply`` on one conversation through two engines ⇒
+    ``[201, 409]`` (``draft_pending`` from the partial unique index) and exactly one
+    ``suggested`` row."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(minutes=5)
+    )
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    from src.main import create_app
+
+    async def _race() -> list[tuple[int, str]]:
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            async with httpx.AsyncClient() as http:
+                for a in apps:
+                    a.state.http_client = http
+                url = f"{API}/brands/{BRAND_ID}/whatsapp/conversations/{conv}/suggest-reply"
+                responses = await asyncio.gather(
+                    c1.post(url, json={}, headers=owner), c2.post(url, json={}, headers=owner)
+                )
+        return [(r.status_code, r.json().get("detail", {}).get("error", "")) for r in responses]
+
+    results = asyncio.run(_race())
+    assert sorted(code for code, _ in results) == [201, 409], results
+    assert [err for code, err in results if code == 409] == ["draft_pending"]
+    assert (
+        _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 1
+    )
+
+
+def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
+    integration_encryption: TokenEncryptionService,
+) -> None:
+    """A5-M1 — ``head ⇒ 0009 ⇒ head`` with **two** ``suggested`` drafts on one conversation:
+    the pre-cleanup marks the **older** one ``expired`` and the partial unique index
+    ``uq_wa_reply_drafts_one_pending`` then rejects a second pending draft."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    command.downgrade(cfg, "0009")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    indexes = {
+        r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
+    }
+    assert "uq_wa_reply_drafts_one_pending" not in indexes
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(account_id, wa_id=WA_CUSTOMER, last_inbound_at=now)
+    older = _wa_draft_row(conv)
+    _run(
+        "UPDATE wa_reply_drafts SET created_at = now() - interval '10 minutes' WHERE id = :id",
+        {"id": older},
+    )
+    newer = _wa_draft_row(conv)
+    assert (
+        _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 2
+    )
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    statuses = dict(_rows("SELECT id, status FROM wa_reply_drafts"))
+    assert statuses[older] == "expired" and statuses[newer] == "suggested"
+    assert (
+        _run(
+            "SELECT decided_at IS NOT NULL FROM wa_reply_drafts WHERE id = :id",
+            {"id": older},
+            scalar=True,
+        )
+        is True
+    )
+    with pytest.raises(IntegrityError, match="uq_wa_reply_drafts_one_pending"):
+        _wa_draft_row(conv)
+    # Other tables untouched by the round-trip.
+    assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 1
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")

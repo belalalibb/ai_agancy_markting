@@ -9,8 +9,8 @@ SPRINT-07 Part A changes:
   (``COALESCE(MAX(revision_no), 0) + 1`` inside the same transaction — safe under the lock).
 * **A-4** — :meth:`ContentRepository.list_items` returns ``(item, current_body)`` pairs from
   one ``LEFT JOIN`` (no N+1).
-* **A-5** — :meth:`ContentRepository.ai_token_usage_since` sums the private token counters of
-  ``ai_generated`` revisions for the daily budget.
+* **A-5** — the daily token budget moved in SPRINT-10 A-4 to the shared reader in
+  ``src/modules/ai_gateway/budget.py`` (one ``UNION ALL`` over every AI feature).
 """
 
 from __future__ import annotations
@@ -103,14 +103,4 @@ class ContentRepository(Protocol):
         ``True`` iff exactly one row changed. ``published_at`` is written only when
         ``new == published`` (SPRINT-07 system transition); leaving ``scheduled`` always
         nulls ``scheduled_for`` (DB CHECK)."""
-        ...
-
-    async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:
-        """A-5: ``SUM(prompt_tokens + completion_tokens)`` over the ``ai_generated`` revisions
-        of this brand created at or after ``since`` (``human`` rows are never counted)."""
-        ...
-
-    async def oldest_ai_generation_at(self, brand_id: UUID, since: datetime) -> datetime | None:
-        """A-5 (429 path only): ``created_at`` of the oldest ``ai_generated`` revision in the
-        window — tells the client when the budget starts to free up."""
         ...

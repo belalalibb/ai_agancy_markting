@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
+
 from src.core.security import TokenEncryptionService
 from src.modules.whatsapp.client import WhatsAppCloudClient
 from src.modules.whatsapp.domain.models import AccountStatus, WhatsAppAccount
@@ -24,6 +26,7 @@ from src.modules.whatsapp.exceptions import (
     AccountAlreadyExistsError,
     AccountNotFoundError,
     CredentialsInvalidError,
+    PhoneNumberInUseError,
     WhatsAppClientError,
 )
 
@@ -33,6 +36,14 @@ logger = logging.getLogger(__name__)
 def hash_verify_token(verify_token: str) -> str:
     """SHA-256 hex of the webhook verify token (the plaintext is never stored)."""
     return hashlib.sha256(verify_token.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectOutcome:
+    """A-2: ``reconnected`` ⇒ the brand's ``disabled`` row was updated in place (HTTP 200)."""
+
+    account: WhatsAppAccount
+    reconnected: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,23 +105,42 @@ class WhatsAppAccountService:
         system_token: str,
         app_secret: str,
         verify_token: str,
-    ) -> WhatsAppAccount:
+    ) -> ConnectOutcome:
         """OWNER only (enforced by the router). Verifies the token with one Graph ``GET``;
-        any client failure ⇒ 422 ``whatsapp_credentials_invalid`` and **no row**."""
-        if await self._repo.get_account(brand_id) is not None:
+        any client failure ⇒ 422 ``whatsapp_credentials_invalid`` and **no row**.
+
+        SPRINT-10 A-2 (N2): an existing ``disabled`` row of the brand is **updated in place**
+        (new secrets, ``status=active``, same ``id``) ⇒ ``reconnected=True`` (200); an
+        ``active`` row ⇒ 409 ``whatsapp_account_exists``; a ``phone_number_id`` already used
+        by another brand ⇒ 409 ``whatsapp_phone_number_in_use`` (pre-check **and** the unique
+        constraint, for the concurrent case)."""
+        existing = await self._repo.get_account(brand_id)
+        if existing is not None and existing.status is AccountStatus.ACTIVE:
             raise AccountAlreadyExistsError()
-        try:
-            info = await self._client.describe_phone_number(system_token, phone_number_id)
-        except WhatsAppClientError as exc:
-            logger.info(
-                "wa connect rejected: brand=%s phone_number_id=%s error=%s code=%s",
-                brand_id,
-                phone_number_id,
-                type(exc).__name__,
-                exc.code,
-            )
-            raise CredentialsInvalidError() from exc
+        holder = await self._repo.get_account_by_phone_number_id(phone_number_id)
+        if holder is not None and holder.brand_id != brand_id:
+            raise PhoneNumberInUseError()
+        info = await self._verify(brand_id, phone_number_id, system_token)
         now = datetime.now(tz=UTC)
+        if existing is not None:  # disabled ⇒ reconnect in place
+            updated = existing.model_copy(
+                update={
+                    "phone_number_id": phone_number_id,
+                    "waba_id": waba_id,
+                    "display_phone": display_phone or info.display_phone_number,
+                    "encrypted_system_token": self._encryption.encrypt_token(system_token),
+                    "encrypted_app_secret": self._encryption.encrypt_token(app_secret),
+                    "verify_token_hash": hash_verify_token(verify_token),
+                    "status": AccountStatus.ACTIVE,
+                    "updated_at": now,
+                }
+            )
+            try:
+                await self._repo.update_account(updated)
+            except IntegrityError as exc:
+                raise PhoneNumberInUseError() from exc
+            logger.info("wa account reconnected: brand=%s account=%s", brand_id, updated.id)
+            return ConnectOutcome(updated, reconnected=True)
         account = WhatsAppAccount(
             brand_id=brand_id,
             phone_number_id=phone_number_id,
@@ -123,9 +153,46 @@ class WhatsAppAccountService:
             created_at=now,
             updated_at=now,
         )
-        created = await self._repo.create_account(account)
+        try:
+            created = await self._repo.create_account(account)
+        except IntegrityError as exc:
+            raise PhoneNumberInUseError() from exc
         logger.info("wa account connected: brand=%s account=%s", brand_id, created.id)
-        return created
+        return ConnectOutcome(created, reconnected=False)
+
+    async def rotate_credentials(
+        self, brand_id: UUID, *, system_token: str, app_secret: str
+    ) -> WhatsAppAccount:
+        """A-2 ``POST /account/rotate`` (OWNER): replaces ``system_token`` / ``app_secret`` of
+        an **active** account after one ``describe_phone_number`` with the new token;
+        rejected token ⇒ 422 and **no change**."""
+        account = await self.get_account(brand_id)
+        if account.status is not AccountStatus.ACTIVE:
+            raise AccountNotFoundError()
+        await self._verify(brand_id, account.phone_number_id, system_token)
+        updated = account.model_copy(
+            update={
+                "encrypted_system_token": self._encryption.encrypt_token(system_token),
+                "encrypted_app_secret": self._encryption.encrypt_token(app_secret),
+                "updated_at": datetime.now(tz=UTC),
+            }
+        )
+        await self._repo.update_account(updated)
+        logger.info("wa account credentials rotated: brand=%s account=%s", brand_id, account.id)
+        return updated
+
+    async def _verify(self, brand_id: UUID, phone_number_id: str, system_token: str):  # noqa: ANN202
+        try:
+            return await self._client.describe_phone_number(system_token, phone_number_id)
+        except WhatsAppClientError as exc:
+            logger.info(
+                "wa connect rejected: brand=%s phone_number_id=%s error=%s code=%s",
+                brand_id,
+                phone_number_id,
+                type(exc).__name__,
+                exc.code,
+            )
+            raise CredentialsInvalidError() from exc
 
     async def get_account(self, brand_id: UUID) -> WhatsAppAccount:
         account = await self._repo.get_account(brand_id)

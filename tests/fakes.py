@@ -639,6 +639,39 @@ class FakeContentRepository:
         return min((r.created_at for r in rows), default=None)
 
 
+class FakeBudgetUsageReader:
+    """In-memory ``BudgetUsageReader`` (SPRINT-10 A-4) mirroring the PG ``UNION ALL``: the
+    ``ai_generated`` content revisions **plus** every WhatsApp reply draft of the brand."""
+
+    def __init__(self, content_repo: FakeContentRepository, wa_repo=None) -> None:  # noqa: ANN001
+        self.content_repo = content_repo
+        self.wa_repo = wa_repo
+
+    def _rows(self, brand_id: UUID, since):  # noqa: ANN001, ANN202
+        rows = [
+            (r.provenance, r.created_at)
+            for r in self.content_repo._ai_revisions_since(brand_id, since)
+        ]
+        if self.wa_repo is not None:
+            rows += [
+                (d.provenance, d.created_at)
+                for d in self.wa_repo.drafts.values()
+                if d.brand_id == brand_id and d.created_at >= since
+            ]
+        return rows
+
+    async def combined_usage_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
+        if self.content_repo.token_usage_override is not None:
+            return self.content_repo.token_usage_override
+        return sum(
+            int(prov.get("prompt_tokens") or 0) + int(prov.get("completion_tokens") or 0)
+            for prov, _ in self._rows(brand_id, since)
+        )
+
+    async def oldest_generation_since(self, brand_id: UUID, since):  # noqa: ANN001, ANN201
+        return min((at for _, at in self._rows(brand_id, since)), default=None)
+
+
 class FakePublishJobRepository:
     """In-memory :class:`PublishJobRepository` (SPRINT-07 B1/B6). Mirrors the PG conditional
     ``UPDATE`` semantics: every mutation checks the *current* status first. ``create_job``
@@ -898,14 +931,24 @@ class FakeWhatsAppRepository:
         self.messages: dict[UUID, object] = {}
         self.drafts: dict[UUID, object] = {}
         self.signals: dict[UUID, object] = {}
-        # B-3: the content repository whose ``ai_generated`` revisions share the daily budget
-        # (mirrors the PG ``UNION ALL``); wired by the ``wa_app`` fixture.
-        self.content_repo: FakeContentRepository | None = None
 
     # ------------------------------------------------------------- accounts ----
     async def create_account(self, account):  # noqa: ANN001, ANN201
+        from sqlalchemy.exc import IntegrityError
+
+        if any(a.phone_number_id == account.phone_number_id for a in self.accounts.values()):
+            raise IntegrityError("uq_whatsapp_accounts_phone_number_id", {}, Exception())
         self.accounts[account.id] = account
         return account
+
+    async def update_account(self, account) -> None:  # noqa: ANN001
+        # A-2: mirrors ``uq_whatsapp_accounts_phone_number_id``.
+        from sqlalchemy.exc import IntegrityError
+
+        for other in self.accounts.values():
+            if other.id != account.id and other.phone_number_id == account.phone_number_id:
+                raise IntegrityError("uq_whatsapp_accounts_phone_number_id", {}, Exception())
+        self.accounts[account.id] = account
 
     async def get_account(self, brand_id: UUID):  # noqa: ANN201
         return next((a for a in self.accounts.values() if a.brand_id == brand_id), None)
@@ -1094,9 +1137,20 @@ class FakeWhatsAppRepository:
             update["error_code"] = error_code
         self.messages[message_id] = m.model_copy(update=update)
 
-    async def update_status_by_wamid(self, wamid: str, status, *, error_code) -> bool:  # noqa: ANN001
+    async def update_status_by_wamid(  # noqa: ANN201
+        self,
+        wamid: str,
+        status,
+        *,
+        brand_id: UUID,
+        error_code,  # noqa: ANN001
+    ) -> bool:
+        from src.modules.whatsapp.domain.models import delivery_transition_allowed
+
         for mid, m in self.messages.items():
-            if m.wamid == wamid and m.direction.value == "outbound":
+            if m.wamid == wamid and m.direction.value == "outbound" and m.brand_id == brand_id:
+                if not delivery_transition_allowed(m.delivery_status, status):  # A-3 ranks
+                    return False
                 update = {"delivery_status": status}
                 if error_code is not None:
                     update["error_code"] = error_code
@@ -1106,12 +1160,23 @@ class FakeWhatsAppRepository:
 
     # --------------------------------------------------------- reply drafts ----
     async def create_draft(self, draft):  # noqa: ANN001, ANN201
+        # A-5: mirrors ``uq_wa_reply_drafts_one_pending`` (migration 0010).
+        from sqlalchemy.exc import IntegrityError
+
+        if draft.status.value == "suggested" and any(
+            d.conversation_id == draft.conversation_id and d.status.value == "suggested"
+            for d in self.drafts.values()
+        ):
+            raise IntegrityError("uq_wa_reply_drafts_one_pending", {}, Exception())
         self.drafts[draft.id] = draft
         return draft
 
     async def get_draft(self, brand_id: UUID, draft_id: UUID):  # noqa: ANN201
         d = self.drafts.get(draft_id)
         return d if d is not None and d.brand_id == brand_id else None
+
+    async def get_draft_for_update(self, brand_id: UUID, draft_id: UUID):  # noqa: ANN201
+        return await self.get_draft(brand_id, draft_id)
 
     async def pending_draft(self, conversation_id: UUID):  # noqa: ANN201
         rows = [
@@ -1166,21 +1231,6 @@ class FakeWhatsAppRepository:
         self.signals[signal.id] = signal
         return signal
 
-    async def ai_token_usage_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
-        return sum(
-            int(d.provenance.get("prompt_tokens") or 0)
-            + int(d.provenance.get("completion_tokens") or 0)
-            for d in self.drafts.values()
-            if d.brand_id == brand_id and d.created_at >= since
-        )
-
-    async def ai_token_usage_combined_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
-        """Mirror of the PG ``UNION ALL``: drafts + (optional) linked content repository."""
-        total = await self.ai_token_usage_since(brand_id, since)
-        if self.content_repo is not None:
-            total += await self.content_repo.ai_token_usage_since(brand_id, since)
-        return total
-
     async def learning_signals(self, brand_id: UUID):  # noqa: ANN201
         return [
             {
@@ -1192,3 +1242,17 @@ class FakeWhatsAppRepository:
             for s in sorted(self.signals.values(), key=lambda s: s.created_at)
             if s.brand_id == brand_id
         ]
+
+
+class FakeIndependentWrites:
+    """In-memory ``IndependentWrites`` (SPRINT-10 A-1): the fake store has no transactions,
+    so the callback simply runs against the same repository — the *persistence* guarantee
+    of D-072 is proven on PG (A1-I1/I2/I3), not here. ``calls`` counts the uses."""
+
+    def __init__(self, repo: FakeWhatsAppRepository) -> None:
+        self.repo = repo
+        self.calls = 0
+
+    async def run(self, fn):  # noqa: ANN001, ANN201
+        self.calls += 1
+        return await fn(self.repo)

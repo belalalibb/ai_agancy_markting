@@ -1,15 +1,22 @@
-"""PostgreSQL implementation of :class:`WhatsAppRepository` (migration 0009)."""
+"""PostgreSQL implementation of :class:`WhatsAppRepository` (migrations 0009 / 0010).
+
+:class:`PgIndependentWrites` (SPRINT-10 A-1, D-072) opens a **separate committed
+transaction** through :func:`src.core.database.independent_session` for writes that must
+survive a later failure of the request.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import Integer, and_, exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.core.database import get_session_factory, independent_session
 from src.modules.whatsapp.domain.models import (
     AccountStatus,
     Conversation,
@@ -23,8 +30,9 @@ from src.modules.whatsapp.domain.models import (
     RejectionReason,
     ReplyDraft,
     WhatsAppAccount,
+    delivery_transition_allowed,
 )
-from src.modules.whatsapp.domain.repository import Cursor
+from src.modules.whatsapp.domain.repository import Cursor, WhatsAppRepository
 from src.modules.whatsapp.infrastructure.orm import (
     ConversationRow,
     LearningSignalRow,
@@ -106,6 +114,9 @@ def _draft(row: ReplyDraftRow) -> ReplyDraft:
     )
 
 
+T = TypeVar("T")
+
+
 class PostgresWhatsAppRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -130,6 +141,23 @@ class PostgresWhatsAppRepository:
         )
         await self._session.flush()
         return account
+
+    async def update_account(self, account: WhatsAppAccount) -> None:
+        await self._session.execute(
+            update(WhatsAppAccountRow)
+            .where(WhatsAppAccountRow.id == account.id)
+            .values(
+                phone_number_id=account.phone_number_id,
+                waba_id=account.waba_id,
+                display_phone=account.display_phone,
+                encrypted_system_token=account.encrypted_system_token,
+                encrypted_app_secret=account.encrypted_app_secret,
+                verify_token_hash=account.verify_token_hash,
+                status=account.status.value,
+                updated_at=account.updated_at,
+            )
+        )
+        await self._session.flush()
 
     async def get_account(self, brand_id: UUID) -> WhatsAppAccount | None:
         row = await self._session.scalar(
@@ -176,10 +204,13 @@ class PostgresWhatsAppRepository:
     async def get_conversation_for_update(
         self, brand_id: UUID, conversation_id: UUID
     ) -> Conversation | None:
+        # SPRINT-10 A-1: ``FOR NO KEY UPDATE`` — serialises sends per conversation without
+        # blocking the independent transaction's ``INSERT INTO wa_messages`` (its FK takes a
+        # ``KEY SHARE`` lock on this row, which ``FOR UPDATE`` would block ⇒ self-deadlock).
         row = await self._session.scalar(
             select(ConversationRow)
             .where(ConversationRow.brand_id == brand_id, ConversationRow.id == conversation_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
         )
         return _conversation(row) if row is not None else None
 
@@ -421,17 +452,28 @@ class PostgresWhatsAppRepository:
         )
 
     async def update_status_by_wamid(
-        self, wamid: str, status: DeliveryStatus, *, error_code: int | None
+        self, wamid: str, status: DeliveryStatus, *, brand_id: UUID, error_code: int | None
     ) -> bool:
-        values: dict[str, Any] = {"delivery_status": status.value}
-        if error_code is not None:
-            values["error_code"] = error_code
-        result = await self._session.execute(
-            update(MessageRow)
-            .where(MessageRow.wamid == wamid, MessageRow.direction == Direction.OUTBOUND.value)
-            .values(**values)
+        """A-3: the row is locked, then the monotonic transition is checked in Python with
+        :func:`delivery_transition_allowed` — same rule as the fake, one source of truth."""
+        row = await self._session.scalar(
+            select(MessageRow)
+            .where(
+                MessageRow.wamid == wamid,
+                MessageRow.direction == Direction.OUTBOUND.value,
+                MessageRow.brand_id == brand_id,
+            )
+            .with_for_update()
         )
-        return (result.rowcount or 0) > 0
+        if row is None or not delivery_transition_allowed(
+            DeliveryStatus(row.delivery_status), status
+        ):
+            return False
+        row.delivery_status = status.value
+        if error_code is not None:
+            row.error_code = error_code
+        await self._session.flush()
+        return True
 
     # --------------------------------------------------------- reply drafts ----
     async def create_draft(self, draft: ReplyDraft) -> ReplyDraft:
@@ -455,6 +497,14 @@ class PostgresWhatsAppRepository:
         return draft
 
     async def get_draft(self, brand_id: UUID, draft_id: UUID) -> ReplyDraft | None:
+        row = await self._session.scalar(
+            select(ReplyDraftRow).where(
+                ReplyDraftRow.brand_id == brand_id, ReplyDraftRow.id == draft_id
+            )
+        )
+        return _draft(row) if row is not None else None
+
+    async def get_draft_for_update(self, brand_id: UUID, draft_id: UUID) -> ReplyDraft | None:
         row = await self._session.scalar(
             select(ReplyDraftRow)
             .where(ReplyDraftRow.brand_id == brand_id, ReplyDraftRow.id == draft_id)
@@ -542,48 +592,6 @@ class PostgresWhatsAppRepository:
         await self._session.flush()
         return signal
 
-    async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:
-        prov = ReplyDraftRow.provenance
-        total = func.coalesce(
-            func.sum(
-                func.coalesce(prov["prompt_tokens"].astext.cast(Integer), 0)
-                + func.coalesce(prov["completion_tokens"].astext.cast(Integer), 0)
-            ),
-            0,
-        )
-        value = await self._session.scalar(
-            select(total).where(
-                ReplyDraftRow.brand_id == brand_id, ReplyDraftRow.created_at >= since
-            )
-        )
-        return int(value or 0)
-
-    async def ai_token_usage_combined_since(self, brand_id: UUID, since: datetime) -> int:
-        """``SELECT COALESCE(SUM(t), 0) FROM (<content revisions> UNION ALL <reply drafts>)``."""
-        from src.modules.content.infrastructure.orm import ContentItemRow, ContentRevisionRow
-
-        def _tokens(prov: Any) -> Any:
-            return func.coalesce(prov["prompt_tokens"].astext.cast(Integer), 0) + func.coalesce(
-                prov["completion_tokens"].astext.cast(Integer), 0
-            )
-
-        revisions = (
-            select(_tokens(ContentRevisionRow.provenance).label("tokens"))
-            .select_from(ContentRevisionRow)
-            .join(ContentItemRow, ContentItemRow.id == ContentRevisionRow.item_id)
-            .where(
-                ContentItemRow.brand_id == brand_id,
-                ContentRevisionRow.created_at >= since,
-                ContentRevisionRow.provenance["kind"].astext == "ai_generated",
-            )
-        )
-        drafts = select(_tokens(ReplyDraftRow.provenance).label("tokens")).where(
-            ReplyDraftRow.brand_id == brand_id, ReplyDraftRow.created_at >= since
-        )
-        combined = revisions.union_all(drafts).subquery("ai_usage")
-        value = await self._session.scalar(select(func.coalesce(func.sum(combined.c.tokens), 0)))
-        return int(value or 0)
-
     async def learning_signals(self, brand_id: UUID) -> list[dict[str, Any]]:
         rows = await self._session.scalars(
             select(LearningSignalRow)
@@ -601,3 +609,15 @@ class PostgresWhatsAppRepository:
             }
             for r in rows
         ]
+
+
+class PgIndependentWrites:
+    """D-072: ``fn(repo)`` runs on its own session and is **committed** before returning."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession] | None = None) -> None:
+        self._session_factory = session_factory
+
+    async def run(self, fn: Callable[[WhatsAppRepository], Awaitable[T]]) -> T:
+        factory = self._session_factory or get_session_factory()
+        async with independent_session(factory) as session:
+            return await fn(PostgresWhatsAppRepository(session))

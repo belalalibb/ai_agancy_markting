@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -110,6 +111,7 @@ def test_b1_u2_inbound_text_creates_conversation_and_message_then_duplicate_is_n
             "inbound": 1,
             "duplicates": 0,
             "status_updates": 0,
+            "ignored_status_updates": 0,  # SPRINT-10 A-3
             "unparsed": 0,
             "expired_drafts": [],
         }
@@ -119,6 +121,7 @@ def test_b1_u2_inbound_text_creates_conversation_and_message_then_duplicate_is_n
             "inbound": 0,
             "duplicates": 1,
             "status_updates": 0,
+            "ignored_status_updates": 0,  # SPRINT-10 A-3
             "unparsed": 0,
             "expired_drafts": [],
         }
@@ -186,24 +189,44 @@ async def test_b1_u3_statuses_update_outbound_delivery_status_and_error_code(
         )
     )
     with TestClient(wa_app) as client:
+        # SPRINT-10 A-3 ranks: ``sent ⇒ failed`` is **not** allowed any more (failed only from
+        # queued/ambiguous) ⇒ ignored; then ``sent ⇒ delivered`` moves forward.
+        res = _post(client, load_payload("status_failed"))
+        assert res.status_code == 200, res.text
+        assert res.json()["status_updates"] == 0 and res.json()["ignored_status_updates"] == 1
+        assert wa_repo.messages[outbound.id].delivery_status is DeliveryStatus.SENT
         res = _post(client, load_payload("status_delivered"))
         assert res.status_code == 200 and res.json()["status_updates"] == 1
         assert wa_repo.messages[outbound.id].delivery_status is DeliveryStatus.DELIVERED
-        res = _post(client, load_payload("status_failed"))
+        # A queued row takes ``failed`` with the error code.
+        queued = await wa_repo.insert_outbound(
+            outbound.model_copy(
+                update={
+                    "id": uuid4(),
+                    "wamid": "wamid.OUT0002",
+                    "delivery_status": DeliveryStatus.QUEUED,
+                }
+            )
+        )
+        failed_payload = load_payload("status_failed")
+        failed_payload["entry"][0]["changes"][0]["value"]["statuses"][0]["id"] = "wamid.OUT0002"
+        res = _post(client, failed_payload)
         assert res.status_code == 200 and res.json()["status_updates"] == 1
-        failed = wa_repo.messages[outbound.id]
+        failed = wa_repo.messages[queued.id]
         assert failed.delivery_status is DeliveryStatus.FAILED and failed.error_code == 131047
-        # Status for a wamid we never sent: verified ⇒ still 200, nothing updated.
+        # Status for a wamid we never sent: verified ⇒ still 200, nothing updated (ignored).
         unknown = load_payload("status_delivered")
         unknown["entry"][0]["changes"][0]["value"]["statuses"][0]["id"] = "wamid.NOBODY"
         res = _post(client, unknown)
         assert res.status_code == 200 and res.json()["status_updates"] == 0
+        assert res.json()["ignored_status_updates"] == 1
         # Unknown status label ⇒ unparsed, still 200.
         weird = load_payload("status_delivered")
         weird["entry"][0]["changes"][0]["value"]["statuses"][0]["status"] = "teleported"
         res = _post(client, weird)
         assert res.status_code == 200 and res.json()["unparsed"] == 1
     assert counters["wa_status_updates"] == 2
+    assert counters["wa_status_ignored"] == 2  # A-3
 
 
 # ---------------------------------------------------------------------- B1-U4 ---

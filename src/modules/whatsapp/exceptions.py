@@ -80,12 +80,24 @@ class CredentialsInvalidError(WhatsAppError):
     error = "whatsapp_credentials_invalid"
 
 
+class PhoneNumberInUseError(WhatsAppError):
+    """A-2: the ``phone_number_id`` is connected to another brand (pre-check or the unique
+    constraint ``uq_whatsapp_accounts_phone_number_id`` — never named in the response)."""
+
+    error = "whatsapp_phone_number_in_use"
+
+
 class ConversationNotFoundError(WhatsAppError):
     error = "whatsapp_conversation_not_found"
 
 
 class WindowClosedError(WhatsAppError):
     error = "whatsapp_window_closed"
+
+    def __init__(self, draft_status: str | None = None) -> None:
+        super().__init__()
+        # A-1: when an approved draft could not be sent, the persisted decision is reported.
+        self.draft_status = draft_status
 
 
 class ReauthRequiredError(WhatsAppError):
