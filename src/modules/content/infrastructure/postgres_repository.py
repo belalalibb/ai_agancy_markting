@@ -204,6 +204,10 @@ class PostgresContentRepository:
         ).all()
         return [_revision_to_domain(r) for r in rows]
 
+    async def get_revision(self, revision_id: UUID) -> ContentRevision | None:
+        row = await self._session.get(ContentRevisionRow, revision_id)
+        return _revision_to_domain(row) if row is not None else None
+
     # ------------------------------------------------------- A-5 budget ---
     async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:
         """``SUM((provenance->>'prompt_tokens')::int + (provenance->>'completion_tokens')::int)``

@@ -67,11 +67,20 @@ def test_accepts_live_graph_versions(monkeypatch: pytest.MonkeyPatch, alive: str
     assert Settings(_env_file=None).meta_graph_api_version == alive  # type: ignore[call-arg]
 
 
-def test_default_scopes_are_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_scopes_include_publishing_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SPRINT-07 B3 supersedes the SPRINT-03 read-only default: publishing (M4) needs
+    ``pages_manage_posts`` + ``instagram_content_publish``. The read scopes stay first, and
+    nothing beyond the five documented scopes is requested."""
     monkeypatch.delenv("META_OAUTH_SCOPES", raising=False)
     scopes = Settings(_env_file=None).meta_scopes_list  # type: ignore[call-arg]
-    assert scopes == ["pages_show_list", "pages_read_engagement", "instagram_basic"]
-    assert not any("manage" in s or "publish" in s for s in scopes)
+    assert scopes == [
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_manage_posts",
+        "instagram_basic",
+        "instagram_content_publish",
+    ]
+    assert "ads_management" not in scopes and "business_management" not in scopes
 
 
 def test_oauth_state_settings(settings: Settings) -> None:

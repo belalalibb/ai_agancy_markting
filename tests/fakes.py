@@ -564,6 +564,13 @@ class FakeContentRepository:
             :limit
         ]
 
+    async def get_revision(self, revision_id: UUID):  # noqa: ANN201
+        for revisions in self.revisions.values():
+            for revision in revisions:
+                if revision.id == revision_id:
+                    return revision
+        return None
+
     async def add_event(self, event):  # noqa: ANN001, ANN201
         self.events.setdefault(event.item_id, []).append(event)
         return event
@@ -843,3 +850,28 @@ class FakePublishJobRepository:
             key=lambda a: a.attempt_no,
         )
         return rows[-1].external_post_id if rows else None
+
+
+class FakePublisher:
+    """SPRINT-07 B5/B6: scripted ``Publisher``. ``outcomes`` maps ``job_id → PublishOutcome``
+    (default: success); ``calls`` counts invocations per ``job_id`` so B6-I3 can assert
+    *exactly once*. ``barrier`` (optional ``asyncio.Barrier``) makes two workers meet inside
+    ``publish`` to prove they never hold the same job."""
+
+    def __init__(self, default=None, *, barrier=None) -> None:  # noqa: ANN001
+        from src.modules.publishing.domain.models import PublishOutcome
+
+        self.default = default or PublishOutcome.success(
+            external_post_id="fake-post", permalink="https://fb.example/fake"
+        )
+        self.outcomes: dict[UUID, object] = {}
+        self.calls: dict[UUID, int] = {}
+        self.seen_creation_ids: list[str | None] = []
+        self.barrier = barrier
+
+    async def publish(self, job, revision, page_token_provider, *, last_creation_id=None):  # noqa: ANN001, ANN201
+        self.calls[job.id] = self.calls.get(job.id, 0) + 1
+        self.seen_creation_ids.append(last_creation_id)
+        if self.barrier is not None:
+            await self.barrier.wait()
+        return self.outcomes.get(job.id, self.default)

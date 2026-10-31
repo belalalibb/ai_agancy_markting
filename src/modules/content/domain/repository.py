@@ -3,7 +3,7 @@
 
 SPRINT-07 Part A changes:
 
-* **A-3** — ``next_revision_no`` is gone. Callers lock the aggregate with
+* **A-3** — the old "peek the next revision number" method is gone. Callers lock the aggregate with
   :meth:`ContentRepository.get_for_update` (``SELECT … FOR UPDATE``) and then call
   :meth:`ContentRepository.add_revision`, which assigns ``revision_no`` itself
   (``COALESCE(MAX(revision_no), 0) + 1`` inside the same transaction — safe under the lock).
@@ -71,6 +71,10 @@ class ContentRepository(Protocol):
 
     async def list_revisions(self, item_id: UUID, *, limit: int) -> list[ContentRevision]:
         """Newest first."""
+        ...
+
+    async def get_revision(self, revision_id: UUID) -> ContentRevision | None:
+        """SPRINT-07 B6: the exact revision a ``publish_jobs`` row points at."""
         ...
 
     async def add_event(self, event: ApprovalEvent) -> ApprovalEvent: ...

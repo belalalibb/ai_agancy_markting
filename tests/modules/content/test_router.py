@@ -862,9 +862,15 @@ def test_openapi_lists_exactly_the_content_routes(client: TestClient) -> None:
                 "unschedule",
                 "archive",
                 "generate",
+                "publish",
+                "publish/retry",
             )
         ),
     }
+    # SPRINT-07 B7-U3: content + publishing = 14 routes (operations) over 13 paths.
+    assert sum(len(paths[p]) for p in content_paths) == 14
+    assert set(paths[f"{b}/items/{{item_id}}/publish"]) == {"get"}
+    assert set(paths[f"{b}/items/{{item_id}}/publish/retry"]) == {"post"}
     assert set(paths[f"{b}/items"]) == {"get", "post"}
     assert set(paths[f"{b}/items/{{item_id}}/body"]) == {"put"}
 
@@ -1086,3 +1092,226 @@ def test_b5_gateway_errors_map_to_http_by_category(
     # No content was written by any of the failures.
     detail = client.get(f"{BASE}/items/{item_id}", headers=owner).json()
     assert [r["revision_no"] for r in detail["revisions"]] == [1]
+
+
+# ------------------------------------------------------- SPRINT-07 B7 publish status/retry --
+def _schedule_fb(client: TestClient, owner: dict[str, str], fake_repo, publish_repo):  # noqa: ANN001, ANN201
+    """approved → scheduled on Page 1002 with a queued job; returns ``(item_id, job)``."""
+    _active_connection(fake_repo)
+    item_id = _to_approved(client, owner)
+    when = datetime.now(tz=UTC) + timedelta(hours=1)
+    res = _act(
+        client, owner, item_id, "schedule", scheduled_for=when.isoformat(), target_page_id="1002"
+    )
+    assert res.status_code == 200, res.text
+    job = next(j for j in publish_repo.jobs.values() if str(j.item_id) == item_id)
+    return item_id, job
+
+
+async def _fail_job(  # noqa: ANN202
+    publish_repo, content_repo: FakeContentRepository, job, *, error_class, ambiguous: bool = False
+):  # noqa: ANN001
+    """Simulate the worker: lease, attempt, then ``failed`` + item ``publish_failed``."""
+    from src.modules.publishing.domain.models import AttemptOutcome, ErrorClass, PublishAttempt
+
+    now = datetime.now(tz=UTC)
+    leased = await publish_repo.lease_due_jobs(
+        now=job.run_at + timedelta(seconds=1), lease_until=now, owner="t:1", batch=10
+    )
+    assert [j.id for j in leased] == [job.id]
+    attempt = await publish_repo.start_attempt(
+        PublishAttempt(job_id=job.id, attempt_no=1, started_at=now)
+    )
+    await publish_repo.finish_attempt(
+        attempt.id,
+        outcome=AttemptOutcome.AMBIGUOUS if ambiguous else AttemptOutcome.PERMANENT_FAILURE,
+        finished_at=now,
+        error_class=error_class,
+        graph_error_code=None if ambiguous else 10,
+        graph_trace_id=None if ambiguous else "AbCdTrace",
+    )
+    from src.modules.publishing.domain.models import JobStatus
+
+    await publish_repo.complete_job(
+        job.id, status=JobStatus.FAILED, now=now, last_error_class=error_class
+    )
+    assert await content_repo.compare_and_set_status(
+        job.item_id,
+        expected=ContentStatus.SCHEDULED,
+        new=ContentStatus.PUBLISH_FAILED,
+        scheduled_for=None,
+        updated_at=now,
+    )
+    assert error_class is not ErrorClass.TOKEN_INVALID or True
+
+
+def test_b7_u1_publish_status_visibility_by_role(
+    client: TestClient,
+    store: FakeStore,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    content_repo: FakeContentRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    import asyncio
+
+    from src.modules.publishing.domain.models import ErrorClass
+
+    owner = as_(OWNER_ID)
+    grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    item_id, job = _schedule_fb(client, owner, fake_repo, publish_repo)
+
+    # Queued, no attempts yet — every role sees the job; VIEWER without the detail fields.
+    res = client.get(f"{BASE}/items/{item_id}/publish", headers=owner)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["job_id"] == str(job.id) and body["status"] == "queued"
+    assert body["attempts"] == [] and body["scheduled_by_tenant_id"] == str(OWNER_ID)
+
+    asyncio.run(
+        _fail_job(publish_repo, content_repo, job, error_class=ErrorClass.PERMISSION_DENIED)
+    )
+
+    for tenant in (OWNER_ID, AGENCY_ID):
+        detail = client.get(f"{BASE}/items/{item_id}/publish", headers=as_(tenant)).json()
+        assert detail["status"] == "failed"
+        assert detail["last_error_class"] == "permission_denied"
+        assert detail["attempts"][0]["error_class"] == "permission_denied"
+        assert detail["attempts"][0]["graph_error_code"] == 10
+        assert detail["attempts"][0]["graph_trace_id"] == "AbCdTrace"
+        assert detail["attempts"][0]["outcome"] == "permanent_failure"
+    viewer = client.get(f"{BASE}/items/{item_id}/publish", headers=as_(STRANGER_ID))
+    assert viewer.status_code == 200
+    vbody = viewer.json()
+    for hidden in (
+        "last_error_class",
+        "external_post_id",
+        "lease_owner",
+        "scheduled_by_tenant_id",
+    ):
+        assert hidden not in vbody
+    assert set(vbody["attempts"][0]) == {"attempt_no", "started_at", "finished_at", "outcome"}
+    assert vbody["attempts"][0]["outcome"] == "permanent_failure"
+    # Never Meta's message text anywhere.
+    assert "LEAK" not in viewer.text and "message" not in vbody["attempts"][0]
+
+
+def test_b7_u1_publish_status_404_when_never_scheduled_and_for_strangers(
+    client: TestClient, as_: Headers
+) -> None:
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner)["id"]
+    res = client.get(f"{BASE}/items/{item_id}/publish", headers=owner)
+    assert res.status_code == 404 and res.json()["detail"]["error"] == "no_publish_job"
+    assert (
+        client.get(f"{BASE}/items/{item_id}/publish", headers=as_(STRANGER_ID)).status_code == 404
+    )
+    assert client.get(f"{BASE}/items/{uuid4()}/publish", headers=owner).status_code == 404
+
+
+def test_b7_retry_requeues_non_ambiguous_failure(
+    client: TestClient,
+    store: FakeStore,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    content_repo: FakeContentRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    import asyncio
+
+    from src.modules.publishing.domain.models import ErrorClass, JobStatus
+
+    owner = as_(OWNER_ID)
+    grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
+    item_id, job = _schedule_fb(client, owner, fake_repo, publish_repo)
+    asyncio.run(_fail_job(publish_repo, content_repo, job, error_class=ErrorClass.RATE_LIMITED))
+    assert (
+        client.get(f"{BASE}/items/{item_id}", headers=owner).json()["status"] == "publish_failed"
+    )
+
+    # VIEWER may not retry; not-yet-failed items are 409 invalid_transition (checked below).
+    assert _act(client, as_(STRANGER_ID), item_id, "publish/retry").status_code == 403
+
+    before = datetime.now(tz=UTC)
+    res = _act(client, owner, item_id, "publish/retry")
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "scheduled"
+    jobs = sorted(
+        (j for j in publish_repo.jobs.values() if str(j.item_id) == item_id),
+        key=lambda j: j.created_at,
+    )
+    assert [j.status for j in jobs] == [JobStatus.FAILED, JobStatus.QUEUED]
+    assert before <= jobs[1].run_at <= datetime.now(tz=UTC)
+    assert jobs[1].attempt_count == 0 and jobs[1].scheduled_by_tenant_id == OWNER_ID
+    # New ``scheduled`` event with the actor (D-055), and the status endpoint shows the new job.
+    events = client.get(f"{BASE}/items/{item_id}", headers=owner).json()["approval_events"]
+    assert events[-1]["action"] == "scheduled" and events[-1]["note"] == "publish_retry"
+    status = client.get(f"{BASE}/items/{item_id}/publish", headers=owner).json()
+    assert status["job_id"] == str(jobs[1].id) and status["status"] == "queued"
+    # A second retry while the new job is active ⇒ 409 invalid_transition (item is scheduled).
+    again = _act(client, owner, item_id, "publish/retry")
+    assert again.status_code == 409 and again.json()["detail"]["error"] == "invalid_transition"
+
+
+def test_b7_u2_retry_after_ambiguous_outcome_is_409_manual_verification(
+    client: TestClient,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    content_repo: FakeContentRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    import asyncio
+
+    from src.modules.publishing.domain.models import ErrorClass
+
+    owner = as_(OWNER_ID)
+    item_id, job = _schedule_fb(client, owner, fake_repo, publish_repo)
+    asyncio.run(
+        _fail_job(
+            publish_repo,
+            content_repo,
+            job,
+            error_class=ErrorClass.AMBIGUOUS_OUTCOME,
+            ambiguous=True,
+        )
+    )
+    res = _act(client, owner, item_id, "publish/retry")
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"]["error"] == "manual_verification_required"
+    # Nothing changed: still publish_failed, still one (failed) job.
+    assert (
+        client.get(f"{BASE}/items/{item_id}", headers=owner).json()["status"] == "publish_failed"
+    )
+    assert len([j for j in publish_repo.jobs.values() if str(j.item_id) == item_id]) == 1
+    # The operator's way out: unschedule (publish_failed → approved) or archive still work.
+    assert _act(client, owner, item_id, "unschedule").status_code == 200
+
+
+def test_b7_retry_revalidates_target_like_schedule(
+    client: TestClient,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    content_repo: FakeContentRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    import asyncio
+
+    from src.modules.publishing.domain.models import ErrorClass
+
+    owner = as_(OWNER_ID)
+    item_id, job = _schedule_fb(client, owner, fake_repo, publish_repo)
+    asyncio.run(_fail_job(publish_repo, content_repo, job, error_class=ErrorClass.TOKEN_INVALID))
+    # The worker marked the connection reauth_required (B6-I5) ⇒ retry is refused until reconnect.
+    cid = next(iter(fake_repo.rows))
+    fake_repo.rows[cid] = fake_repo.rows[cid].model_copy(
+        update={"status": AccountStatus.REAUTH_REQUIRED}
+    )
+    res = _act(client, owner, item_id, "publish/retry")
+    assert res.status_code == 422 and res.json()["detail"]["error"] == "target_page_not_selected"
+    # Active again but scopes unverified ⇒ 409 reauth_required.
+    fake_repo.rows[cid] = fake_repo.rows[cid].model_copy(
+        update={"status": AccountStatus.ACTIVE, "scopes_verified": False}
+    )
+    res = _act(client, owner, item_id, "publish/retry")
+    assert res.status_code == 409 and res.json()["detail"]["error"] == "reauth_required"

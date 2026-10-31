@@ -138,3 +138,18 @@ class PublishInProgressError(ContentError):
 
     error = "publish_in_progress"
     http_status = 409
+
+
+class NoPublishJobError(ContentError):
+    """This item has never been scheduled — there is no publish job to show (B7)."""
+
+    error = "no_publish_job"
+    http_status = 404
+
+
+class ManualVerificationRequiredError(ContentError):
+    """The last attempt ended ambiguous (worker died mid-call): the post may already be live.
+    Verify on the Page manually, then edit (⇒ draft) and re-approve to publish again (B7)."""
+
+    error = "manual_verification_required"
+    http_status = 409

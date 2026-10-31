@@ -24,6 +24,7 @@ from src.modules.content.domain.models import (
     ContentRevision,
     public_provenance,
 )
+from src.modules.publishing.domain.models import PublishAttempt, PublishJob
 
 ChannelLiteral = Literal["facebook_page", "instagram"]
 StatusLiteral = Literal[
@@ -190,3 +191,101 @@ class ContentItemPage(BaseModel):
     items: list[ContentItemPublic] = Field(default_factory=list)
     next_cursor: str | None = None
     has_more: bool = False
+
+
+# ---------------------------------------------------------- SPRINT-07 B7 publish status ---
+class PublishAttemptPublic(BaseModel):
+    """VIEWER projection: when it ran and how it ended — no error codes, no external ids."""
+
+    attempt_no: int
+    started_at: datetime
+    finished_at: datetime | None = None
+    outcome: str | None = None
+
+    @classmethod
+    def from_domain(cls, attempt: PublishAttempt) -> PublishAttemptPublic:
+        return cls.model_validate(attempt.model_dump(include=set(cls.model_fields)))
+
+
+class PublishAttemptDetail(PublishAttemptPublic):
+    """OWNER/MANAGER projection: adds the internal error class and Meta's codes/trace id
+    (never Meta's message text)."""
+
+    error_class: str | None = None
+    graph_error_code: int | None = None
+    graph_error_subcode: int | None = None
+    graph_trace_id: str | None = None
+    external_post_id: str | None = None
+
+    @classmethod
+    def from_domain(cls, attempt: PublishAttempt) -> PublishAttemptDetail:
+        return cls.model_validate(attempt.model_dump(include=set(cls.model_fields)))
+
+
+class PublishStatusPublic(BaseModel):
+    """Current (active) or latest publish job of an item — VIEWER variant (A-4 style)."""
+
+    job_id: UUID
+    item_id: UUID
+    revision_id: UUID
+    channel: str
+    target_page_id: str
+    status: str
+    run_at: datetime
+    attempt_count: int
+    max_attempts: int
+    next_attempt_at: datetime | None = None
+    external_permalink: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    attempts: list[PublishAttemptPublic]
+
+    @classmethod
+    def from_domain(cls, job: PublishJob, attempts: list[PublishAttempt]) -> PublishStatusPublic:
+        return cls(
+            **_job_fields(job), attempts=[PublishAttemptPublic.from_domain(a) for a in attempts]
+        )
+
+
+class PublishStatusDetail(PublishStatusPublic):
+    """OWNER/MANAGER variant: adds ``last_error_class``, ``external_post_id``, the lease and
+    who authorised the job (D-055) plus detailed attempts."""
+
+    last_error_class: str | None = None
+    external_post_id: str | None = None
+    leased_until: datetime | None = None
+    lease_owner: str | None = None
+    scheduled_by_tenant_id: UUID
+    scheduled_by_user_id: UUID
+    attempts: list[PublishAttemptDetail]  # type: ignore[assignment]
+
+    @classmethod
+    def from_domain(cls, job: PublishJob, attempts: list[PublishAttempt]) -> PublishStatusDetail:
+        return cls(
+            **_job_fields(job),
+            last_error_class=job.last_error_class,
+            external_post_id=job.external_post_id,
+            leased_until=job.leased_until,
+            lease_owner=job.lease_owner,
+            scheduled_by_tenant_id=job.scheduled_by_tenant_id,
+            scheduled_by_user_id=job.scheduled_by_user_id,
+            attempts=[PublishAttemptDetail.from_domain(a) for a in attempts],
+        )
+
+
+def _job_fields(job: PublishJob) -> dict[str, Any]:
+    return {
+        "job_id": job.id,
+        "item_id": job.item_id,
+        "revision_id": job.revision_id,
+        "channel": job.channel,
+        "target_page_id": job.target_page_id,
+        "status": job.status,
+        "run_at": job.run_at,
+        "attempt_count": job.attempt_count,
+        "max_attempts": job.max_attempts,
+        "next_attempt_at": job.next_attempt_at,
+        "external_permalink": job.external_permalink,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }

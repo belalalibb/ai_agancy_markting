@@ -9,6 +9,9 @@ Swagger UI is served at ``/docs`` and ReDoc at ``/redoc``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -23,8 +26,14 @@ from src.core.http import build_http_client
 from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
 from src.modules.content import router as content_router
+from src.modules.publishing.infrastructure.meta_publisher import MetaPublisher
+from src.modules.publishing.scheduler import PostgresScheduler, scheduler_loop
 from src.modules.social_connect import router as social_connect_router
+from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
+from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.tenancy import router as tenancy_router
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -39,12 +48,38 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = getattr(app.state, "settings", None) or get_settings()
     app.state.settings = settings
     app.state.http_client = build_http_client(settings)  # D-068: single outbound client
+    app.state.scheduler_task = _start_scheduler(app, settings)  # SPRINT-07 B6 (None if off)
     try:
         yield
     finally:
+        task: asyncio.Task[None] | None = app.state.scheduler_task
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await app.state.http_client.aclose()
         if database.get_engine.cache_info().currsize > 0:
             await database.get_engine().dispose()
+
+
+def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | None:
+    """B6: the publish worker runs in-process only when ``SCHEDULER_ENABLED=true``."""
+    if not settings.scheduler_enabled:
+        return None
+    encryption = None
+    if settings.token_encryption_key is not None:
+        from src.core.security import get_token_encryption_service
+
+        encryption = get_token_encryption_service(settings)
+    scheduler = PostgresScheduler(
+        database.get_session_factory,
+        MetaPublisher(MetaGraphClient(settings, app.state.http_client)),
+        PostgresStatusMarker(),
+        settings,
+        encryption=encryption,
+    )
+    logger.info("scheduler: started (poll=%ss)", settings.scheduler_poll_seconds)
+    return asyncio.create_task(scheduler_loop(scheduler, settings.scheduler_poll_seconds))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

@@ -59,6 +59,8 @@ from src.modules.content.schemas import (
     ContentRevisionPublic,
     GenerateRequest,
     GenerationLogEntry,
+    PublishStatusDetail,
+    PublishStatusPublic,
     RejectRequest,
     ScheduleRequest,
     StatusLiteral,
@@ -574,6 +576,67 @@ async def archive_item(
     return await _act(
         service, resolver, brand_id, item_id, Action.ARCHIVE, actor.tenant_id, actor.user_id
     )
+
+
+# ------------------------------------------------------ SPRINT-07 B7 publish status ---
+@router.get(
+    f"{BRAND_PREFIX}/items/{{item_id}}/publish",
+    response_model=PublishStatusPublic | PublishStatusDetail,
+    summary="Publish status: current/latest job + attempts — all roles (VIEWER: reduced)",
+    responses={404: {"description": "content_not_found / no_publish_job / brand_not_found"}},
+)
+async def get_publish_status(
+    brand_id: UUID, item_id: UUID, actor: CurrentUser, service: Service, resolver: Resolver
+) -> PublishStatusPublic | PublishStatusDetail:
+    """Roles: OWNER, MANAGER, VIEWER. Two response models (A-4): OWNER/MANAGER receive
+    ``PublishStatusDetail`` (error classes, Graph codes/trace ids, external ids, lease, who
+    authorised); VIEWER receives ``PublishStatusPublic`` — attempts carry only
+    ``attempt_no/started_at/finished_at/outcome``. 404 ``no_publish_job`` if never scheduled."""
+    role = await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
+    try:
+        job, attempts = await service.publish_status(brand_id, item_id)
+    except ContentError as exc:
+        raise to_http(exc) from exc
+    if role is BrandRole.VIEWER:
+        return PublishStatusPublic.from_domain(job, attempts)
+    return PublishStatusDetail.from_domain(job, attempts)
+
+
+@router.post(
+    f"{BRAND_PREFIX}/items/{{item_id}}/publish/retry",
+    response_model=ContentItemPublic,
+    summary="publish_failed → scheduled (new queued job, run_at=now) — OWNER/MANAGER",
+    responses={
+        **_TRANSITION_RESPONSES,
+        409: {
+            "description": "invalid_transition / manual_verification_required (ambiguous) / "
+            "reauth_required / publish_in_progress"
+        },
+        422: {"description": "target_page_not_selected / instagram_requires_image"},
+    },
+)
+async def retry_publish(
+    brand_id: UUID,
+    item_id: UUID,
+    actor: CurrentUserFresh,
+    service: Service,
+    resolver: Resolver,
+) -> ContentItemPublic:
+    """Roles: OWNER, MANAGER. Only for ``publish_failed`` items whose last outcome was **not**
+    ambiguous (else 409 ``manual_verification_required`` — the post may already be live).
+    Re-validates the target like ``schedule`` and records a new ``scheduled`` event."""
+    role = await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        item = await service.retry_publish(
+            brand_id,
+            item_id,
+            actor_role=role,
+            actor_tenant_id=actor.tenant_id,
+            actor_user_id=actor.user_id,
+        )
+    except ContentError as exc:
+        raise to_http(exc) from exc
+    return ContentItemPublic.from_domain(item, current_body=await _body_of(service, item))
 
 
 @router.post(

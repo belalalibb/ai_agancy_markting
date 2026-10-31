@@ -47,6 +47,8 @@ from src.modules.content.exceptions import (
     InstagramNotLinkedError,
     InstagramRequiresImageError,
     InvalidTransitionError,
+    ManualVerificationRequiredError,
+    NoPublishJobError,
     PublishInProgressError,
     ReauthRequiredError,
     RejectNoteRequiredError,
@@ -61,7 +63,12 @@ from src.modules.content.prompts import (
     system_prompt,
     user_prompt,
 )
-from src.modules.publishing.domain.models import JobStatus, PublishJob
+from src.modules.publishing.domain.models import (
+    ErrorClass,
+    JobStatus,
+    PublishAttempt,
+    PublishJob,
+)
 from src.modules.publishing.domain.repository import PublishJobRepository
 from src.modules.publishing.exceptions import ActiveJobExistsError
 from src.modules.social_connect.domain.models import AccountStatus, ConnectedAccount, PageAsset
@@ -288,6 +295,74 @@ class ContentService:
         if item is None:
             raise ContentNotFoundError()
         return item
+
+    # ------------------------------------------------------ B7 publish status ---
+    async def publish_status(
+        self, brand_id: UUID, item_id: UUID
+    ) -> tuple[PublishJob, list[PublishAttempt]]:
+        """The active job if any, else the latest one, with its attempts (oldest first).
+        404 ``no_publish_job`` when the item was never scheduled."""
+        await self.get_item(brand_id, item_id)
+        job = await self._jobs.latest_job_for_item(item_id)
+        if job is None:
+            raise NoPublishJobError()
+        return job, await self._jobs.list_attempts(job.id)
+
+    async def retry_publish(
+        self,
+        brand_id: UUID,
+        item_id: UUID,
+        *,
+        actor_role: BrandRole,
+        actor_tenant_id: UUID,
+        actor_user_id: UUID,
+    ) -> ContentItem:
+        """B7: ``publish_failed → scheduled`` + a new ``queued`` job with ``run_at = now`` +
+        event ``scheduled`` (the new authorisation record, D-055). Re-validates the target
+        exactly like ``schedule`` (connection active, scopes, IG image). An **ambiguous** last
+        outcome ⇒ 409 ``manual_verification_required`` (the post may already be live)."""
+        item = await self._lock_item(brand_id, item_id)
+        now = datetime.now(tz=UTC)
+        if actor_role not in {BrandRole.OWNER, BrandRole.MANAGER}:
+            raise ContentInsufficientRoleError("only OWNER/MANAGER may retry a publish")
+        if item.status is not ContentStatus.PUBLISH_FAILED:
+            raise InvalidTransitionError(item.status, "publish_retry", "not publish_failed")
+        last = await self._jobs.latest_job_for_item(item.id)
+        if last is not None and last.last_error_class is ErrorClass.AMBIGUOUS_OUTCOME:
+            raise ManualVerificationRequiredError()
+        page = await self._validate_target(item, item.target_page_id)
+        moved = await self._repo.compare_and_set_status(
+            item.id,
+            expected=ContentStatus.PUBLISH_FAILED,
+            new=ContentStatus.SCHEDULED,
+            scheduled_for=now,
+            updated_at=now,
+        )
+        if not moved:
+            raise InvalidTransitionError(item.status, "publish_retry", "item changed concurrently")
+        scheduled = item.model_copy(
+            update={"status": ContentStatus.SCHEDULED, "scheduled_for": now, "updated_at": now}
+        )
+        try:
+            await self._jobs.create_job(
+                _job_for(item, scheduled, page, actor_tenant_id, actor_user_id, now)
+            )
+        except ActiveJobExistsError as exc:
+            raise PublishInProgressError() from exc
+        assert item.current_revision_id is not None  # noqa: S101 - publish_failed ⇒ has one
+        await self._repo.add_event(
+            ApprovalEvent(
+                item_id=item.id,
+                revision_id=item.current_revision_id,
+                action=ApprovalAction.SCHEDULED,
+                actor_tenant_id=actor_tenant_id,
+                actor_user_id=actor_user_id,
+                note="publish_retry",
+                created_at=now,
+            )
+        )
+        logger.info("content retry_publish: item=%s brand=%s", item.id, brand_id)
+        return scheduled
 
     # --------------------------------------------------------- transitions ---
     async def act(
@@ -521,6 +596,10 @@ class ContentService:
         ``media_refs[0].url`` ⇒ 422 ``instagram_requires_image``."""
         if scheduled_for is None or scheduled_for <= now + SCHEDULE_MIN_LEAD:
             raise ScheduleTooSoonError()
+        return await self._validate_target(item, page_id)
+
+    async def _validate_target(self, item: ContentItem, page_id: str | None) -> PageAsset:
+        """Target checks shared by ``schedule`` and ``publish/retry`` (B7)."""
         if page_id is None:
             raise TargetPageNotSelectedError()
         accounts = await self._connections.list_by_brand(item.brand_id)
