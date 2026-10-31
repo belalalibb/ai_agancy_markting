@@ -4227,3 +4227,243 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
     # Other tables untouched by the round-trip.
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 1
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ============================================================================
+# SPRINT-10 B-1 — Brand Brain on PostgreSQL (migration 0011)
+# ============================================================================
+BRAIN_PG = f"{API}/brands/{BRAND_ID}/brain"
+BRAIN_PROFILE_BODY = {
+    "products": [{"name": "Cold brew"}],
+    "audience": {"segments": ["students"]},
+    "tone": {"voice": "warm", "formality": "casual", "banned_phrases": ["cheap"]},
+    "goals": [{"kind": "sales", "target": "+20%", "horizon_days": 90}],
+}
+
+
+def _brain_client(integration_app: FastAPI) -> tuple[TestClient, dict[str, str]]:
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    return TestClient(integration_app), integration_headers(
+        integration_app.state.settings, OWNER_ID
+    )
+
+
+def test_b1_i1_profile_if_match_cas_and_revisions_on_pg(integration_app: FastAPI) -> None:
+    """B1-I1 — ``PUT /profile`` with ``If-Match`` ⇒ version bump + revision row (UNIQUE
+    brand/version); stale ``If-Match`` ⇒ 412 and nothing written; VIEWER-free read."""
+    client, owner = _brain_client(integration_app)
+    assert client.get(f"{BRAIN_PG}/profile", headers=owner).json()["version"] == 1
+    assert _run("SELECT COUNT(*) FROM brand_profiles", scalar=True) == 0  # reads never create
+
+    first = client.put(
+        f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+    )
+    assert first.status_code == 200, first.text
+    second = client.put(
+        f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+    )
+    assert second.status_code == 200 and second.json()["version"] == 2
+    stale = client.put(
+        f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+    )
+    assert stale.status_code == 412
+    assert stale.json()["detail"]["current_version"] == 2
+    assert (
+        _run(
+            "SELECT version FROM brand_profiles WHERE brand_id = :b", {"b": BRAND_ID}, scalar=True
+        )
+        == 2
+    )
+    assert [
+        v for (v,) in _rows("SELECT version FROM brand_profile_revisions ORDER BY version")
+    ] == [1, 2]
+    assert _run("SELECT tone->'banned_phrases' FROM brand_profiles", scalar=True) == ["cheap"]
+    with pytest.raises(IntegrityError, match="uq_brand_profile_revisions_brand_version"):
+        _run(
+            "INSERT INTO brand_profile_revisions (id, brand_id, version, snapshot, source, "
+            "created_at) VALUES (:id, :b, 2, '{}'::jsonb, 'human', now())",
+            {"id": uuid4(), "b": BRAND_ID},
+        )
+
+
+def test_b1_i2_competitor_limit_race_is_201_201_201_409_on_pg(integration_app: FastAPI) -> None:
+    """B1-I2 — four concurrent ``POST /competitors`` through two ASGI apps ⇒ exactly three
+    rows and ``[201, 201, 201, 409]`` (brand row lock serialises count-then-insert)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    from src.main import create_app
+
+    async def _race() -> list[int]:
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            responses = await asyncio.gather(
+                *[
+                    (c1 if i % 2 else c2).post(
+                        f"{BRAIN_PG}/competitors", json={"name": f"Rival {i}"}, headers=owner
+                    )
+                    for i in range(4)
+                ]
+            )
+        return sorted(r.status_code for r in responses)
+
+    assert asyncio.run(_race()) == [201, 201, 201, 409]
+    assert _run("SELECT COUNT(*) FROM brand_competitors", scalar=True) == 3
+
+
+def test_b1_i3_evidence_checks_keyset_and_refresh_from_real_tables_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """B1-I3 — ``ck_brand_evidence_kind_source`` rejects ``measured/public_web``;
+    ``POST /evidence/refresh`` measures the five internal metrics from the real
+    ``wa_conversations`` / ``wa_messages`` / ``publish_jobs`` tables; keyset paging holds."""
+    client, owner = _brain_client(integration_app)
+    with pytest.raises(IntegrityError, match="ck_brand_evidence_kind_source"):
+        _run(
+            "INSERT INTO brand_evidence (id, brand_id, subject_kind, subject_id, evidence_kind, "
+            "metric, value, confidence, source_kind, observed_at, created_at) VALUES (:id, :b, "
+            "'brand', :b, 'measured', 'followers_count', '{}'::jsonb, 0.5, 'public_web', now(), "
+            "now())",
+            {"id": uuid4(), "b": BRAND_ID},
+        )
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(account_id, wa_id=WA_CUSTOMER, last_inbound_at=now)
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, kind, body, "
+        "delivery_status, created_at) VALUES (:id, :c, :b, 'outbound', 'text', 'hi', 'sent', "
+        ":at)",
+        {"id": uuid4(), "c": conv, "b": BRAND_ID, "at": now + timedelta(seconds=90)},
+    )
+
+    refreshed = client.post(f"{BRAIN_PG}/evidence/refresh", headers=owner)
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["collected"] == 5
+    by_metric = {
+        m: v
+        for m, v in _rows(
+            "SELECT metric, value FROM brand_evidence WHERE brand_id = :b", {"b": BRAND_ID}
+        )
+    }
+    assert by_metric["wa_conversations_7d"] == {"count": 1, "window_days": 7}
+    assert by_metric["posting_frequency_7d"] == {"count": 0, "window_days": 7}
+    assert by_metric["wa_approval_rate_30d"] == {"unavailable": "no_data", "window_days": 30}
+    assert by_metric["avg_reply_latency_s"]["samples"] == 1
+    assert 85.0 <= by_metric["avg_reply_latency_s"]["seconds"] <= 95.0
+    assert all(
+        k == "measured" and s == "internal_db"
+        for k, s in _rows("SELECT evidence_kind, source_kind FROM brand_evidence")
+    )
+
+    page1 = client.get(f"{BRAIN_PG}/evidence", params={"limit": 2}, headers=owner).json()
+    assert len(page1["items"]) == 2 and page1["next_cursor"]
+    seen = [i["id"] for i in page1["items"]]
+    page2 = client.get(
+        f"{BRAIN_PG}/evidence", params={"limit": 2, "cursor": page1["next_cursor"]}, headers=owner
+    ).json()
+    seen += [i["id"] for i in page2["items"]]
+    page3 = client.get(
+        f"{BRAIN_PG}/evidence", params={"limit": 2, "cursor": page2["next_cursor"]}, headers=owner
+    ).json()
+    seen += [i["id"] for i in page3["items"]]
+    assert len(set(seen)) == 5 and page3["next_cursor"] is None
+
+
+def test_b1_i4_cost_log_feeds_budget_union_and_daily_report_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B1-I4 — ``ai_cost_log`` rows count in the shared daily budget (``UNION ALL``) and in
+    ``GET /brain/cost`` (OWNER only); the error-iff-category CHECK holds; no text column."""
+    client, owner = _brain_client(integration_app)
+    from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
+
+    def _cost(outcome: str, category: str | None, *, days_ago: int = 0) -> None:
+        _run(
+            "INSERT INTO ai_cost_log (id, brand_id, purpose, provider, model, credential_mode, "
+            "prompt_tokens, completion_tokens, estimated_cost_usd, latency_ms, prompt_version, "
+            "outcome, error_category, created_at) VALUES (:id, :b, 'brand_diagnosis', 'fake', "
+            "'fake-1', 'platform', 100, 50, 0.0003, 10, 'brand_diagnosis_v1', :o, :cat, "
+            "now() - make_interval(days => :d))",
+            {"id": uuid4(), "b": BRAND_ID, "o": outcome, "cat": category, "d": days_ago},
+        )
+
+    _cost("ok", None)
+    _cost("error", "timeout")
+    _cost("ok", None, days_ago=2)
+    with pytest.raises(IntegrityError, match="ck_ai_cost_log_error_iff_category"):
+        _cost("error", None)
+    columns = {
+        c
+        for (c,) in _rows(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'ai_cost_log'"
+        )
+    }
+    assert not columns & {"prompt", "output", "text", "body"}
+
+    async def _usage() -> int:
+        reset_db_caches()
+        from src.core import database
+
+        async with database.get_session_factory()() as session:
+            return await PgBudgetUsageReader(session).combined_usage_since(
+                BRAND_ID, datetime.now(tz=UTC) - timedelta(hours=24)
+            )
+
+    assert asyncio.run(_usage()) == 300  # two rows of 150 tokens inside 24 h
+
+    report = client.get(f"{BRAIN_PG}/cost", headers=owner)
+    assert report.status_code == 200, report.text
+    body = report.json()
+    assert body["total_calls"] == 3 and body["items"][0]["errors"] == 1
+    assert body["total_prompt_tokens"] == 300
+    manager = integration_headers(integration_app.state.settings, AGENCY_ID)
+    assert client.get(f"{BRAIN_PG}/cost", headers=manager).status_code in (403, 404)
+
+
+def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
+    """B1-M1 — ``head ⇒ 0010 ⇒ head``: the five 0011 tables disappear and come back with
+    their named constraints; 0010's partial index survives the round-trip."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    tables_0011 = {
+        "brand_profiles",
+        "brand_profile_revisions",
+        "brand_competitors",
+        "brand_evidence",
+        "ai_cost_log",
+    }
+
+    def _public_tables() -> set[str]:
+        return {t for (t,) in _rows("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+
+    assert tables_0011 <= _public_tables()
+    command.downgrade(cfg, "0010")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert not tables_0011 & _public_tables()
+    assert "uq_wa_reply_drafts_one_pending" in {
+        r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
+    }
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert tables_0011 <= _public_tables()
+    constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
+    assert {
+        "uq_brand_competitors_brand_name",
+        "uq_brand_profile_revisions_brand_version",
+        "ck_brand_evidence_kind_source",
+        "ck_ai_cost_log_error_iff_category",
+        "ck_brand_competitors_allowed_hosts",
+    } <= constraints
+    indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
+    assert {"ix_brand_evidence_lookup", "ix_ai_cost_log_brand_created"} <= indexes
