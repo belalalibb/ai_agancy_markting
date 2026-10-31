@@ -8,6 +8,7 @@ the B8 grant revoke can purge connections exactly like the SQL implementation.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from src.modules.auth.domain.models import RefreshSession, User
@@ -1264,3 +1265,207 @@ class FakeIndependentWrites:
     async def run(self, fn):  # noqa: ANN001, ANN201
         self.calls += 1
         return await fn(self.repo)
+
+
+# -------------------------------------------------------------- brand brain --
+class FakeBrandBrainRepository:
+    """In-memory :class:`BrandBrainRepository` (SPRINT-10 B-1). Mirrors the PG constraints
+    that the service relies on: UNIQUE(brand_id, name) on competitors (``IntegrityError``),
+    CAS on ``brand_profiles.version``, keyset order ``observed_at DESC, id DESC``."""
+
+    def __init__(self) -> None:
+        from src.modules.brand_brain.domain.models import (
+            BrandProfile,
+            BrandProfileRevision,
+            Competitor,
+            CostEntry,
+            Evidence,
+        )
+
+        self.profiles: dict[UUID, BrandProfile] = {}
+        self.revisions: list[BrandProfileRevision] = []
+        self.competitors: dict[UUID, Competitor] = {}
+        self.evidence: dict[UUID, Evidence] = {}
+        self.cost_entries: list[CostEntry] = []
+        self.locked_brands: list[UUID] = []
+        self.insert_profile_error: Exception | None = None
+
+    # profile
+    async def get_profile(self, brand_id: UUID):  # noqa: ANN201
+        return self.profiles.get(brand_id)
+
+    async def insert_profile(self, profile):  # noqa: ANN001, ANN201
+        if self.insert_profile_error is not None:
+            exc, self.insert_profile_error = self.insert_profile_error, None
+            raise exc
+        if profile.brand_id in self.profiles:
+            from sqlalchemy.exc import IntegrityError
+
+            raise IntegrityError("brand_profiles_pkey", {}, Exception())
+        self.profiles[profile.brand_id] = profile
+        return profile
+
+    async def update_profile_cas(self, profile, *, expected_version: int) -> bool:  # noqa: ANN001
+        current = self.profiles.get(profile.brand_id)
+        if current is None or current.version != expected_version:
+            return False
+        self.profiles[profile.brand_id] = profile
+        return True
+
+    async def add_revision(self, revision):  # noqa: ANN001, ANN201
+        self.revisions.append(revision)
+        return revision
+
+    async def list_revisions(self, brand_id: UUID, *, limit: int):  # noqa: ANN201
+        rows = [r for r in self.revisions if r.brand_id == brand_id]
+        rows.sort(key=lambda r: r.version, reverse=True)
+        return rows[:limit]
+
+    # competitors
+    async def list_competitors(self, brand_id: UUID):  # noqa: ANN201
+        rows = [c for c in self.competitors.values() if c.brand_id == brand_id]
+        return sorted(rows, key=lambda c: (c.created_at, c.id))
+
+    async def count_competitors(self, brand_id: UUID) -> int:
+        return sum(1 for c in self.competitors.values() if c.brand_id == brand_id)
+
+    async def get_competitor(self, brand_id: UUID, competitor_id: UUID):  # noqa: ANN201
+        c = self.competitors.get(competitor_id)
+        return c if c is not None and c.brand_id == brand_id else None
+
+    async def add_competitor(self, competitor):  # noqa: ANN001, ANN201
+        from sqlalchemy.exc import IntegrityError
+
+        for other in self.competitors.values():
+            if other.brand_id == competitor.brand_id and other.name == competitor.name:
+                raise IntegrityError("uq_brand_competitors_brand_name", {}, Exception())
+        self.competitors[competitor.id] = competitor
+        return competitor
+
+    async def delete_competitor(self, brand_id: UUID, competitor_id: UUID) -> bool:
+        c = self.competitors.get(competitor_id)
+        if c is None or c.brand_id != brand_id:
+            return False
+        del self.competitors[competitor_id]
+        return True
+
+    async def touch_competitor_refreshed(self, competitor_id: UUID, *, at) -> None:  # noqa: ANN001
+        c = self.competitors[competitor_id]
+        self.competitors[competitor_id] = c.model_copy(update={"refreshed_at": at})
+
+    async def lock_brand_for_competitors(self, brand_id: UUID) -> None:
+        self.locked_brands.append(brand_id)
+
+    # evidence
+    async def add_evidence(self, rows):  # noqa: ANN001, ANN201
+        for ev in rows:
+            self.evidence[ev.id] = ev
+        return rows
+
+    def _ordered(self, brand_id: UUID):  # noqa: ANN202
+        rows = [e for e in self.evidence.values() if e.brand_id == brand_id]
+        return sorted(rows, key=lambda e: (e.observed_at, e.id.int), reverse=True)
+
+    async def list_evidence(  # noqa: ANN201
+        self,
+        brand_id: UUID,
+        *,
+        subject_kind,  # noqa: ANN001
+        subject_id,  # noqa: ANN001
+        metric,  # noqa: ANN001
+        evidence_kind,  # noqa: ANN001
+        limit: int,
+        cursor,  # noqa: ANN001
+    ):
+        rows = self._ordered(brand_id)
+        if subject_kind is not None:
+            rows = [e for e in rows if e.subject_kind == subject_kind]
+        if subject_id is not None:
+            rows = [e for e in rows if e.subject_id == subject_id]
+        if metric is not None:
+            rows = [e for e in rows if e.metric == metric]
+        if evidence_kind is not None:
+            rows = [e for e in rows if e.evidence_kind == evidence_kind]
+        if cursor is not None:
+            last_at, last_id = cursor
+            rows = [
+                e
+                for e in rows
+                if e.observed_at < last_at or (e.observed_at == last_at and e.id.int < last_id.int)
+            ]
+        return rows[: limit + 1]
+
+    async def latest_evidence(self, brand_id: UUID, *, limit: int):  # noqa: ANN201
+        return self._ordered(brand_id)[:limit]
+
+    async def get_evidence_by_ids(self, brand_id: UUID, ids):  # noqa: ANN001, ANN201
+        wanted = set(ids)
+        return [e for e in self.evidence.values() if e.brand_id == brand_id and e.id in wanted]
+
+    # cost
+    async def cost_by_day(self, brand_id: UUID, *, since):  # noqa: ANN001, ANN201
+        from decimal import Decimal
+
+        from src.modules.brand_brain.domain.models import CostDay
+
+        buckets: dict[str, dict[str, Any]] = {}
+        for e in self.cost_entries:
+            if e.brand_id != brand_id or e.created_at < since:
+                continue
+            b = buckets.setdefault(
+                e.created_at.date().isoformat(),
+                {"calls": 0, "errors": 0, "pt": 0, "ct": 0, "cost": None},
+            )
+            b["calls"] += 1
+            b["errors"] += 1 if e.outcome.value == "error" else 0
+            b["pt"] += e.prompt_tokens or 0
+            b["ct"] += e.completion_tokens or 0
+            if e.estimated_cost_usd is not None:
+                b["cost"] = (b["cost"] or Decimal("0")) + e.estimated_cost_usd
+        return [
+            CostDay(
+                day=day,
+                calls=b["calls"],
+                errors=b["errors"],
+                prompt_tokens=b["pt"],
+                completion_tokens=b["ct"],
+                estimated_cost_usd=b["cost"],
+            )
+            for day, b in sorted(buckets.items(), reverse=True)
+        ]
+
+
+class FakeCostLogWriter:
+    """Records :class:`CostEntry` rows (B-2: wired into ``CostLoggingGateway``)."""
+
+    def __init__(self, repo: FakeBrandBrainRepository | None = None) -> None:
+        self.repo = repo
+        self.entries: list[Any] = []
+
+    async def write(self, entry) -> None:  # noqa: ANN001
+        self.entries.append(entry)
+        if self.repo is not None:
+            self.repo.cost_entries.append(entry)
+
+
+class FakeInternalMetricsReader:
+    """Returns a scripted :class:`InternalMetrics` (default: a brand with some activity)."""
+
+    def __init__(self) -> None:
+        from src.modules.brand_brain.service import InternalMetrics
+
+        self.metrics = InternalMetrics(
+            wa_conversations_7d=12,
+            wa_approval_rate_30d=0.75,
+            content_approval_rate_30d=0.6,
+            posting_frequency_7d=3,
+            avg_reply_latency_s=420.0,
+            wa_decisions_30d=8,
+            content_decisions_30d=5,
+            reply_samples=20,
+        )
+        self.calls: list[UUID] = []
+
+    async def read(self, brand_id: UUID, *, now):  # noqa: ANN001, ANN201
+        self.calls.append(brand_id)
+        return self.metrics
