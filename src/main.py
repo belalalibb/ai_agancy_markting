@@ -39,6 +39,7 @@ from src.modules.publishing.scheduler import (
 from src.modules.social_connect import router as social_connect_router
 from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
 from src.modules.tenancy import router as tenancy_router
+from src.modules.whatsapp.router import router as whatsapp_router
 from src.modules.whatsapp.webhook import router as whatsapp_webhook_router
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(channels_router)  # SPRINT-08 B-2: GET /channels[/{channel}]
     # SPRINT-09 B-1: public, signed Cloud API webhook (GET handshake + POST events).
     api_v1.include_router(whatsapp_webhook_router)
+    api_v1.include_router(whatsapp_router)  # SPRINT-09 B-2/B-3: /brands/{id}/whatsapp/…
     app.include_router(api_v1)
 
     @app.get("/health", tags=["System"], summary="Liveness probe")

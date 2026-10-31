@@ -12,6 +12,8 @@ Run with::
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -3119,8 +3121,6 @@ def _wa_payload(wamid: str, *, ts: int = 1761900000, body: str = "مرحبا") -
 
 
 def _wa_post(client: TestClient, payload: dict, *, secret: str | None = WA_APP_SECRET):
-    import json
-
     raw = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if secret is not None:
@@ -3299,4 +3299,206 @@ def test_b1_i1_signed_webhook_persists_inbound_and_dedupes_on_pg(
         ("wamid.PG0002", "inbound", "text", "ثانية", "received"),
     ]
     assert messages[0][5] == datetime.fromtimestamp(1761900000, tz=UTC)
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ================================================================ SPRINT-09 B-2 (M6) ===
+WA_BRAND = f"{API}/brands/{BRAND_ID}/whatsapp"
+WA_MESSAGES_PATH = f"/{WA_PHONE_NUMBER_ID}/messages"
+
+
+def _wa_conversation_row(
+    account_id: UUID, *, wa_id: str, last_inbound_at: datetime, status: str = "open"
+) -> UUID:
+    conv_id = uuid4()
+    _run(
+        "INSERT INTO wa_conversations (id, brand_id, account_id, wa_id, profile_name, "
+        "last_inbound_at, window_expires_at, unread_count, status, created_at, updated_at) "
+        "VALUES (:id, :b, :a, :w, 'Nour', :at, :exp, 1, :st, :at, :at)",
+        {
+            "id": conv_id,
+            "b": BRAND_ID,
+            "a": account_id,
+            "w": wa_id,
+            "at": last_inbound_at,
+            "exp": last_inbound_at + timedelta(hours=24),
+            "st": status,
+        },
+    )
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, body, "
+        "delivery_status, platform_timestamp, created_at) VALUES (:id, :c, :b, 'inbound', :wm, "
+        "'text', :body, 'received', :at, :at)",
+        {
+            "id": uuid4(),
+            "c": conv_id,
+            "b": BRAND_ID,
+            "wm": f"wamid.IN.{conv_id}",
+            "body": f"hello from {wa_id}",
+            "at": last_inbound_at,
+        },
+    )
+    return conv_id
+
+
+def test_b2_i1_keyset_pagination_over_25_conversations_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """B2-I1 — 25 open conversations, ``limit=10`` ⇒ exactly three pages (10/10/5), strictly
+    ordered ``last_inbound_at DESC, id DESC`` across page boundaries, no duplicates, no gaps,
+    ``next_cursor`` null on the last page; archived rows are excluded from the default
+    ``status=open`` listing and a VIEWER sees masked ``wa_id`` only."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    base = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
+    expected: list[tuple[datetime, UUID]] = []
+    for i in range(25):
+        # Two conversations share the same timestamp (i // 2) ⇒ the id tiebreaker matters.
+        at = base - timedelta(minutes=i // 2)
+        expected.append(
+            (at, _wa_conversation_row(account_id, wa_id=f"2010000000{i:02d}", last_inbound_at=at))
+        )
+    archived = _wa_conversation_row(
+        account_id,
+        wa_id="201999999999",
+        last_inbound_at=base + timedelta(hours=1),
+        status="archived",
+    )
+    expected.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    expected_ids = [str(cid) for _, cid in expected]
+
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        pages: list[dict] = []
+        cursor: str | None = None
+        for _ in range(5):
+            params = {"limit": 10} | ({"cursor": cursor} if cursor else {})
+            res = client.get(f"{WA_BRAND}/conversations", params=params, headers=owner)
+            assert res.status_code == 200, res.text
+            page = res.json()
+            pages.append(page)
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        assert [len(p["items"]) for p in pages] == [10, 10, 5]
+        assert pages[-1]["next_cursor"] is None
+        seen = [item["id"] for p in pages for item in p["items"]]
+        assert seen == expected_ids  # DESC order, ties broken by id DESC, no dup/gap
+        assert str(archived) not in seen
+        assert all(item["wa_id"].startswith("2010000000") for p in pages for item in p["items"])
+
+        arch = client.get(
+            f"{WA_BRAND}/conversations", params={"status": "archived"}, headers=owner
+        )
+        assert arch.status_code == 200 and [i["id"] for i in arch.json()["items"]] == [
+            str(archived)
+        ]
+
+        granted = client.post(
+            f"{API}/brands/{BRAND_ID}/grants",
+            json={"grantee_tenant_id": str(STRANGER_ID), "role": "viewer"},
+            headers=owner,
+        )
+        assert granted.status_code == 201, granted.text
+        viewer = client.get(
+            f"{WA_BRAND}/conversations",
+            params={"limit": 3},
+            headers=integration_headers(settings, STRANGER_ID),
+        )
+        assert viewer.status_code == 200, viewer.text
+        assert all(re.fullmatch(r"\.{3}\d{4}", i["wa_id"]) for i in viewer.json()["items"])
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+def test_b2_i2_send_text_persists_outbound_with_actor_and_replays_idempotently_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+) -> None:
+    """B2-I2 — the real send path against PostgreSQL: one Graph POST with the decrypted token
+    as Bearer, outbound row ``sent`` with ``wamid`` + ``sent_by_user_id``, conversation
+    ``last_outbound_at`` bumped; same ``Idempotency-Key`` ⇒ 200 and still one POST; a
+    conversation whose window closed ⇒ 422 ``template_required`` with no row and no call."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    open_conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(hours=2)
+    )
+    closed_conv = _wa_conversation_row(
+        account_id, wa_id="201111111111", last_inbound_at=now - timedelta(hours=30)
+    )
+    route = graph_mock.post(WA_MESSAGES_PATH).mock(
+        return_value=httpx.Response(
+            200, json={"messaging_product": "whatsapp", "messages": [{"id": "wamid.PGOUT1"}]}
+        )
+    )
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    key = str(uuid4())
+    with TestClient(integration_app) as client:
+        sent = client.post(
+            f"{WA_BRAND}/conversations/{open_conv}/messages",
+            json={"body": "أهلاً بك"},
+            headers=owner | {"Idempotency-Key": key},
+        )
+        assert sent.status_code == 201, sent.text
+        body = sent.json()
+        assert body["delivery_status"] == "sent" and body["duplicate"] is False
+        assert body["message"]["sent_by_user_id"] == str(USER_BY_TENANT[OWNER_ID])
+        assert "wamid" not in body["message"]  # platform ids stay server-side
+        assert len(route.calls) == 1
+        request = route.calls[0].request
+        assert request.headers["Authorization"] == f"Bearer {WA_SYSTEM_TOKEN}"
+        assert "access_token" not in str(request.url)
+        assert json.loads(request.content) == {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": WA_CUSTOMER,
+            "type": "text",
+            "text": {"preview_url": False, "body": "أهلاً بك"},
+        }
+
+        replay = client.post(
+            f"{WA_BRAND}/conversations/{open_conv}/messages",
+            json={"body": "أهلاً بك"},
+            headers=owner | {"Idempotency-Key": key},
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["duplicate"] is True
+        assert replay.json()["message"]["id"] == body["message"]["id"]
+        assert len(route.calls) == 1
+
+        closed = client.post(
+            f"{WA_BRAND}/conversations/{closed_conv}/messages",
+            json={"body": "late"},
+            headers=owner,
+        )
+        assert closed.status_code == 422, closed.text
+        assert closed.json()["detail"]["error"] == "whatsapp_window_closed"
+        assert len(route.calls) == 1
+
+    rows = _rows(
+        "SELECT direction, wamid, body, delivery_status, sent_by_user_id, client_message_id "
+        "FROM wa_messages WHERE conversation_id = :c AND direction = 'outbound'",
+        {"c": open_conv},
+    )
+    assert rows == [
+        ("outbound", "wamid.PGOUT1", "أهلاً بك", "sent", USER_BY_TENANT[OWNER_ID], UUID(key))
+    ]
+    assert (
+        _run(
+            "SELECT COUNT(*) FROM wa_messages "
+            "WHERE conversation_id = :c AND direction = 'outbound'",
+            {"c": closed_conv},
+            scalar=True,
+        )
+        == 0
+    )
+    (last_out,) = _rows(
+        "SELECT last_outbound_at FROM wa_conversations WHERE id = :c", {"c": open_conv}
+    )[0]
+    assert last_out is not None and last_out >= now - timedelta(seconds=5)
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
