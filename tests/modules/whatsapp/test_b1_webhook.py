@@ -106,10 +106,22 @@ def test_b1_u2_inbound_text_creates_conversation_and_message_then_duplicate_is_n
     with TestClient(wa_app) as client:
         first = _post(client, payload)
         assert first.status_code == 200, first.text
-        assert first.json() == {"inbound": 1, "duplicates": 0, "status_updates": 0, "unparsed": 0}
+        assert first.json() == {
+            "inbound": 1,
+            "duplicates": 0,
+            "status_updates": 0,
+            "unparsed": 0,
+            "expired_drafts": [],
+        }
         again = _post(client, payload)  # Meta redelivery of the same wamid
         assert again.status_code == 200
-        assert again.json() == {"inbound": 0, "duplicates": 1, "status_updates": 0, "unparsed": 0}
+        assert again.json() == {
+            "inbound": 0,
+            "duplicates": 1,
+            "status_updates": 0,
+            "unparsed": 0,
+            "expired_drafts": [],
+        }
 
     assert len(wa_repo.messages) == 1
     (message,) = wa_repo.messages.values()

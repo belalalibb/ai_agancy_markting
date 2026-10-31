@@ -118,3 +118,30 @@ class PermanentSendError(WhatsAppError):
     def __init__(self, code: int | None) -> None:
         super().__init__()
         self.code = code
+
+
+# ----------------------------------------------------------- reply drafts (B-3) ----
+class NoInboundToReplyError(WhatsAppError):
+    """The conversation's last message is outbound (or empty) — nothing to reply to."""
+
+    error = "no_inbound_to_reply"
+
+
+class DraftPendingError(WhatsAppError):
+    """A ``suggested`` draft already exists for the conversation — no stacking."""
+
+    error = "draft_pending"
+
+
+class DraftNotFoundError(WhatsAppError):
+    error = "whatsapp_draft_not_found"
+
+
+class DraftNotPendingError(WhatsAppError):
+    """The draft was already decided (approved/edited/rejected/expired)."""
+
+    error = "draft_not_pending"
+
+    def __init__(self, current_status: str) -> None:
+        super().__init__()
+        self.current_status = current_status

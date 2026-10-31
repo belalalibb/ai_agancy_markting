@@ -898,6 +898,9 @@ class FakeWhatsAppRepository:
         self.messages: dict[UUID, object] = {}
         self.drafts: dict[UUID, object] = {}
         self.signals: dict[UUID, object] = {}
+        # B-3: the content repository whose ``ai_generated`` revisions share the daily budget
+        # (mirrors the PG ``UNION ALL``); wired by the ``wa_app`` fixture.
+        self.content_repo: FakeContentRepository | None = None
 
     # ------------------------------------------------------------- accounts ----
     async def create_account(self, account):  # noqa: ANN001, ANN201
@@ -1170,6 +1173,13 @@ class FakeWhatsAppRepository:
             for d in self.drafts.values()
             if d.brand_id == brand_id and d.created_at >= since
         )
+
+    async def ai_token_usage_combined_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
+        """Mirror of the PG ``UNION ALL``: drafts + (optional) linked content repository."""
+        total = await self.ai_token_usage_since(brand_id, since)
+        if self.content_repo is not None:
+            total += await self.content_repo.ai_token_usage_since(brand_id, since)
+        return total
 
     async def learning_signals(self, brand_id: UUID):  # noqa: ANN201
         return [

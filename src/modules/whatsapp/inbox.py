@@ -54,6 +54,7 @@ from src.modules.whatsapp.exceptions import (
     WhatsAppTransientError,
     WindowClosedError,
 )
+from src.modules.whatsapp.learning import record_expired
 from src.modules.whatsapp.service import PostgresWhatsAppTokenProvider
 
 logger = logging.getLogger(__name__)
@@ -262,7 +263,8 @@ class WhatsAppInboxService:
             counters.increment("wa_send_ambiguous")
             self._log(conv, message, "ambiguous")
             # Pending suggestions are stale once a human replied (even ambiguously).
-            await self._repo.expire_pending_drafts(conv.id, now=now)
+            expired = await self._repo.expire_pending_drafts(conv.id, now=now)
+            await record_expired(self._repo, expired, now=now)  # B-3 (D-069)
             return message.model_copy(
                 update={"delivery_status": DeliveryStatus.AMBIGUOUS, "error_code": exc.code}
             )
@@ -277,7 +279,8 @@ class WhatsAppInboxService:
             del token
         await self._repo.set_delivery_status(message.id, DeliveryStatus.SENT, wamid=wamid)
         await self._repo.touch_outbound(conv.id, at=now)
-        await self._repo.expire_pending_drafts(conv.id, now=now)
+        expired = await self._repo.expire_pending_drafts(conv.id, now=now)
+        await record_expired(self._repo, expired, now=now)  # B-3 (D-069)
         counters.increment("wa_sent")
         self._log(conv, message, "sent")
         return message.model_copy(update={"delivery_status": DeliveryStatus.SENT, "wamid": wamid})

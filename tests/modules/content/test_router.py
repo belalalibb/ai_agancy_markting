@@ -1414,7 +1414,7 @@ def test_b7_u3_protected_route_count_and_openapi_operations(client: TestClient) 
     the content + publishing module exposes exactly 14 operations over 13 paths."""
     from tests.test_auth_guard import PROTECTED, PROTECTED_ROUTE_COUNT
 
-    assert PROTECTED_ROUTE_COUNT == 43, PROTECTED  # SPRINT-09 B-2: 34 + 9 whatsapp routes
+    assert PROTECTED_ROUTE_COUNT == 46, PROTECTED  # SPRINT-09: 34 + 9 (B-2) + 3 (B-3) whatsapp
     paths = client.get("/openapi.json").json()["paths"]
     content_paths = {p for p in paths if "/content/" in p}
     assert len(content_paths) == 13

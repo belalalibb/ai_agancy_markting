@@ -3502,3 +3502,172 @@ def test_b2_i2_send_text_persists_outbound_with_actor_and_replays_idempotently_o
     )[0]
     assert last_out is not None and last_out >= now - timedelta(seconds=5)
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ================================================================ SPRINT-09 B-3 (M6) ===
+def _wa_combined_usage(brand_id: UUID) -> int:
+    """The one ``UNION ALL`` budget query, run through the real PG repository."""
+
+    async def _go() -> int:
+        from src.modules.whatsapp.infrastructure.postgres_repository import (
+            PostgresWhatsAppRepository,
+        )
+
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            async with AsyncSession(eng) as session:
+                repo = PostgresWhatsAppRepository(session)
+                since = datetime.now(tz=UTC) - timedelta(hours=24)
+                return await repo.ai_token_usage_combined_since(brand_id, since)
+        finally:
+            await eng.dispose()
+
+    return asyncio.run(_go())
+
+
+def test_b3_i1_full_cycle_webhook_suggest_approve_edit_send_signal_budget_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+) -> None:
+    """B3-I1 — on PostgreSQL: signed inbound webhook ⇒ ``suggest-reply`` (``AI_PROVIDER=fake``,
+    zero Cloud API calls) ⇒ ``approve`` with an edit ⇒ one Graph POST, ``wa_messages`` row
+    ``outbound / sent`` carrying ``reply_draft_id`` + ``sent_by_user_id`` ⇒ one
+    ``wa_learning_signals`` row ``approved_after_edit`` with features only ⇒ the daily budget
+    (``UNION ALL`` of content revisions and reply drafts) counts the draft's tokens."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    _wa_account_row(integration_encryption)
+    route = graph_mock.post(WA_MESSAGES_PATH).mock(
+        return_value=httpx.Response(
+            200, json={"messaging_product": "whatsapp", "messages": [{"id": "wamid.PGREPLY1"}]}
+        )
+    )
+    now_ts = int(datetime.now(tz=UTC).timestamp())
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    final = "أهلاً بك! هل تقصد الباقة الشهرية أم السنوية؟"
+    with TestClient(integration_app) as client:
+        inbound = _wa_post(client, _wa_payload("wamid.PG_B3_IN", ts=now_ts, body="كم السعر؟"))
+        assert inbound.status_code == 200 and inbound.json()["inbound"] == 1
+        (conv_id,) = _rows("SELECT id FROM wa_conversations")[0]
+
+        suggested = client.post(
+            f"{WA_BRAND}/conversations/{conv_id}/suggest-reply",
+            json={"tone": "friendly", "language": "ar"},
+            headers=owner,
+        )
+        assert suggested.status_code == 201, suggested.text
+        draft = suggested.json()
+        assert draft["status"] == "suggested"
+        assert draft["provenance"]["kind"] == "ai_suggested"
+        assert draft["provenance"]["prompt_version"] == "wa-reply-v1"
+        assert len(route.calls) == 0
+
+        # Draft stacking is refused on PG too (EXISTS on the partial status).
+        again = client.post(
+            f"{WA_BRAND}/conversations/{conv_id}/suggest-reply", json={}, headers=owner
+        )
+        assert again.status_code == 409 and again.json()["detail"]["error"] == "draft_pending"
+
+        approved = client.post(
+            f"{WA_BRAND}/reply-drafts/{draft['id']}/approve",
+            json={"final_body": final},
+            headers=owner,
+        )
+        assert approved.status_code == 200, approved.text
+        body = approved.json()
+        assert body["draft"]["status"] == "edited" and body["draft"]["final_body"] == final
+        assert body["delivery_status"] == "sent"
+        assert body["message"]["reply_draft_id"] == draft["id"]
+        assert body["message"]["sent_by_user_id"] == str(USER_BY_TENANT[OWNER_ID])
+        assert len(route.calls) == 1
+        assert json.loads(route.calls[0].request.content)["text"]["body"] == final
+
+        # The decided draft cannot be re-decided.
+        twice = client.post(
+            f"{WA_BRAND}/reply-drafts/{draft['id']}/approve", json={}, headers=owner
+        )
+        assert twice.status_code == 409 and twice.json()["detail"]["error"] == "draft_not_pending"
+
+    rows = _rows(
+        "SELECT direction, wamid, body, delivery_status, sent_by_user_id, reply_draft_id "
+        "FROM wa_messages WHERE direction = 'outbound'"
+    )
+    assert rows == [
+        ("outbound", "wamid.PGREPLY1", final, "sent", USER_BY_TENANT[OWNER_ID], UUID(draft["id"]))
+    ]
+    d_status, d_final, d_by = _rows(
+        "SELECT status, final_body, decided_by_user_id FROM wa_reply_drafts WHERE id = :id",
+        {"id": UUID(draft["id"])},
+    )[0]
+    assert (d_status, d_final, d_by) == ("edited", final, USER_BY_TENANT[OWNER_ID])
+    signals = _rows(
+        "SELECT signal, edit_distance_ratio, prompt_version, model, credential_mode, "
+        "features::text, reply_draft_id FROM wa_learning_signals"
+    )
+    assert len(signals) == 1
+    sig, ratio, pv, model, mode, features_text, sig_draft = signals[0]
+    assert sig == "approved_after_edit" and 0 < ratio <= 1 and pv == "wa-reply-v1"
+    assert model and mode == "platform" and sig_draft == UUID(draft["id"])
+    features = json.loads(features_text)
+    assert set(features) == {"suggested_len", "final_len", "language", "has_question", "has_cta"}
+    assert features["final_len"] == len(final) and features["has_question"] is True
+    # D-069: no 12-char run of either text survives in the signal row.
+    for body_text in (draft["suggested_body"], final):
+        for i in range(len(body_text) - 11):
+            assert body_text[i : i + 12] not in features_text
+    # Budget: the UNION ALL sums the draft's tokens (no content revisions exist here).
+    prompt_tokens, completion_tokens = _rows(
+        "SELECT (provenance->>'prompt_tokens')::int, (provenance->>'completion_tokens')::int "
+        "FROM wa_reply_drafts"
+    )[0]
+    assert prompt_tokens + completion_tokens > 0
+    assert _wa_combined_usage(BRAND_ID) == prompt_tokens + completion_tokens
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+def test_b3_i2_budget_of_one_token_makes_suggest_reply_429_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """B3-I2 — ``AI_DAILY_TOKEN_BUDGET_PER_BRAND=1``: the first suggestion goes through
+    (usage 0 < 1), the second is refused with 429 ``generation_budget_exceeded`` — the very
+    SPRINT-07 A-5 code — because the UNION ALL now sees the first draft's tokens; a content
+    ``ai_generated`` revision alone also exhausts the WhatsApp budget."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv_a = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(minutes=5)
+    )
+    conv_b = _wa_conversation_row(
+        account_id, wa_id="201111111111", last_inbound_at=now - timedelta(minutes=4)
+    )
+    settings = integration_app.state.settings
+    integration_app.state.settings = settings.model_copy(
+        update={"ai_daily_token_budget_per_brand": 1}
+    )
+    from src.core.config import get_settings
+
+    integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    try:
+        with TestClient(integration_app) as client:
+            first = client.post(
+                f"{WA_BRAND}/conversations/{conv_a}/suggest-reply", json={}, headers=owner
+            )
+            assert first.status_code == 201, first.text
+            second = client.post(
+                f"{WA_BRAND}/conversations/{conv_b}/suggest-reply", json={}, headers=owner
+            )
+            assert second.status_code == 429, second.text
+            detail = second.json()["detail"]
+            assert detail["error"] == "generation_budget_exceeded"
+            assert detail["budget"] == 1 and detail["used"] >= 1
+            assert "Retry-After" in second.headers
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+        integration_app.state.settings = settings
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 1
+    assert _wa_combined_usage(BRAND_ID) >= 1
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")

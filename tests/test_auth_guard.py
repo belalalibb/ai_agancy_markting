@@ -66,7 +66,9 @@ def test_protected_route_count_is_reported() -> None:
     # SPRINT-09 B-2: +9 whatsapp (account ×3, conversations, messages, read, send, template,
     # archive) ⇒ 43. (The directive's "42" counted eight; the nine listed routes are
     # authoritative — documented in §6.)
-    assert PROTECTED_ROUTE_COUNT == 43, PROTECTED
+    # SPRINT-09 B-3: +3 (suggest-reply, reply-drafts approve, reply-drafts reject) ⇒ 46
+    # (directive says 45 for the same reason).
+    assert PROTECTED_ROUTE_COUNT == 46, PROTECTED
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)

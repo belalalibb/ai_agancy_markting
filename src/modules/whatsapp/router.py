@@ -26,9 +26,14 @@ from src.core.security import (
     TokenEncryptionService,
     get_token_encryption_service,
 )
+from src.modules.ai_gateway.dependencies import Gateway
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
-from src.modules.tenancy.dependencies import get_brand_access_resolver
+from src.modules.content.domain.repository import ContentRepository
+from src.modules.content.exceptions import ContentError
+from src.modules.content.router import get_content_repository
+from src.modules.content.router import to_http as content_to_http
+from src.modules.tenancy.dependencies import get_brand_access_resolver, get_brand_repository
 from src.modules.tenancy.domain.access import (
     CONNECTION_WRITE_ROLES,
     GRANT_ROLES,
@@ -36,6 +41,7 @@ from src.modules.tenancy.domain.access import (
     BrandAccessResolver,
     BrandRole,
 )
+from src.modules.tenancy.domain.repository import BrandRepository
 from src.modules.tenancy.exceptions import BrandNotFoundError, InsufficientRoleError, TenancyError
 from src.modules.tenancy.router import to_http as tenancy_to_http
 from src.modules.whatsapp.client import WhatsAppCloudClient
@@ -46,6 +52,10 @@ from src.modules.whatsapp.exceptions import (
     AccountNotFoundError,
     ConversationNotFoundError,
     CredentialsInvalidError,
+    DraftNotFoundError,
+    DraftNotPendingError,
+    DraftPendingError,
+    NoInboundToReplyError,
     PermanentSendError,
     RateLimitedSendError,
     ReauthRequiredError,
@@ -57,19 +67,24 @@ from src.modules.whatsapp.exceptions import (
 from src.modules.whatsapp.inbox import WhatsAppInboxService
 from src.modules.whatsapp.infrastructure.postgres_repository import PostgresWhatsAppRepository
 from src.modules.whatsapp.schemas import (
+    ApproveDraftRequest,
+    ApproveResultPublic,
     ConversationPage,
     ConversationPublic,
     ConversationStatePublic,
     MessagePublic,
     MessagesPage,
+    RejectDraftRequest,
     ReplyDraftPublic,
     SendResultPublic,
     SendTemplateRequest,
     SendTextRequest,
+    SuggestReplyRequest,
     WhatsAppAccountCreate,
     WhatsAppAccountPublic,
 )
 from src.modules.whatsapp.service import PostgresWhatsAppTokenProvider, WhatsAppAccountService
+from src.modules.whatsapp.suggestions import ReplySuggestionService
 
 router = APIRouter(tags=["WhatsApp — conversations (M6)"])
 
@@ -123,6 +138,29 @@ def get_inbox_service(repo: Repo, client: Client, encryption: Encryption) -> Wha
 
 Accounts = Annotated[WhatsAppAccountService, Depends(get_account_service)]
 Inbox = Annotated[WhatsAppInboxService, Depends(get_inbox_service)]
+ContentRepo = Annotated[ContentRepository, Depends(get_content_repository)]
+BrandRepo = Annotated[BrandRepository, Depends(get_brand_repository)]
+
+
+def get_suggestion_service(
+    repo: Repo,
+    content_repo: ContentRepo,
+    gateway: Gateway,
+    inbox: Inbox,
+    limiter: Limiter,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ReplySuggestionService:
+    return ReplySuggestionService(
+        repo,
+        content_repo,
+        gateway,
+        inbox,
+        limiter,
+        daily_token_budget=settings.ai_daily_token_budget_per_brand,
+    )
+
+
+Suggestions = Annotated[ReplySuggestionService, Depends(get_suggestion_service)]
 
 
 async def _authorise(
@@ -168,6 +206,13 @@ def to_http(exc: WhatsAppError) -> HTTPException:
     elif isinstance(exc, PermanentSendError):
         code = status.HTTP_422_UNPROCESSABLE_CONTENT
         detail["code"] = exc.code
+    elif isinstance(exc, NoInboundToReplyError | DraftPendingError):
+        code = status.HTTP_409_CONFLICT
+    elif isinstance(exc, DraftNotFoundError):
+        code = status.HTTP_404_NOT_FOUND
+    elif isinstance(exc, DraftNotPendingError):
+        code = status.HTTP_409_CONFLICT
+        detail["current_status"] = exc.current_status
     else:
         code = status.HTTP_400_BAD_REQUEST
     return HTTPException(code, detail=detail, headers=headers)
@@ -449,3 +494,108 @@ async def send_template(
     elif result.message.delivery_status.value == "ambiguous":
         response.status_code = status.HTTP_202_ACCEPTED
     return _send_response(result.message, duplicate=result.duplicate)
+
+
+# -------------------------------------------------------------- reply drafts (B-3) ---
+@router.post(
+    f"{BRAND_PREFIX}/conversations/{{conversation_id}}/suggest-reply",
+    response_model=ReplyDraftPublic,
+    status_code=status.HTTP_201_CREATED,
+    summary="AI reply suggestion (draft only, never sent) — OWNER/MANAGER",
+    responses={
+        409: {"description": "no_inbound_to_reply / draft_pending"},
+        429: {"description": "generation_rate_limited / generation_budget_exceeded (A-5)"},
+    },
+)
+async def suggest_reply(
+    brand_id: UUID,
+    conversation_id: UUID,
+    actor: CurrentUser,
+    resolver: Resolver,
+    suggestions: Suggestions,
+    brands: BrandRepo,
+    payload: SuggestReplyRequest | None = None,
+) -> ReplyDraftPublic:
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    payload = payload or SuggestReplyRequest()
+    brand = await brands.get(brand_id)
+    try:
+        draft = await suggestions.suggest(
+            brand_id,
+            conversation_id,
+            actor_tenant_id=actor.tenant_id,
+            brand_display_name=brand.name if brand is not None else "",
+            tone=payload.tone,
+            language=payload.language,
+        )
+    except WhatsAppError as exc:
+        raise to_http(exc) from exc
+    except ContentError as exc:  # rate limit / budget — same codes as SPRINT-07 A-5
+        raise content_to_http(exc) from exc
+    return ReplyDraftPublic.from_domain(draft, private=True)
+
+
+@router.post(
+    f"{BRAND_PREFIX}/reply-drafts/{{draft_id}}/approve",
+    response_model=ApproveResultPublic,
+    summary="Approve (optionally edit) a suggested reply, then send it — OWNER/MANAGER",
+    responses={
+        202: {"description": "sent once, outcome ambiguous (D-070)"},
+        409: {"description": "draft_not_pending"},
+        422: {"description": "whatsapp_window_closed — draft stays approved, nothing sent"},
+    },
+)
+async def approve_reply_draft(
+    brand_id: UUID,
+    draft_id: UUID,
+    actor: CurrentUserFresh,
+    resolver: Resolver,
+    suggestions: Suggestions,
+    inbox: Inbox,
+    response: Response,
+    payload: ApproveDraftRequest | None = None,
+) -> ApproveResultPublic:
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    payload = payload or ApproveDraftRequest()
+    conv: Conversation | None = None
+    try:
+        draft = await suggestions.get_pending_or_raise(brand_id, draft_id)
+        conv = await inbox.get_conversation(brand_id, draft.conversation_id)
+        outcome = await suggestions.approve(
+            brand_id, draft_id, actor_user_id=actor.user_id, final_body=payload.final_body
+        )
+    except WhatsAppError as exc:
+        await _handle_send_error(exc, inbox, conv)
+        raise  # pragma: no cover - _handle_send_error always raises
+    message = outcome.message
+    if message is not None and message.delivery_status.value == "ambiguous":
+        response.status_code = status.HTTP_202_ACCEPTED
+    return ApproveResultPublic(
+        draft=ReplyDraftPublic.from_domain(outcome.draft, private=True),
+        message=MessagePublic.from_domain(message) if message is not None else None,
+        delivery_status=message.delivery_status if message is not None else None,
+    )
+
+
+@router.post(
+    f"{BRAND_PREFIX}/reply-drafts/{{draft_id}}/reject",
+    response_model=ReplyDraftPublic,
+    summary="Reject a suggested reply (learning signal only) — OWNER/MANAGER",
+    responses={409: {"description": "draft_not_pending"}},
+)
+async def reject_reply_draft(
+    brand_id: UUID,
+    draft_id: UUID,
+    payload: RejectDraftRequest,
+    actor: CurrentUser,
+    resolver: Resolver,
+    suggestions: Suggestions,
+) -> ReplyDraftPublic:
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        draft = await suggestions.reject(
+            brand_id, draft_id, actor_user_id=actor.user_id, reason=payload.reason
+        )
+    except WhatsAppError as exc:
+        raise to_http(exc) from exc
+    return ReplyDraftPublic.from_domain(draft, private=True)

@@ -558,6 +558,32 @@ class PostgresWhatsAppRepository:
         )
         return int(value or 0)
 
+    async def ai_token_usage_combined_since(self, brand_id: UUID, since: datetime) -> int:
+        """``SELECT COALESCE(SUM(t), 0) FROM (<content revisions> UNION ALL <reply drafts>)``."""
+        from src.modules.content.infrastructure.orm import ContentItemRow, ContentRevisionRow
+
+        def _tokens(prov: Any) -> Any:
+            return func.coalesce(prov["prompt_tokens"].astext.cast(Integer), 0) + func.coalesce(
+                prov["completion_tokens"].astext.cast(Integer), 0
+            )
+
+        revisions = (
+            select(_tokens(ContentRevisionRow.provenance).label("tokens"))
+            .select_from(ContentRevisionRow)
+            .join(ContentItemRow, ContentItemRow.id == ContentRevisionRow.item_id)
+            .where(
+                ContentItemRow.brand_id == brand_id,
+                ContentRevisionRow.created_at >= since,
+                ContentRevisionRow.provenance["kind"].astext == "ai_generated",
+            )
+        )
+        drafts = select(_tokens(ReplyDraftRow.provenance).label("tokens")).where(
+            ReplyDraftRow.brand_id == brand_id, ReplyDraftRow.created_at >= since
+        )
+        combined = revisions.union_all(drafts).subquery("ai_usage")
+        value = await self._session.scalar(select(func.coalesce(func.sum(combined.c.tokens), 0)))
+        return int(value or 0)
+
     async def learning_signals(self, brand_id: UUID) -> list[dict[str, Any]]:
         rows = await self._session.scalars(
             select(LearningSignalRow)

@@ -58,10 +58,12 @@ def wa_repo() -> FakeWhatsAppRepository:
 
 
 @pytest.fixture
-def wa_app(app: FastAPI, wa_repo: FakeWhatsAppRepository) -> FastAPI:
-    """The fake-wired app with the WhatsApp repository overridden too."""
+def wa_app(app: FastAPI, wa_repo: FakeWhatsAppRepository, content_repo) -> FastAPI:  # noqa: ANN001
+    """The fake-wired app with the WhatsApp repository overridden too (B-3: the content
+    repository is linked so the shared daily token budget sums both features)."""
     from src.modules.whatsapp import router, webhook
 
+    wa_repo.content_repo = content_repo
     app.dependency_overrides[webhook._repo] = lambda: wa_repo
     app.dependency_overrides[router.get_whatsapp_repository] = lambda: wa_repo
     return app

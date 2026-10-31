@@ -161,4 +161,10 @@ class WhatsAppRepository(Protocol):
         """Tokens recorded in ``wa_reply_drafts.provenance`` since ``since`` (B-3 budget)."""
         ...
 
+    async def ai_token_usage_combined_since(self, brand_id: UUID, since: datetime) -> int:
+        """B-3: the A-5 daily budget shared by both AI features — **one** ``UNION ALL`` query
+        over ``content_revisions.provenance`` (``kind = ai_generated``) and
+        ``wa_reply_drafts.provenance`` for the brand since ``since``."""
+        ...
+
     async def learning_signals(self, brand_id: UUID) -> list[dict[str, Any]]: ...

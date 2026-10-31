@@ -60,6 +60,7 @@ from src.modules.whatsapp.domain.models import (
 )
 from src.modules.whatsapp.domain.repository import WhatsAppRepository
 from src.modules.whatsapp.infrastructure.postgres_repository import PostgresWhatsAppRepository
+from src.modules.whatsapp.learning import record_expired
 from src.modules.whatsapp.service import hash_verify_token
 
 logger = logging.getLogger(__name__)
@@ -255,7 +256,9 @@ class WebhookProcessor:
             return
         outcome.inbound += 1
         counters.increment("wa_inbound")
-        expired = await self._repo.expire_pending_drafts(conversation.id, now=datetime.now(tz=UTC))
+        now = datetime.now(tz=UTC)
+        expired = await self._repo.expire_pending_drafts(conversation.id, now=now)
+        await record_expired(self._repo, expired, now=now)  # B-3: ``expired`` signals (D-069)
         outcome.expired_drafts.extend(d.id for d in expired)
         logger.info(
             "wa inbound: brand=%s conv=%s kind=%s len=%d",
@@ -330,7 +333,9 @@ async def verify_webhook(
     summary="Cloud API events — signature mandatory (X-Hub-Signature-256)",
     status_code=status.HTTP_200_OK,
 )
-async def receive_webhook(request: Request, repo: Repo, encryption: Encryption) -> dict[str, int]:
+async def receive_webhook(
+    request: Request, repo: Repo, encryption: Encryption
+) -> dict[str, int | list[str]]:
     raw_body = await request.body()  # read exactly once, before any JSON parsing
     header = request.headers.get(SIGNATURE_HEADER)
     try:
@@ -367,4 +372,5 @@ async def receive_webhook(request: Request, repo: Repo, encryption: Encryption) 
         "duplicates": outcome.duplicates,
         "status_updates": outcome.status_updates,
         "unparsed": outcome.unparsed,
+        "expired_drafts": [str(d) for d in outcome.expired_drafts],  # B-3
     }
