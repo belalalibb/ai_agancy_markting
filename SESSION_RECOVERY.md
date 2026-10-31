@@ -72,6 +72,44 @@ pytest
 
 ---
 
+## 2-ب. إعادة بناء بيئة الساندبوكس بعد إعادة الضبط (Sandbox Rebuild — مُجرَّب 14 مرة حتى SPRINT-07)
+
+إعادة ضبط الساندبوكس تمسح PostgreSQL والاعتماديات وأشجار العمل (`git worktree`) **ولا تمسح `/home/user/webapp`**. الترتيب الذي ثبت عملياً:
+
+```bash
+# 1. المستودع: أعد ضبط الـremote بالتوكن (يُمرَّر في بداية الجلسة فقط — لا يُكتب في أي ملف)
+git -C /home/user/webapp remote set-url origin https://x-access-token:<TOKEN>@github.com/belalalibb/ai_agancy_markting.git
+git -C /home/user/webapp fetch origin --prune && git worktree prune
+
+# 2. PostgreSQL 17 + pgvector (apt من pgdg) — إن غاب /usr/lib/postgresql/17
+sudo apt-get install -y -qq postgresql-common && sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+sudo apt-get install -y -qq postgresql-17 postgresql-17-pgvector
+
+# 3. عنقود محلي بلا صلاحيات نظام — ⚠️ /var/run/postgresql غير قابل للكتابة بعد إعادة الضبط ⇒ وجّه المقبس إلى /tmp
+PGBIN=/usr/lib/postgresql/17/bin
+[ -d /tmp/pg17 ] || $PGBIN/initdb -D /tmp/pg17 -U aigos --auth=trust
+$PGBIN/pg_ctl -D /tmp/pg17 -o "-p 5433 -c listen_addresses=localhost -c unix_socket_directories=/tmp" -l /tmp/pg17.log start
+$PGBIN/psql -h localhost -p 5433 -U aigos -d postgres -c "CREATE DATABASE ai_growth_os_test"
+$PGBIN/psql -h localhost -p 5433 -U aigos -d ai_growth_os_test -c "CREATE EXTENSION IF NOT EXISTS vector"
+
+# 4. الاعتماديات + المتغيرات (alembic يقرأ DATABASE_URL لا TEST_DATABASE_URL)
+pip install -e ".[dev]"
+export DATABASE_URL=postgresql+asyncpg://aigos@localhost:5433/ai_growth_os_test
+export TEST_DATABASE_URL=$DATABASE_URL
+export AUTH_JWT_SECRET=$(python -c "import secrets;print(secrets.token_urlsafe(48))")
+
+# 5. تحقق
+$PGBIN/pg_ctl -D /tmp/pg17 status && pytest -q -x --no-cov tests/integration -k "b1_m1 or persistence" | tail -1
+```
+
+**قواعد مستخلصة:**
+- `pg_isready` قد لا يكون في `PATH`؛ استخدم `$PGBIN/pg_ctl … status`.
+- سكربت إعادة البناء بـ`set -e` يفشل **صامتاً** إذا كان في أنبوب (`| tail`)؛ شغّل الخطوات منفصلة أو تحقق من `SETUP_DONE` صراحةً.
+- المراجع (المخطط) يعمل في `git worktree add .rv origin/work/implementation` ليبقى `main` نظيفاً؛ الشجرة تُفقد عند إعادة الضبط وتُعاد بالأمر نفسه.
+- **ادفع بعد كل كتابة ملف** — إعادة الضبط لا تُنذر.
+
+---
+
 ## 3. قواعد صارمة للأمن والأسرار (Security & Secrets Policy)
 
 - **ممنوع نهائياً** تضمين أي مفاتيح API، أو توكنات، أو كلمات مرور داخل الكود، أو ملفات Markdown، أو رسائل الـ Commit.
