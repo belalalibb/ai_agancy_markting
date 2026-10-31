@@ -65,7 +65,7 @@
 - **ما هو:** مكتبة Python لـWhatsApp Cloud API: Webhook موقَّع، قوالب، وسائط، أزرار/قوائم، تكامل FastAPI أصيل، مكتوبة بأنواع صارمة.
 - **ما يفعله أفضل:** يختصر ~70% من كود M6 (تحليل Webhook، التحقق من التوقيع، بناء القوالب التفاعلية) بمكتبة مختبَرة تتبع إصدارات Graph.
 - **التكلفة:** تبعية خارجية صغيرة بمؤلف واحد أساسي (خطر الحافلة؛ لكن MIT + كود بسيط يمكن تثبيته/تفريعه)؛ يجب أن يمرّ عبر `meta_client`-مثيل لا بجوار D-064 (الأسرار في Bearer/الجسم).
-- **الحكم:** **ADOPT (COMPONENT) في M6** بشرطين: تثبيت الإصدار + اختبار تقاطع يُثبت أن `appsecret_proof`/التوقيع ومسار الأسرار متوافقان مع D-064؛ ويُضاف إلى `OPEN_SOURCE_CATALOG`.
+- **الحكم (مُحدَّث عند إصدار SPRINT-09 — D-071):** **EXTRACT** لا ADOPT: تُقرأ كمرجع لنماذج Webhook/التحقق من التوقيع/أشكال القوالب، ويُكتب عميل خفيف فوق `core/http.py` (D-068 يحصر `httpx`؛ D-070 يفرض تصنيف قبل/بعد الإرسال الذي لا تُقدّمه المكتبة). الحكم الأصلي للتاريخ: **ADOPT (COMPONENT) في M6** بشرطين: تثبيت الإصدار + اختبار تقاطع يُثبت أن `appsecret_proof`/التوقيع ومسار الأسرار متوافقان مع D-064؛ ويُضاف إلى `OPEN_SOURCE_CATALOG`.
 
 ### 5-هـ. Temporal مقابل «حلقة PostgreSQL» للجدولة (قرار M4 — SPRINT-07)
 | المعيار | Temporal (D-057) | حلقة PG (`SELECT … FOR UPDATE SKIP LOCKED` + مهلة قيادة) |
@@ -83,6 +83,6 @@
 | agency-agents | EXTRACT | `prompts.py` لكل محرك + `prompt_version` |
 | DSPy | WATCH ⇒ ADOPT مشروط | أداة أدمن خارج الطلب (M7+) خلف البوابة |
 | TensorZero | EXTRACT | `learning_signals` + `prompt_version` |
-| PyWa | ADOPT (M6) | وحدة `whatsapp` خلف قواعد D-064 |
+| PyWa | EXTRACT (D-071، كان ADOPT) | مرجع قراءة لوحدة `whatsapp`؛ عميل خفيف فوق `core/http.py` |
 | Temporal | ADOPT مؤجَّل | `Scheduler` Protocol؛ `PostgresScheduler` في M4 |
 | general_ai_core (خاص) | EXTRACT (10%) | `contract.py` 12 فئة + 3 طبقات + مسارا مفاتيح + منقّي — D-067/D-068/D-069 |

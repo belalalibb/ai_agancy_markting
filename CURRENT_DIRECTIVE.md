@@ -1,6 +1,6 @@
 # 🎯 CURRENT DIRECTIVE — التوجيه التنفيذي النشط
 
-> **المصدر الوحيد للمهمة الحالية.** SPRINT-07 رُوجع مستقلاً و**قُبل ودُمج** بواسطة المخطط (`main` @ `0ceb125`؛ التقرير في [`sprints/SPRINT-07_REVIEW.md`](sprints/SPRINT-07_REVIEW.md) — اقرأ §2 و§3 و§4 قبل البدء: فيها أجوبة أسئلتك الثلاثة والملاحظات التي يُغلقها Part A). هذا التوجيه يُصدر **SPRINT-08 = المحطة M5**.
+> **المصدر الوحيد للمهمة الحالية.** SPRINT-08 رُوجع مستقلاً و**قُبل ودُمج** بواسطة المخطط (`main` @ `e414c5a`؛ التقرير في [`sprints/SPRINT-08_REVIEW.md`](sprints/SPRINT-08_REVIEW.md) — اقرأ §3 (جوابا سؤاليك) و**§4 كاملاً** (ثلاث ثغرات أُثبتت بالتجربة ويُغلقها Part A هنا). هذا التوجيه يُصدر **SPRINT-09 = الجزء A (F1/F2/F3) + المحطة M6 (WhatsApp Cloud API)**.
 
 ---
 
@@ -8,46 +8,60 @@
 
 | البند | القيمة |
 |---|---|
-| **معرف المهمة** | `SPRINT-08-MULTI-PLATFORM-READINESS` |
-| **النوع** | Part A: تصحيحات إلزامية من مراجعة SPRINT-07 (A-1..A-4) · Part B: **M5 جاهزية تعدد المنصات** — تجريد `Channel`/`Publisher` بسجل محوّلات، Meta مرجعاً، LinkedIn/X/TikTok محوّلات **هيكلية** بلا اعتمادات ولا نداء شبكي، مصفوفة التفعيل كبيانات تُقرأ من API · **لا هجرة جديدة** (انظر B-1 — `channel` يبقى VARCHAR وقيد CHECK يُوسَّع بهجرة **صغيرة واحدة** فقط إن تعذّر بغيرها) |
+| **معرف المهمة** | `SPRINT-09-WHATSAPP-CONVERSATIONS` |
+| **النوع** | Part A: إغلاق ثلاث ثغرات سلوكية موروثة من SPRINT-07 (F1 CHECK مقابل الأرشفة · F2 إعادة POST ذي أثر جانبي — **D-070** · F3 قفل عبر الشبكة + مسح `media_refs`) · Part B: **M6 — محادثات WhatsApp Cloud API**: Webhook موقَّع، تكرار `wamid`، نافذة 24 ساعة مقابل القوالب، صندوق وارد موحَّد معزول بالعلامة، **ردّ مقترح بالذكاء الاصطناعي خلف موافقة بشرية (D-055) + إشارة تعلّم (D-069)**. عميل خفيف فوق `core/http.py` (**D-071** — لا PyWa كتبعية). **كل الاختبارات تعمل في CI بلا WABA حية.** |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
-| **يبدأ من** | `main` @ `21ff44d` (دمج PR #23 — هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
-| **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-08: multi-platform readiness (M5) — channel registry + structural adapters + SPRINT-07 review fixes` |
-| **الكوميتات** | **ثلاثة**: Part A ⇒ Part B-1 (سجل القنوات + نقل Meta خلفه + هجرة 0007 إن لزمت) ⇒ Part B-2 (المحوّلات الهيكلية + مصفوفة التفعيل + API). كل كوميت يمرّ الحزمة كاملة وحده |
-| **تبعيات جديدة** | **لا شيء.** لا SDK لأي منصة (`linkedin`, `tweepy`, `tiktok` … ممنوعة — تقع تحت D-068 بالروح وإن لم تكن في قائمة `banned-api`؛ **أضفها إليها**) |
-| **الحجم المتوقع** | ~700 سطر كود + ~700 سطر اختبارات |
+| **يبدأ من** | `main` @ *(SHA دمج PR التوجيه — يُثبَّت في `WORK_STATE.md` §6)*. أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-09: WhatsApp conversations (M6) + SPRINT-07 latent fixes (F1/F2/F3)` |
+| **الكوميتات** | **أربعة**: Part A ⇒ B-1 (العميل + Webhook + التخزين + هجرة 0009) ⇒ B-2 (صندوق الوارد + الإرسال + النافذة/القوالب) ⇒ B-3 (ردّ مقترح + موافقة + إشارة تعلّم). كل كوميت يمرّ الحزمة كاملة وحده |
+| **تبعيات جديدة** | **لا شيء.** `hmac`/`hashlib` من المكتبة القياسية للتوقيع؛ `httpx` عبر `core/http.py` فقط. **`pywa` ممنوعة** كاستيراد (أضفها إلى `banned-api`) — تُقرأ كمرجع فقط (D-071) |
+| **الحجم المتوقع** | Part A ~250 سطراً · Part B ~1400 سطر كود + ~1500 سطر اختبارات |
 | **تاريخ الإصدار** | 2026-10-31 |
 
 ---
 
 ## 0. لماذا؟
 
-1. **A-1 (مراجعة §4-أ):** `main.py:68-72` يبني `MetaPublisher` بـ`encryption=None` حين يغيب `TOKEN_ENCRYPTION_KEY`؛ مع `SCHEDULER_ENABLED=true` تنتج حلقة تعمل وتُفشل كل مهمة بـ`connection_unavailable` بصمت. نشر فعلي بلا مفتاح تشفير **خطأ إعداد** لا حالة تشغيلية ⇒ يُرفض الإقلاع.
-2. **A-2 (مراجعة §4-ب، درس 17):** `pyproject.toml [tool.coverage.run]` بلا `concurrency` ⇒ ما يُنفَّذ داخل `greenlet_spawn` (كل `flush()/execute()` لـSQLAlchemy async) غير مرئي؛ `publishing/infrastructure/postgres_repository.py` 77% ظاهرياً و84% فعلياً. أرقام التغطية يجب أن تقيس ما يحدث.
-3. **A-3 (مراجعة §3-2):** قرار المخطط على سؤالك: **عمود `publish_jobs.max_attempts` مصدر الحقيقة لكل مهمة؛ الإعداد `PUBLISH_MAX_ATTEMPTS` هو ما يُكتب فيه عند الإنشاء** (السياسة عند الإنشاء، الدليل في الصف). الآن `_job_for()` يعتمد على `server_default`.
-4. **A-4 (مراجعة §4-ج):** B7-U3 منفَّذ كتأكيدات في ملفين بلا دالة باسمه؛ `pytest -k b7_u3` ⇒ 0.
-5. **Part B (M5):** اليوم `Channel` تعداد بقيمتين داخل `content/domain/models.py:22`، و`CHANNEL_LIMITS` و`REQUIRED_PUBLISH_SCOPES` و`instagram_image_url` و`MetaPublisher` **كلها تعرف Meta بالاسم** في أربعة ملفات. إضافة منصة ثالثة اليوم = لمس `content/service.py` و`publishing/scheduler.py` و`main.py` معاً. M5 يجعل إضافة منصة = **ملف محوّل واحد + صف في السجل**، ويُظهر للمالك **مصفوفة صريحة** بما يلزم (حساب مطوّر، مراجعة تطبيق، OAuth، حدود) لتفعيل كل منصة — بلا كتابة سطر شبكي واحد لمنصة لا نملك اعتمادها (قرار `REPOSITORY_EVALUATIONS.md` §5: لا Postiz/Mixpost؛ نبني التجريد الرقيق فقط).
+1. **F1 (مراجعة §4-F1 — مُثبَت بـ`psql`):** CHECK `ck_content_items_published_at_iff_published` (0006) يرفض `archived` مع `published_at`، و`compare_and_set_status` يحتفظ به عمداً ⇒ أرشفة أي منشور منشور فعلياً = `CheckViolationError` = 500. آلة الحالات تُعلن الانتقال وقاعدة البيانات تمنعه.
+2. **F2 (مراجعة §4-F2 — مُثبَت بـ`respx`: POST `/feed` استُدعي مرتين على 502 وعلى `ReadTimeout`):** `_request_absolute` يُعيد كل الطرق. إن كان الفشل **بعد** أن نفّذ Graph النشر ⇒ منشور مكرَّر، أي خرق D-055 وإفراغ مفهوم «النتيجة المبهمة» من معناه. القرار **D-070**: إعادة المحاولة قرار دلالي — GET فقط؛ POST ذو أثر جانبي يُرسَل مرة ويُصنَّف قبل/بعد الإرسال. **يُطبَّق على عميل WhatsApp من اليوم الأول.**
+3. **F3 (مراجعة §4-F3 — مُثبَت على PG: المراجعة 2 `media_refs='[]'`):** `generate()` يكتب مراجعة بلا `media_refs` فيمسح صورة إنستغرام؛ ويحمل `FOR UPDATE` + اتصال PG طوال `gateway.complete()`.
+4. **M6:** أول قناة **ثنائية الاتجاه** في المنصة. القيمة للعميل الأول (وكالة/علامة عربية): كل محادثات واتساب لكل علامة في صندوق واحد، مع ردّ مقترح يوفّر الوقت **لكن لا يُرسَل شيء إلى عميل حقيقي دون موافقة بشر** (D-055) — وكل موافقة/تعديل/رفض على الردّ المقترح يُغذّي حلقة التعلّم (D-069) بإشارات مجرَّدة لا نصوصاً. الاعتماد (توكن النظام + `phone_number_id` + `app_secret` للتوقيع) **لكل علامة BYOK** مشفَّر بـ`TokenEncryptionService` (D-058)، فتعمل الدورة كاملة في CI بلا WABA، ويكفي حقن الاعتماد لتعمل حياً.
 
 ---
 
 ## 1. النطاق
 
-**داخل:** A-1..A-4؛ `ChannelDefinition` + `ChannelRegistry` في `src/modules/publishing/channels/`؛ نقل `CHANNEL_LIMITS`/`REQUIRED_PUBLISH_SCOPES`/قواعد الوسائط/`Publisher` الخاص بـMeta خلف السجل **بلا تغيير سلوكي** (كل اختبارات SPRINT-06/07 تمرّ كما هي)؛ محوّلات هيكلية `linkedin`/`x`/`tiktok` بحالة `activation_status=not_configured` تُرجع `PublishOutcome.failure(channel_not_activated)` بلا أي نداء؛ `GET /api/v1/channels` (القدرات والمصفوفة)؛ منع `schedule` على قناة غير مفعَّلة بـ422 `channel_not_activated`؛ توسيع `ck_content_items_channel` و`ChannelLiteral`.
-**خارج (ممنوع):** أي OAuth/نداء شبكي/SDK لـLinkedIn/X/TikTok؛ جداول اعتمادات منصات جديدة (تأتي مع تفعيل كل منصة في سبرنت خاص بها بعد قرار المالك)؛ فيديو/كاروسيل؛ منطق «أفضل وقت للنشر»؛ تغيير آلة الحالات (تبقى 56 خلية)؛ أي لمس لـ`ai_gateway/**` عدا قائمة `banned-api`.
+**داخل:** A-1..A-3؛ وحدة `src/modules/whatsapp/` (عميل Cloud API خفيف، Webhook GET/POST، `conversations`/`messages`/`whatsapp_accounts`/`reply_drafts` + إشارة تعلّم، صندوق وارد، إرسال نص داخل النافذة، إرسال قالب خارجها، ردّ مقترح عبر `AIGateway` بغرض جديد `reply_suggestion`، موافقة/تعديل/رفض)؛ هجرتان: `0008_published_at_check` (Part A) و`0009_whatsapp` (B-1)؛ جدول رؤية؛ `banned-api` += `pywa`.
+**خارج (ممنوع):** تنزيل/تخزين وسائط الرسائل (نخزّن `media_id` + النوع فقط؛ التنزيل M7+)؛ Flows/الرسائل التفاعلية (أزرار/قوائم)؛ إدارة القوالب (إنشاء/تعديل — نُرسل قالباً **بالاسم** فقط)؛ تسجيل WABA عبر Embedded Signup (الاعتماد يُدخل يدوياً)؛ ردّ **تلقائي** بلا موافقة (حتى خلف إعداد)؛ أي لمس لـ`ai_gateway/**` عدا إضافة `"reply_suggestion"` إلى `Purpose` وقائمة `banned-api`؛ تغيير آلة حالات المحتوى (تبقى 56 خلية)؛ تفعيل منصة ثالثة من مصفوفة M5 (مؤجَّل #17).
 
 ---
 
 ## 2. المواصفات
 
-### 2-0. القواعد الحاكمة (D-055 / D-064 / D-068 — إلزامية)
+### 2-0. القواعد الحاكمة (D-055 / D-064 / D-068 / D-070 — إلزامية)
 
-**(أ) لا نداء لمنصة غير مفعَّلة:** المحوّل الهيكلي **لا يستورد `httpx`** ولا يملك عميلاً؛ `publish()` فيه يُعيد `PublishOutcome.failure(ErrorClass.CHANNEL_NOT_ACTIVATED)` فوراً. اختبار حارس: `grep -rn "import httpx" src/modules/publishing/channels/` ⇒ **فارغ**، وأي محوّل غير Meta لا يحوي سلسلة `https://`.
+**(أ) لا رسالة إلى عميل حقيقي بلا فاعل بشري:** كل `POST …/messages` صادر يحمل `sent_by_user_id` غير فارغ؛ الردّ المقترح يُخزَّن في `reply_drafts` بحالة `suggested` ولا يلمس الشبكة؛ **لا** إعداد من نوع `WHATSAPP_AUTO_REPLY`. اختبار حارس: `grep -rn "auto_reply\|AUTO_REPLY" src` ⇒ فارغ.
 
-**(ب) السجل مصدر الحقيقة الوحيد للقناة:** `CHANNEL_LIMITS` و`REQUIRED_PUBLISH_SCOPES` و`instagram_image_url` **تُحذف** من `content/` وتُستبدل بقراءة `registry.get(channel).limits / .required_scopes / .validate_media(media_refs)`. grep قبول: `grep -rn "CHANNEL_LIMITS\|REQUIRED_PUBLISH_SCOPES\|instagram_image_url" src` ⇒ **فارغ**.
+**(ب) توقيع Webhook إلزامي ولا تجاوز:** `POST /webhooks/whatsapp` يرفض بـ**401** أي جسم بلا `X-Hub-Signature-256` صالح (`hmac.compare_digest(sha256(app_secret, raw_body))`)؛ لا إعداد لتعطيل التحقق. الجسم الخام يُقرأ **مرة واحدة** قبل أي تحليل JSON. التحقق يتم ضدّ `app_secret` **العلامة** المطابقة لـ`phone_number_id` في الحمولة — وإن لم يُعرف `phone_number_id` ⇒ 401 أيضاً (لا يُسرَّب أيّ تفصيل).
 
-**(ج) جدول الرؤية لا يتغيّر** (SPRINT-07 §2-0-ب يبقى حرفياً). `GET /channels` متاح لكل مستخدم مُصادَق (لا يحمل أسراراً ولا بيانات علامة؛ قدرات ثابتة للمنصة).
+**(ج) D-064 في العميل:** توكن النظام في `Authorization: Bearer` فقط؛ لا سرّ في query string ولا في السجلات؛ `WhatsAppAccount.encrypted_system_token` بـ`repr=False`؛ التوكن يُفكّ لحظة النداء و`del` في `finally` (نمط `PostgresPageTokenProvider`). نص الرسائل **لا يُسجَّل** في أي `logger` (معرّفات وأطوال فقط).
 
-**(د) D-068 يمتد:** أضف إلى `[tool.ruff.lint.flake8-tidy-imports.banned-api]`: `linkedin`, `tweepy`, `tiktok`, `facebook_business`, `requests` (الأخير برسالة «Use src.core.http shared client»). `per-file-ignores` الحالية تبقى كما هي.
+**(د) D-070 في العميل من اليوم الأول:** `WhatsAppCloudClient` يُعيد **GET فقط**؛ `POST /{phone_number_id}/messages` يُرسَل مرة واحدة؛ فشل قبل الإرسال ⇒ `WhatsAppTransientError`، بعد الإرسال ⇒ `WhatsAppAmbiguousError`؛ المستدعي يسجّل `messages.delivery_status='ambiguous'` ولا يُعيد تلقائياً.
+
+**(هـ) D-068 يمتد:** `banned-api` += `pywa` (رسالة: «Read-only reference — D-071; use src.modules.whatsapp.client»)؛ `per-file-ignores` += `"src/modules/whatsapp/client.py" = ["TID251"]` (الملف الوحيد الجديد المسموح له بـ`httpx`). grep قبول: `grep -rln "import httpx" src | sort` ⇒ الأربعة الحالية + `src/modules/whatsapp/client.py` **فقط**.
+
+**(و) جدول الرؤية (D-064) لوحدة `whatsapp`:**
+
+| الحقل | OWNER | MANAGER | VIEWER |
+|---|---|---|---|
+| `conversations.*` (رقم العميل `wa_id`، الاسم، آخر رسالة، `window_expires_at`) | ✅ | ✅ | ✅ |
+| `messages.body` (نص وارد/صادر) | ✅ | ✅ | ✅ |
+| `reply_drafts.suggested_body` + `status` | ✅ | ✅ | ✅ (قراءة فقط — لا موافقة) |
+| `reply_drafts.provenance` الخاص (`provider`, `model`, `prompt_hash`, tokens, latency) | ✅ | ✅ | ❌ |
+| `whatsapp_accounts.phone_number_id`, `display_phone`, `status` | ✅ | ✅ | ❌ |
+| `whatsapp_accounts.encrypted_system_token`, `encrypted_app_secret` | ❌ **أبداً في أي استجابة** | ❌ | ❌ |
+| إنشاء/حذف حساب واتساب للعلامة | ✅ | ❌ | ❌ |
+| إرسال رسالة / الموافقة على ردّ مقترح / تعديله / رفضه | ✅ | ✅ | ❌ (403) |
 
 ---
 
@@ -55,105 +69,100 @@
 
 | # | البند | التنفيذ المطلوب | الاختبار |
 |---|---|---|---|
-| **A-1** | رفض الإقلاع بمجدول بلا تشفير | `main.py::_start_scheduler`: إذا `scheduler_enabled and token_encryption_key is None` ⇒ `raise RuntimeError("SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY")` **قبل** بناء أي شيء؛ `PostgresScheduler.__init__` يرفض `encryption=None` بنفس الرسالة (الدفاع في طبقتين) | **A1-U1** `tests/test_main.py`: `create_app(settings(scheduler_enabled=True, token_encryption_key=None))` ثم دخول `lifespan` ⇒ `RuntimeError` بالرسالة؛ **A1-U2** مع مفتاح ⇒ المهمة تُنشأ (الاختبار الحالي B6-U1 يبقى) |
-| **A-2** | قياس التغطية تحت greenlet | `pyproject.toml [tool.coverage.run]`: `concurrency = ["thread", "greenlet"]` (greenlet موجودة عبر SQLAlchemy — **لا تبعية جديدة**؛ تحقّق بـ`pip show greenlet`)؛ البوابة تبقى 95 | **A2-M1** (يدوي، يُسجَّل في §6): `pytest --cov=src -q` قبل/بعد ⇒ تغطية `publishing/infrastructure/postgres_repository.py` ≥ 84% بعد؛ CI `unit` ما زال ≥ 95 |
-| **A-3** | `PUBLISH_MAX_ATTEMPTS` | `config.py`: `publish_max_attempts: int = Field(3, ge=1, le=10)`؛ `content/service.py::_job_for` يكتب `max_attempts=settings.publish_max_attempts` صراحةً؛ **المجدول لا يقرأ الإعداد** (يبقى `job.max_attempts`) | **A3-U1** إعداد 5 ⇒ المهمة المنشأة `max_attempts == 5`؛ **A3-U2** تغيير الإعداد بعد الإنشاء لا يغيّر مهمة قائمة (المجدول يحترم الصف)؛ **A3-U3** `PUBLISH_MAX_ATTEMPTS=0` ⇒ `ValidationError` عند بناء `Settings` |
-| **A-4** | تسمية B7-U3 | دالة `test_b7_u3_protected_route_count_and_openapi_operations` في `tests/modules/content/test_router.py` تجمع التأكيدين (`PROTECTED_ROUTE_COUNT` من `test_auth_guard` يُستورد لا يُكرَّر؛ 14 عملية/13 مساراً) | `pytest -k b7_u3` ⇒ 1 passed |
+| **A-1** F1 | CHECK `published_at` | هجرة `0008_published_at_check.py`: `drop_constraint("ck_content_items_published_at_iff_published")` ثم `create_check_constraint` بالاسم نفسه والشرط: `(status = 'published' AND published_at IS NOT NULL) OR (status = 'archived') OR (status NOT IN ('published','archived') AND published_at IS NULL)`. `downgrade`: `UPDATE content_items SET published_at = NULL WHERE status = 'archived'` ثم إعادة CHECK القديم. **لا تغيير في `compare_and_set_status`** — الاحتفاظ بـ`published_at` في الأرشيف **مقصود** (أثر تدقيقي) | **A1-I1** (PG): عنصر يصل `published` عبر المجدول بـ`FakePublisher` ثم `POST …/archive` ⇒ 200، الصف `archived` و`published_at` **غير فارغ**؛ **A1-I2** (PG): `scheduled` ⇒ `archive` ⇒ `published_at IS NULL`؛ **A1-M1**: `head ⇒ 0007 ⇒ head` بصف `archived` يحمل `published_at` — التخفيض يُصفّره ولا يفشل؛ إدراج `draft` بـ`published_at` ⇒ يُرفض عند head |
+| **A-2** F2 / D-070 | فصل دلالات الإعادة في `MetaGraphClient` | `_request_absolute(method, …, *, idempotent: bool)` — GET ⇒ `idempotent=True` (الحلقة الحالية تبقى حرفياً)؛ POST ⇒ `idempotent=False`: **محاولة واحدة**. التصنيف: `httpx.ConnectError`/`httpx.ConnectTimeout` ⇒ `MetaTransientError` (لم يُرسل)؛ `httpx.ReadTimeout`/`httpx.WriteTimeout`/`httpx.RemoteProtocolError`/5xx/أكواد 1,2 ⇒ **`MetaAmbiguousError(MetaClientError)`** جديد. `MetaPublisher`: `MetaAmbiguousError` ⇒ `PublishOutcome.ambiguous(...)` (المسار الموجود من SPRINT-07 B6) — يُغلق `publish_failed` بمحاولة `ambiguous`، لا إعادة تلقائية. GET يبقى يُعيد `MetaTransientError` القابل للإعادة | **A2-U1** (`respx`): `publish_page_post` مع 502 ثم 200 ⇒ `MetaAmbiguousError` و**عدد نداءات POST == 1**؛ **A2-U2**: `ReadTimeout` ⇒ المثل؛ **A2-U3**: `ConnectError` ⇒ `MetaTransientError` ونداء واحد؛ **A2-U4**: `GET /me/accounts` مع 502 ثم 200 ⇒ ينجح بنداءين (السلوك القديم محفوظ)؛ **A2-U5**: `create_instagram_container` و`publish_instagram_container` كذلك نداء واحد؛ **A2-I1** (PG): المجدول مع ناشر يرمي `MetaAmbiguousError` ⇒ `publish_attempts.outcome='ambiguous'`، المهمة `failed`، العنصر `publish_failed`، **لا** دورة لاحقة تُعيدها |
+| **A-3** F3 | `generate()` يحفظ الوسائط ولا يقفل عبر الشبكة | (أ) `add_revision(..., media_refs=<media_refs المراجعة الحالية>)` في `generate()`؛ `ContentBodyUpdate.media_refs: list[MediaRef] \| None = None` — `None` = أبقِ الحالية، `[]` = احذف (كسر توافق صريح: `update_body` يمرّر `None` ⇒ المستودع ينسخ من المراجعة الحالية). (ب) ترتيب `generate()`: `get_item` (بلا قفل) ⇒ فحص `GENERATION_STATES` ⇒ limiter ⇒ budget ⇒ `gateway.complete()` ⇒ **ثم** `_lock_item` ⇒ **إعادة فحص** `GENERATION_STATES` (تغيّر ⇒ 409 `invalid_transition`) ⇒ CAS/`add_revision` | **A3-U1**: عنصر IG بصورة ⇒ `/generate` ⇒ المراجعة الجديدة تحمل الصورة نفسها؛ **A3-U2**: `PUT body` بلا `media_refs` ⇒ تبقى؛ بـ`[]` ⇒ تُحذف؛ **A3-I1** (PG): بوابة وهمية تفتح جلسة ثانية وتنفّذ `SELECT … FOR UPDATE NOWAIT` على الصف أثناء `complete()` ⇒ **تنجح** (القفل غير محمول)؛ **A3-U3**: بوابة وهمية تُغيّر حالة العنصر إلى `pending_approval` أثناء `complete()` ⇒ 409 ولا مراجعة تُكتب |
 
-> **قاعدة Part A:** لا تغيير سلوكي خارج ما ذُكر. الحزمة الكاملة تمرّ بعده بعدد الاختبارات القديم + الجديدة.
-
----
-
-### Part B-1 — سجل القنوات + نقل Meta خلفه (كوميت واحد؛ **بلا تغيير سلوكي ملحوظ للمستخدم**)
-
-**B1-أ. الحزمة الجديدة `src/modules/publishing/channels/`:**
-
-```
-channels/
-  __init__.py          # get_registry() — يبني السجل مرة واحدة من التعريفات أدناه
-  definition.py        # ChannelDefinition, ChannelCapabilities, ActivationStatus, ActivationRequirement, MediaRule
-  registry.py          # ChannelRegistry: get(channel) / all() / activatable() ؛ KeyError ⇒ UnknownChannelError
-  meta_facebook.py     # تعريف facebook_page + Publisher = MetaPublisher الحالي (يُنقل من infrastructure/ أو يُستدعى)
-  meta_instagram.py    # تعريف instagram (يشترك مع facebook_page في MetaPublisher ونفس PageTokenProvider)
-  linkedin.py          # هيكلي
-  x.py                 # هيكلي
-  tiktok.py            # هيكلي
-  structural.py        # StructuralPublisher: publish() ⇒ failure(channel_not_activated) بلا نداء
-```
-
-**B1-ب. `ChannelDefinition` (Pydantic frozen):**
-
-| الحقل | النوع | ملاحظة |
-|---|---|---|
-| `channel` | `Channel` (StrEnum موسَّع: `facebook_page, instagram, linkedin, x, tiktok`) | يبقى في `content/domain/models.py` كمصدر التعداد؛ `ChannelLiteral` في `schemas.py` يُولَّد منه (`Literal[*Channel]` أو `get_args`) لا يُكرَّر يدوياً |
-| `display_name` | `str` | |
-| `provider` | `Literal["meta", "linkedin", "x", "tiktok"]` | المزوّد المشترك (facebook_page/instagram ⇒ `meta`) |
-| `activation_status` | `ActivationStatus ∈ {active, not_configured}` | Meta ⇒ `active`؛ الثلاثة ⇒ `not_configured`. **يُقرأ من التعريف لا من إعداد** في M5 (التفعيل الحقيقي سبرنت لاحق يقلبه مع اعتماداته) |
-| `capabilities` | `ChannelCapabilities{text_limit:int, requires_media:bool, max_media:int, media_kinds:frozenset[str], supports_link:bool, supports_scheduling:bool}` | facebook_page `{5000, False, 1, {image}, True, True}`؛ instagram `{2200, True, 1, {image}, False, True}`؛ linkedin `{3000, False, 1, {image}, True, True}`؛ x `{280, False, 1, {image}, True, True}`؛ tiktok `{2200, True, 1, {video}, False, True}` — أرقام المنصات غير المفعَّلة **توثيقية** من وثائقها العامة وتُراجع عند التفعيل |
-| `required_scopes` | `tuple[str, ...]` | Meta كما هي الآن؛ الثلاثة: النطاقات الموثَّقة علناً (`w_member_social`؛ `tweet.write users.read offline.access`؛ `video.publish`) — **توثيقية** |
-| `activation_requirements` | `tuple[ActivationRequirement, ...]` | كل عنصر `{key, title, owner ∈ {platform_owner, brand_owner}, status ∈ {done, pending, not_started}, note}` — **هذه مصفوفة التفعيل**. Meta: `developer_app(done)`, `app_review_publishing(pending — بند المالك)`, `brand_oauth(brand_owner)`. LinkedIn: `developer_app`, `marketing_api_access(review)`, `brand_oauth`. X: `developer_account(paid tier)`, `app_oauth2`, `brand_oauth`. TikTok: `developer_app`, `content_posting_api_audit`, `brand_oauth` |
-| `validate_media(media_refs) -> None \| raises MediaRuleError(reason)` | دالة | يحلّ محل `instagram_image_url`: instagram ⇒ صورة https jpg/jpeg/png إلزامية؛ facebook_page ⇒ ≤1 صورة اختيارية؛ الهيكلية ⇒ قواعدها التوثيقية (tiktok يتطلب `kind=video`) |
-| `publisher_factory` | `Callable[[PublisherDeps], Publisher]` | `PublisherDeps{settings, http_client}`؛ Meta ⇒ `MetaPublisher(MetaGraphClient(settings, http_client))`؛ الهيكلية ⇒ `StructuralPublisher(channel)` |
-
-**B1-ج. النقل بلا تغيير سلوكي:**
-- `content/service.py`: `_validate_schedule`/`_validate_target`/`BodyTooLongError`/`/generate` تقرأ من `registry.get(item.channel)`؛ **تُحذف** `CHANNEL_LIMITS`, `REQUIRED_PUBLISH_SCOPES`, `missing_publish_scopes` (تنتقل إلى `channels/registry.py` كدالة تأخذ التعريف), `instagram_image_url`.
-- `content/prompts.py` يقرأ `limit` من السجل.
-- `publishing/scheduler.py`: بدل `publisher` واحد يأخذ `PublisherResolver` (`Callable[[Channel], Publisher]`) — `_process` يحلّ الناشر من `job.channel`. `main.py::_start_scheduler` يبني الـresolver من السجل.
-- **شرط إضافي عند `schedule`:** `registry.get(channel).activation_status is not ACTIVE` ⇒ 422 `channel_not_activated{channel, requirements:[pending/not_started فقط]}` **قبل** أي فحص اتصال.
-- `ErrorClass` يكتسب `CHANNEL_NOT_ACTIVATED` (فشل **نهائي** — ليس في `RETRYABLE_ERROR_CLASSES`).
-
-**B1-د. الهجرة `0007_channels` (فقط إن لزمت):** `ck_content_items_channel` (0005:92) يقيّد القيم بـ`('facebook_page','instagram')`؛ عنصر بقناة `linkedin` **لا يُنشأ** في M5 (الإنشاء مسموح؟ — **نعم**: المسودات والموافقة تعمل لأي قناة في السجل؛ الرفض عند `schedule` فقط، كما نطاقات النشر في SPRINT-07 B3). إذن الهجرة **لازمة**: توسيع CHECK إلى القيم الخمس + CHECK مماثل على `publish_jobs.channel` إن وُجد. **لا شيء آخر في 0007.** التخفيض: `UPDATE content_items SET status='archived' WHERE channel NOT IN (القديمة)` **قبل** تضييق CHECK — وطبّق درس 15 (الترتيب) وB1-M1 حرفياً.
-
-**اختبارات B-1:**
-- **B1-U1** `test_registry_has_exactly_five_channels_and_meta_only_active` — السجل = `{facebook_page, instagram, linkedin, x, tiktok}`؛ `activatable()` ⇒ الثلاثة.
-- **B1-U2** `test_channel_literal_derived_from_enum` — `set(get_args(ChannelLiteral)) == {c.value for c in Channel}`.
-- **B1-U3** `test_capabilities_frozen_and_documented` — كل تعريف غير Meta يحمل ≥ 3 `activation_requirements` ولا واحد منها `done`؛ Meta يحمل `app_review_publishing` بحالة `pending`.
-- **B1-U4** `test_validate_media_matches_sprint07_behaviour` — جدول: instagram بلا وسائط/http/gif ⇒ `MediaRuleError`؛ jpg/png مع query ✓؛ facebook_page بلا وسائط ✓؛ tiktok بصورة ⇒ خطأ.
-- **B1-U5** `test_no_content_module_knows_channel_constants` — `grep` برمجي (AST أو نص) على `src/modules/content/**` ⇒ لا `CHANNEL_LIMITS`/`REQUIRED_PUBLISH_SCOPES`/`instagram_image_url`/`"https://"`.
-- **B1-M1** (على PG) هجرة `head ⇒ 0006 ⇒ head` مع صف `channel='linkedin'` في `draft` ⇒ التخفيض يؤرشفه ولا يفشل.
-- **كل اختبارات SPRINT-06/07 تمرّ بلا تعديل** عدا استيرادات نُقلت (وثّق كل اختبار عُدِّل في §6 مع السبب).
+> **قاعدة Part A:** لا تغيير سلوكي خارج ما ذُكر. **اختبار SPRINT-07 الذي يتحقق من «إعادة محاولة POST» (إن وُجد) يُعدَّل ويُوثَّق في §6 — هذا التغيير السلوكي مقصود (D-070).**
 
 ---
 
-### Part B-2 — المحوّلات الهيكلية + مصفوفة التفعيل + API (كوميت واحد)
+### Part B-1 — العميل + Webhook + التخزين + هجرة 0009 (كوميت واحد)
 
-**B2-أ. `StructuralPublisher(channel)`:** `publish()` ⇒ `PublishOutcome.failure(ErrorClass.CHANNEL_NOT_ACTIVATED)`؛ لا يلمس `page_token_provider`؛ يسجّل `WARNING` واحداً `publish: channel not activated channel=…` (بلا نص). **لا يصل إليه المجدول عملياً** لأن `schedule` يرفض مسبقاً — لكنه الحارس الثاني (مهمة قديمة بعد تعطيل قناة).
+**B1-أ. الهجرة `0009_whatsapp.py`:**
 
-**B2-ب. API:**
-
-| المسار | الدور | الاستجابة |
+| الجدول | الأعمدة | القيود |
 |---|---|---|
-| `GET /api/v1/channels` | أي مُصادَق (`CurrentUser`) | `ChannelListPublic{channels:[ChannelPublic]}`؛ `ChannelPublic{channel, display_name, provider, activation_status, capabilities, required_scopes, activation_requirements:[{key,title,owner,status,note}]}` — **لا حقل سرّي، لا بيانات علامة** |
-| `GET /api/v1/channels/{channel}` | أي مُصادَق | `ChannelPublic` أو 404 `unknown_channel` |
+| `whatsapp_accounts` | `id` UUID PK، `brand_id` → brands (CASCADE)، `phone_number_id` VARCHAR(32)، `waba_id` VARCHAR(32)، `display_phone` VARCHAR(32)، `encrypted_system_token` TEXT، `encrypted_app_secret` TEXT، `verify_token_hash` TEXT (SHA-256 لرمز التحقق GET)، `status` ∈ {active, disabled}، `created_by_user_id`، `created_at`/`updated_at` | **UNIQUE `phone_number_id`** (رقم واحد = علامة واحدة — مفتاح توجيه Webhook)؛ UNIQUE (`brand_id`) في V1 (حساب واحد للعلامة؛ يُرفع لاحقاً)؛ CHECK status |
+| `wa_conversations` | `id`، `brand_id` → brands (CASCADE)، `account_id` → whatsapp_accounts (CASCADE)، `wa_id` VARCHAR(32) (رقم العميل E.164 بلا +)، `profile_name` VARCHAR(128) NULL، `last_inbound_at` TIMESTAMPTZ NULL، `last_outbound_at` NULL، `window_expires_at` NULL (= `last_inbound_at + 24h`)، `unread_count` INT ≥ 0، `status` ∈ {open, archived}، `created_at`/`updated_at` | UNIQUE (`account_id`, `wa_id`)؛ فهرس (`brand_id`, `status`, `last_inbound_at DESC`) للصندوق |
+| `wa_messages` | `id`، `conversation_id` → wa_conversations (CASCADE)، `brand_id`، `direction` ∈ {inbound, outbound}، `wamid` VARCHAR(128) NULL (وارد: من الحمولة؛ صادر: من استجابة Graph)، `client_message_id` UUID NULL (صادر: مفتاح idempotency داخلي)، `kind` ∈ {text, template, image, audio, video, document, sticker, location, contacts, unsupported}، `body` TEXT NULL (≤ 4096)، `media_id` VARCHAR(128) NULL، `template_name` VARCHAR(128) NULL، `delivery_status` ∈ {received, queued, sent, delivered, read, failed, ambiguous}، `error_code` INT NULL، `sent_by_user_id` UUID NULL، `reply_draft_id` UUID NULL، `platform_timestamp` TIMESTAMPTZ NULL، `created_at` | **فهرس جزئي فريد `uq_wa_messages_wamid (wamid) WHERE wamid IS NOT NULL`** (تكرار Webhook)؛ UNIQUE `client_message_id` WHERE NOT NULL؛ CHECK: `direction='outbound' ⇒ sent_by_user_id IS NOT NULL` (**قاعدة D-055 في قاعدة البيانات**)؛ CHECK kind/status |
+| `wa_reply_drafts` | `id`، `conversation_id` → (CASCADE)، `brand_id`، `in_reply_to_message_id` → wa_messages، `suggested_body` TEXT، `final_body` TEXT NULL، `status` ∈ {suggested, approved, edited, rejected, expired}، `provenance` JSONB (نمط D-066: عام `{kind:"ai_suggested", generated_at, prompt_version}` + خاص `{provider, model, prompt_hash, prompt_tokens, completion_tokens, latency_ms, credential_mode}`)، `decided_by_user_id` NULL، `decided_at` NULL، `rejection_reason` VARCHAR(32) NULL ∈ {off_tone, factually_wrong, too_long, inappropriate, other}، `created_at` | CHECK: `status IN ('approved','edited','rejected') ⇒ decided_by_user_id IS NOT NULL`؛ فهرس (`conversation_id`, `status`) |
+| `wa_learning_signals` | `id`، `brand_id`، `reply_draft_id` → wa_reply_drafts (CASCADE)، `signal` ∈ {approved_unchanged, approved_after_edit, rejected, expired}، `edit_distance_ratio` NUMERIC(4,3) NULL (0–1، لـ`approved_after_edit`)، `rejection_reason` NULL، `prompt_version` VARCHAR(16)، `model` VARCHAR(64)، `credential_mode` VARCHAR(16)، `features` JSONB (سمات مجرَّدة: `suggested_len`, `final_len`, `language`, `has_question`, `has_cta` — **لا نص**)، `created_at` | UNIQUE `reply_draft_id` (إشارة واحدة لكل مسودة)؛ **D-069: لا عمود نص** — اختبار حارس على أسماء الأعمدة |
 
-- `PROTECTED_ROUTE_COUNT` 32 ⇒ **34**؛ حدّث الثابت والاختبار A-4.
-- `POST …/items` بقناة `linkedin` ⇒ 201 (مسودة)؛ `submit/approve` ✓؛ `schedule` ⇒ 422 `channel_not_activated` مع `requirements` غير المكتملة فقط.
+`downgrade`: إسقاط الجداول الخمسة بالترتيب العكسي. **لا تمسّ 0001–0008.**
 
-**B2-ج. `PublishStatusDetail`** لا يتغيّر؛ `error_class=channel_not_activated` يظهر فيه كأي فئة.
+**B1-ب. `src/modules/whatsapp/client.py` — `WhatsAppCloudClient(settings, http_client, *, sleep)`** (نمط `MetaGraphClient`؛ الـbase `https://graph.facebook.com/{meta_graph_version}`):
+- `send_text(token, phone_number_id, to_wa_id, body) -> SentMessage{wamid}` — POST `/{phone_number_id}/messages` بجسم `{"messaging_product":"whatsapp","recipient_type":"individual","to":…,"type":"text","text":{"preview_url":false,"body":…}}`؛ **D-070: محاولة واحدة**.
+- `send_template(token, phone_number_id, to_wa_id, name, language_code, components=None)` — POST بنوع `template`؛ محاولة واحدة.
+- `mark_read(token, phone_number_id, wamid)` — POST `{"status":"read","message_id":…}`؛ محاولة واحدة (أثره الجانبي حميد لكن القاعدة واحدة).
+- الأخطاء: `WhatsAppClientError` ⇒ `WhatsAppTransientError` (قبل الإرسال)، `WhatsAppAmbiguousError` (بعده)، `WhatsAppRateLimitedError` (كود 130429 / 80007 / HTTP 429 — **لا إعادة**)، `WhatsAppRecipientError` (131026 خارج النافذة/غير مسموح، 131047 انتهت النافذة، 131051 نوع غير مدعوم)، `WhatsAppAuthError` (190، 10 ⇒ الحساب `disabled` + `required_action=reauth`)، `WhatsAppPermanentError`. **لا نص Meta في أي نموذج استجابة** — الكود والـ`fbtrace_id` فقط.
+- السجلات: `logger.info("wa send: brand=%s conv=%s kind=%s len=%d status=%s")` — **لا نص ولا رقم هاتف كاملاً** (آخر 4 أرقام مقنَّعة `…1234`).
 
-**اختبارات B-2:**
-- **B2-U1** `test_structural_publisher_never_calls_token_provider_or_network` — `PageTokenProvider` وهمي يرفع إن استُدعي؛ `respx` بلا مسارات مسجَّلة (`assert_all_mocked`) ⇒ لا نداء؛ النتيجة `permanent_failure/channel_not_activated`.
-- **B2-U2** `test_channels_endpoint_shape_and_no_secrets` — 5 عناصر؛ لا مفتاح يحوي `token|secret|key` (حارس OpenAPI الحالي يمتد إلى المسارين).
-- **B2-U3** `test_schedule_on_not_configured_channel_is_422_before_connection_checks` — علامة **بلا أي اتصال** + عنصر `approved` بقناة `x` ⇒ 422 `channel_not_activated` (لا 409 `reauth_required`)؛ `requirements` تحوي `developer_account`.
-- **B2-U4** `test_meta_channels_schedule_path_unchanged` — السيناريوهات الثلاثة لـSPRINT-07 B2-U3 (نطاقات ناقصة ⇒ 409؛ IG بلا صورة ⇒ 422 `instagram_requires_image`؛ ✓) **بنفس أكواد الخطأ حرفياً** عبر السجل.
-- **B2-I1** (PG) المجدول مع `PublisherResolver`: مهمة `facebook_page` تُنشر (FakePublisher)؛ مهمة `linkedin` مُدرجة يدوياً في `publish_jobs` ⇒ `failed/channel_not_activated` + `publish_failed` + حدث نظامي، **بلا استدعاء** أي ناشر Meta.
-- **B2-U5** `test_banned_api_extended` — قراءة `pyproject.toml` ⇒ القائمة تحوي `linkedin, tweepy, tiktok, facebook_business, requests`.
+**B1-ج. Webhook — `src/modules/whatsapp/webhook.py`** (مسارات **عامة** بلا JWT — تُضاف إلى `PUBLIC` في `tests/test_auth_guard.py` بتعليق السبب):
+- `GET /api/v1/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=…&hub.challenge=…` ⇒ يبحث عن حساب `active` يطابق `sha256(verify_token)` ⇒ `200 text/plain challenge`؛ وإلا **403** (لا تفصيل).
+- `POST /api/v1/webhooks/whatsapp`: اقرأ `await request.body()` **مرة** ⇒ تحقّق (ب) ⇒ حلّل `entry[].changes[].value` ⇒ لكل `messages[]`: `INSERT … ON CONFLICT (wamid) DO NOTHING` (تكرار ⇒ لا شيء، **200**)؛ upsert `wa_conversations` (`last_inbound_at`، `window_expires_at = ts + 24h`، `unread_count+1`، `profile_name` من `contacts[]`)؛ `kind` من `type` (غير معروف ⇒ `unsupported` بجسم فارغ)؛ لكل `statuses[]`: تحديث `delivery_status` للرسالة الصادرة بـ`wamid` المطابق (`sent/delivered/read/failed` + `errors[0].code`). **يُعيد 200 دائماً بعد التحقق** حتى على حمولة غير مفهومة (Meta تُعيد الإرسال على غير 200) — يُسجَّل `counters["wa_webhook_unparsed"]`. المعالجة **داخل الطلب** (لا طابور في V1؛ Meta تمنح 20 ثانية) — دالة `handle_webhook_payload(payload) -> WebhookOutcome` منفصلة قابلة للنقل إلى طابور لاحقاً.
+- `counters`: `wa_inbound`, `wa_duplicate`, `wa_status_updates`, `wa_webhook_rejected`.
+
+**B1-د. `src/modules/whatsapp/service.py::WhatsAppAccountService`:** `connect_account(brand_id, actor, *, phone_number_id, waba_id, display_phone, system_token, app_secret, verify_token)` (OWNER فقط؛ يشفّر الثلاثة؛ **يتحقق من التوكن بنداء واحد GET `/{phone_number_id}` `fields=display_phone_number,verified_name`** — GET قابل للإعادة؛ فشل ⇒ 422 `whatsapp_credentials_invalid` ولا صف يُكتب)، `disable_account`, `get_account` (بلا أسرار). مزوّد رموز `PostgresWhatsAppTokenProvider.resolve(account_id) -> ResolvedWhatsAppTarget{phone_number_id, token(repr=False), app_secret(repr=False)}`.
+
+**اختبارات B-1:** **B1-U1** توقيع: جسم صحيح ⇒ 200؛ توقيع خاطئ/غائب/لـ`phone_number_id` مجهول ⇒ 401 ولا صف؛ تعديل بايت واحد بعد التوقيع ⇒ 401. **B1-U2** تكرار: الحمولة نفسها مرتين ⇒ رسالة واحدة و`counters["wa_duplicate"]==1`. **B1-U3** حمولة `statuses` تُحدّث `delivery_status` لرسالة صادرة وتتجاهل `wamid` مجهول. **B1-U4** `kind` غير معروف ⇒ `unsupported` بلا 500. **B1-U5** عزل: حمولتان لحسابين بعلامتين ⇒ كل محادثة تحت علامتها (استعلام العلامة الأخرى يُعيد 0). **B1-U6** عميل (`respx`): `send_text` 502 ⇒ `WhatsAppAmbiguousError` ونداء POST **واحد**؛ `ConnectError` ⇒ `Transient` ونداء واحد؛ 131047 ⇒ `RecipientError`؛ 190 ⇒ `AuthError`؛ `GET /{phone_number_id}` 502 ثم 200 ⇒ ينجح بنداءين. **B1-U7** `connect_account` بتوكن يُرجع 190 ⇒ 422 ولا صف؛ `repr(ResolvedWhatsAppTarget)` لا يحوي التوكن. **B1-U8** حارس D-069: أعمدة `wa_learning_signals` لا تحوي `body|text|content`. **B1-M1** (PG): `head ⇒ 0008 ⇒ head`؛ إدراج `outbound` بلا `sent_by_user_id` ⇒ يُرفض؛ `wamid` مكرَّر ⇒ يُرفض؛ `rejected` بلا `decided_by_user_id` ⇒ يُرفض. **B1-I1** (PG): Webhook حقيقي عبر `TestClient` بتوقيع محسوب بـ`app_secret` العلامة ⇒ صفوف `wa_conversations`/`wa_messages` كما هو متوقع؛ الحمولة نفسها ثانيةً ⇒ لا تغيير (`ON CONFLICT`).
+
+> **ثوابت الحمولة** تُستخلص من وثائق Cloud API v26.0 (`messages`, `statuses`, `contacts`, `metadata.phone_number_id`) وتوضع كـfixtures في `tests/modules/whatsapp/payloads/*.json` — **ليست من PyWa**.
+
+---
+
+### Part B-2 — صندوق الوارد + الإرسال + النافذة/القوالب (كوميت واحد)
+
+**مسارات (كلها خلف `CurrentUser` + دور العلامة؛ `/api/v1/brands/{brand_id}/whatsapp/…`):**
+
+| المسار | الدور | السلوك |
+|---|---|---|
+| `POST /account` | OWNER | B1-د `connect_account` ⇒ 201 بلا أسرار |
+| `GET /account` | OWNER/MANAGER | الحساب بلا أسرار؛ VIEWER ⇒ 403 |
+| `DELETE /account` | OWNER | `status=disabled` (لا حذف — المحادثات تبقى) |
+| `GET /conversations?status=open&cursor=&limit=` | الجميع | مرتَّب `last_inbound_at DESC`؛ cursor keyset؛ كل صف: `id, wa_id (مقنَّع لـVIEWER: `…1234`), profile_name, last_message_preview (≤ 80 حرفاً), unread_count, window_open: bool, window_expires_at, pending_draft: bool` |
+| `GET /conversations/{id}/messages?cursor=&limit=` | الجميع | الرسائل تصاعدياً + `reply_drafts` المرتبطة؛ VIEWER يرى `suggested_body`/`status` بلا `provenance` الخاص |
+| `POST /conversations/{id}/read` | OWNER/MANAGER | `unread_count=0` + `mark_read` لآخر وارد (فشل الشبكة لا يفشل الطلب — يُسجَّل) |
+| `POST /conversations/{id}/messages` `{body}` | OWNER/MANAGER | **داخل النافذة فقط** (`window_expires_at > now`) وإلا **422 `whatsapp_window_closed`** مع `template_required: true`؛ يُدرج `outbound` بحالة `queued` بـ`client_message_id` **قبل** النداء (نمط `publish_attempts`) ⇒ `send_text` ⇒ `sent` + `wamid`؛ `Ambiguous` ⇒ `ambiguous` (**لا إعادة**؛ 202 `{delivery_status:"ambiguous"}`)؛ `Transient` ⇒ `failed` + 503 `whatsapp_transient` + `Retry-After: 30`؛ `RateLimited` ⇒ 429؛ `RecipientError` ⇒ 422 `whatsapp_recipient_rejected{code}`؛ `AuthError` ⇒ الحساب `disabled` + 409 `whatsapp_reauth_required` |
+| `POST /conversations/{id}/template` `{name, language_code, components?}` | OWNER/MANAGER | يعمل داخل النافذة وخارجها؛ نفس مسار الحالات أعلاه؛ `kind=template` |
+| `POST /conversations/{id}/archive` | OWNER/MANAGER | `status=archived`؛ رسالة واردة جديدة تُعيدها `open` تلقائياً (Webhook) |
+
+**قواعد:** نص الرسالة ≤ 4096 حرفاً (`ContentValidationError` 422)؛ `wa_id` يُقنَّع لـVIEWER في كل استجابة (اختبار حارس على كل حقول VIEWER بالـregex `^\.{3}\d{4}$`)؛ `Idempotency-Key` اختياري في الهيدر ⇒ يُستخدم كـ`client_message_id` (تكرار ⇒ 200 بالرسالة القائمة، لا إرسال ثانٍ).
+
+**اختبارات B-2:** **B2-U1** جدول الرؤية حرفياً لكل دور × كل مسار (403 حيث ❌؛ قناع `wa_id` لـVIEWER؛ لا `encrypted_*` في أي استجابة — مشي على كل المفاتيح). **B2-U2** نافذة: `last_inbound_at = now-23h` ⇒ إرسال نص 201؛ `now-25h` ⇒ 422 `whatsapp_window_closed` ولا نداء شبكي (`respx` بلا مسارات ⇒ أي نداء يفشل الاختبار)؛ القالب ينجح في الحالتين. **B2-U3** الحالات الست للعميل ⇒ أكواد HTTP وحالات `delivery_status` كما في الجدول؛ `Ambiguous` ⇒ **لا** نداء ثانٍ. **B2-U4** `Idempotency-Key` مكرَّر ⇒ رسالة واحدة ونداء واحد. **B2-U5** عزل: MANAGER على العلامة A يطلب محادثة من العلامة B ⇒ 404 (لا 403 — لا تسريب وجود). **B2-I1** (PG): الدورة كاملة — Webhook وارد ⇒ `GET /conversations` يُظهرها بـ`window_open=true` ⇒ إرسال ردّ ⇒ Webhook `statuses` `delivered` ⇒ `GET …/messages` يُظهر `delivered`؛ ثم `UPDATE last_inbound_at = now()-25h` ⇒ إرسال نص 422، قالب 201. **B2-I2** (PG): keyset pagination على 25 محادثة بـ`limit=10` ⇒ 3 صفحات بلا تكرار ولا فقد.
+
+**`PROTECTED_ROUTE_COUNT`:** 34 ⇒ **34 + عدد المسارات المحمية الجديدة** (B-2: 8، B-3: 3 ⇒ **45**)؛ مسارا Webhook في `PUBLIC` بتعليق.
+
+---
+
+### Part B-3 — ردّ مقترح خلف موافقة + إشارة تعلّم (كوميت واحد)
+
+- **`Purpose`** في `ai_gateway/gateway.py`: `Literal["content_draft", "reply_suggestion"]` (التغيير الوحيد في البوابة).
+- **`src/modules/whatsapp/prompts.py`:** `reply_system_prompt(brand_display_name, language, tone)` + `reply_user_prompt(last_messages: list[tuple[direction, body]], max_turns=6)`؛ `REPLY_PROMPT_VERSION = "wa-reply-v1"`؛ القالب يُلزم: الردّ بلغة العميل، ≤ 600 حرف، لا وعود سعرية/قانونية، سؤال توضيحي واحد عند الغموض.
+- **`POST /conversations/{id}/suggest-reply`** (OWNER/MANAGER): آخر رسالة **واردة** فقط (لا مسودة لمحادثة آخرها صادر ⇒ 409 `no_inbound_to_reply`)؛ مسودة `suggested` قائمة ⇒ 409 `draft_pending` (لا تكديس)؛ `limiter.hit("wa_suggest", brand_id, 60, 3600)` ⇒ 429؛ ميزانية الرموز اليومية **نفسها** `AI_DAILY_TOKEN_BUDGET_PER_BRAND` (تُجمع من `content_revisions.provenance` **و**`wa_reply_drafts.provenance` معاً — استعلام واحد UNION ALL)؛ `gateway.complete(CompletionRequest(purpose="reply_suggestion", …, max_tokens=400, temperature=0.5))` ⇒ صف `wa_reply_drafts(status=suggested)`؛ **لا نداء WhatsApp**. `counters["wa_suggestions"]`.
+- **`POST /reply-drafts/{draft_id}/approve`** `{final_body?: str}` (OWNER/MANAGER): `final_body` غائب أو مطابق ⇒ `approved` + إشارة `approved_unchanged`؛ مختلف ⇒ `edited` + `approved_after_edit` مع `edit_distance_ratio = 1 - SequenceMatcher(None, a, b).ratio()` (مُقرَّب 3 منازل)؛ **ثم** الإرسال عبر مسار B-2 نفسه (النافذة/القالب/الحالات؛ `messages.reply_draft_id` يُربط) — إن كانت النافذة مغلقة ⇒ 422 `whatsapp_window_closed` **والمسودة تبقى `approved` بلا إرسال** (المستخدم يُرسل قالباً يدوياً). `features` تُحسب بدوال نقية في `signals.py` (`suggested_len`, `final_len`, `language ∈ {ar,en,mixed,other}` بنسبة الحروف العربية، `has_question` = يحوي `?`/`؟`، `has_cta` = قائمة أفعال عربية/إنجليزية ثابتة) — **لا نص يُخزَّن في الإشارة** (اختبار حارس يُسلسل الصف ويبحث عن `suggested_body`).
+- **`POST /reply-drafts/{draft_id}/reject`** `{reason}` (OWNER/MANAGER) ⇒ `rejected` + إشارة `rejected`.
+- **انتهاء:** مسودة `suggested` تصبح `expired` إذا وصلت رسالة واردة أحدث (في Webhook) أو أُرسل ردّ يدوي ⇒ إشارة `expired` (D-069: «تجاهُل» إشارة أيضاً).
+- **رؤية `provenance`:** `public_provenance()` القائمة في `content/domain/models.py` **تُعاد استخدامها** (نُقلت إلى `core/` إن لزم بلا تغيير سلوك) — VIEWER لا يرى المفاتيح الخاصة.
+
+**اختبارات B-3:** **B3-U1** `suggest-reply` ينشئ مسودة بـ`provenance.kind == "ai_suggested"` و`prompt_version == "wa-reply-v1"` و**صفر** نداءات WhatsApp. **B3-U2** الحالات: آخر رسالة صادرة ⇒ 409؛ مسودة قائمة ⇒ 409؛ 61 طلباً/ساعة ⇒ 429. **B3-U3** الإشارات الثلاث + `edit_distance_ratio` (مطابق ⇒ `approved_unchanged`، تغيير كلمة ⇒ `approved_after_edit` و`0 < ratio < 0.3`، تبديل كامل ⇒ `> 0.7`). **B3-U4** حارس D-069: سلسلة JSON لصف الإشارة لا تحوي أي 12 حرفاً متتالية من `suggested_body`/`final_body`. **B3-U5** الموافقة بنافذة مغلقة ⇒ 422، المسودة `approved`، لا رسالة، لا نداء. **B3-U6** VIEWER: يرى `suggested_body` ولا يرى `provenance.provider`؛ `approve` ⇒ 403. **B3-U7** وصول وارد أحدث ⇒ المسودة `expired` + إشارة. **B3-I1** (PG): الدورة — Webhook وارد ⇒ `suggest-reply` (`AI_PROVIDER=fake`) ⇒ `approve` بتعديل ⇒ رسالة `outbound` بـ`reply_draft_id` و`sent_by_user_id` و`delivery_status='sent'` (respx 200) ⇒ صف `wa_learning_signals` بـ`approved_after_edit` ⇒ الميزانية اليومية تحتسب رموز المسودة (استعلام UNION). **B3-I2** (PG): ميزانية 1 رمز ⇒ `suggest-reply` 429 `generation_budget_exceeded` (الكود نفسه من SPRINT-07 A-5).
 
 ---
 
 ## 3. معايير القبول
 
 1. `ruff check src tests alembic scripts` + `ruff format --check …` نظيفان.
-2. `pytest --cov=src --cov-fail-under=95` على PG حقيقية: **0 فشل**؛ العدد ≥ 792 + الجديدة؛ CI 5/5 على الكوميت الأعلى.
-3. `grep -rn "CHANNEL_LIMITS\|REQUIRED_PUBLISH_SCOPES\|instagram_image_url" src` ⇒ **فارغ**.
-4. `grep -rn "import httpx\|https://" src/modules/publishing/channels/ | grep -v meta_` ⇒ **فارغ**.
-5. `grep -rln "import httpx" src | sort` ⇒ الأربعة نفسها (+ `channels/meta_*.py` **ممنوع** — Meta تستدعي `MetaGraphClient` من `social_connect/meta_client.py` لا httpx مباشرة).
-6. `ls alembic/versions/` ⇒ 0001–0007 (0007 فقط إن لزمت وبمحتوى B1-د حصراً).
-7. الاختبارات بالأسماء كلها موجودة وناجحة: A1-U1..U2, A3-U1..U3, B7-U3 (A-4), B1-U1..U5, B1-M1, B2-U1..U5, B2-I1. `pytest -k b7_u3` ⇒ 1.
-8. `PROTECTED_ROUTE_COUNT == 34`؛ B2-U1 من SPRINT-07 ما زال **56 خلية** (آلة الحالات لم تُمسّ).
-9. `pyproject.toml` تغييرات: `concurrency`، قائمة `banned-api` الموسَّعة — **لا تبعية**.
-10. ثلاثة كوميتات فوق `main`؛ `git diff <start> --name-only` خالٍ من الملفات المحظورة (`ARCHITECTURE_LOCK.md`, `SESSION_RECOVERY.md`, `imaster_planner.md`, `README.md`, `AI_Marketing_Platform_Hub/**`, `sprints/**`).
-11. §6 مكتمل **بأسماء منسوخة من الكود** (درس 18): كل ثابت/فئة/مسار يُذكر في §6 يجب أن يطابق `grep` على الشجرة.
+2. `pytest --cov=src --cov-fail-under=95` على PG حقيقية: **0 فشل**؛ العدد ≥ 830 + الجديدة (المتوقع ≥ 60)؛ CI 5/5 على الكوميت الأعلى.
+3. `ls alembic/versions/` ⇒ 0001–**0009** (0008 Part A، 0009 B-1 فقط).
+4. `grep -rln "import httpx" src | sort` ⇒ الأربعة + `src/modules/whatsapp/client.py` **فقط**؛ `grep -rn "pywa" src pyproject.toml` ⇒ سطر `banned-api` فقط.
+5. `grep -rn "auto_reply\|AUTO_REPLY" src` ⇒ فارغ. `grep -rn "encrypted_system_token\|encrypted_app_secret" src/modules/whatsapp/schemas.py` ⇒ فارغ (لا نموذج استجابة يعرفهما).
+6. **D-070 حرفياً:** `pytest -k "a2_u or b1_u6 or b2_u3" -q` ⇒ كلها تمرّ وكل اختبار منها يؤكد `len(route.calls) == 1` لأي POST.
+7. الاختبارات بالأسماء كلها موجودة وناجحة: A1-I1..I2, A1-M1, A2-U1..U5, A2-I1, A3-U1..U3, A3-I1, B1-U1..U8, B1-M1, B1-I1, B2-U1..U5, B2-I1..I2, B3-U1..U7, B3-I1..I2.
+8. `PROTECTED_ROUTE_COUNT == 45`؛ `tests/modules/content/test_lifecycle.py` ما زال **56 خلية**.
+9. `pyproject.toml` تغييرات: `banned-api` += `pywa`، `per-file-ignores` += `client.py` — **لا تبعية**.
+10. **لا متغير بيئة جديد إلزامي**: التطبيق يقلع ويمرّ كل الاختبارات بلا أي `WHATSAPP_*` (الاعتماد BYOK في `whatsapp_accounts`). الوحيد الاختياري: `WHATSAPP_WEBHOOK_PATH` (افتراضي `/api/v1/webhooks/whatsapp`).
+11. أربعة كوميتات فوق `main`؛ `git diff <start> --name-only` خالٍ من الملفات المحظورة (`ARCHITECTURE_LOCK.md`, `SESSION_RECOVERY.md`, `imaster_planner.md`, `README.md`, `AI_Marketing_Platform_Hub/**`, `sprints/**`).
+12. §6 مكتمل **بأسماء منسوخة من الكود** (درس 18) + **تقرير «جاهزية الربط الحي»**: قائمة الخطوات الدقيقة التي يفعلها المالك بعد الحصول على WABA (قيم `POST /account`، رابط Webhook ليُدخل في لوحة Meta، `verify_token`) — بلا أي سرّ.
 
 ---
 
@@ -161,103 +170,59 @@ channels/
 
 ```bash
 git checkout work/implementation && git fetch origin && git merge --ff-only origin/main
-pip install -e ".[dev]" && pip show greenlet | head -2
+pip install -e ".[dev]"
 export TEST_DATABASE_URL=postgresql+asyncpg://aigos@localhost:5433/ai_growth_os_test
 export DATABASE_URL=$TEST_DATABASE_URL
 export AUTH_JWT_SECRET=$(python -c "import secrets;print(secrets.token_urlsafe(48))")
 ruff check src tests alembic scripts && ruff format --check src tests alembic scripts
 pytest --cov=src --cov-fail-under=95
-grep -rn "CHANNEL_LIMITS\|REQUIRED_PUBLISH_SCOPES\|instagram_image_url" src
-grep -rn "import httpx\|https://" src/modules/publishing/channels/ | grep -v meta_
-grep -rln "import httpx" src | sort
 ls alembic/versions/
-pytest -k "b7_u3 or b1_u or b2_u or b2_i1 or a1_u or a3_u" -q
+grep -rln "import httpx" src | sort
+grep -rn "pywa" src pyproject.toml
+grep -rn "auto_reply\|AUTO_REPLY" src
+pytest -k "a1_ or a2_ or a3_ or b1_u or b1_m or b1_i or b2_u or b2_i or b3_u or b3_i" -q
 ```
 
-> **ملاحظة ساندبوكس (من المخطط):** إن كان `/var/run/postgresql` غير قابل للكتابة بعد إعادة الضبط، شغّل PG بـ`-c unix_socket_directories=/tmp` واستخدم `psql -h localhost`.
+> **ملاحظة ساندبوكس (من المخطط):** إجراء إعادة البناء الكامل في `SESSION_RECOVERY.md` §2-ب. متغيرات `TEST_DATABASE_URL`/`AUTH_JWT_SECRET` تُصدَّر في **نفس سطر الأمر** الذي يُشغّل `pytest` (كل نداء Bash يبدأ بغلاف جديد).
 
 ---
 
 ## 5. التزامات المنفذ
 
-1. **Part A** كوميت: `fix(publishing,ci): SPRINT-08 Part A — refuse scheduler without encryption key (A-1), greenlet coverage tracing (A-2), PUBLISH_MAX_ATTEMPTS written at job creation (A-3), named B7-U3 (A-4)` ⇒ ادفع.
-2. **Part B-1** كوميت: `refactor(publishing): SPRINT-08 Part B-1 — channel registry + definitions, Meta behind registry (no behaviour change), PublisherResolver in scheduler, migration 0007 channel CHECK` ⇒ ادفع.
-3. **Part B-2** كوميت: `feat(publishing): SPRINT-08 Part B-2 — structural adapters (linkedin/x/tiktok), activation matrix, GET /channels, 422 channel_not_activated on schedule` ⇒ ادفع.
-4. **ادفع بعد كل ملف** (`wip:` ثم سحق إلى الكوميتات الثلاثة قبل التسليم).
-5. املأ §6 بالسطر **وبأسماء منسوخة من الكود**؛ `WORK_STATE.md` (§1 ⇒ `SPRINT_08_DELIVERED_AWAITING_REVIEW`؛ سطر جديد أعلى §6). عند التسليم اكتب حرفياً: **«PR #N جاهز لمراجعة المخطط»**. لا تدمج (D-063).
-6. أي بند متعذر ⇒ وثّق الانحراف بالسطر والسبب؛ **لا** تُضعف: جدول الرؤية، «لا نداء لمنصة غير مفعَّلة»، «السجل مصدر الحقيقة الوحيد»، آلة الحالات 56.
-7. إن اكتشفت أن نقل Meta خلف السجل يتطلب تغيير **سلوك** ملحوظ (كود خطأ، شكل استجابة) ⇒ **توقّف واسأل في §6** بدل التغيير الصامت — M5 refactor يجب أن يكون غير مرئي لعميل SPRINT-07.
+1. **Part A** كوميت: `fix(content,social_connect): SPRINT-09 Part A — relax published_at CHECK for archived (0008, F1), no retry on side-effecting Graph POST + MetaAmbiguousError (D-070, F2), generate() keeps media_refs and locks after gateway (F3)` ⇒ ادفع.
+2. **Part B-1** كوميت: `feat(whatsapp): SPRINT-09 Part B-1 — Cloud API client (D-070/D-071), signed webhook with wamid dedupe, accounts (BYOK, encrypted), migration 0009` ⇒ ادفع.
+3. **Part B-2** كوميت: `feat(whatsapp): SPRINT-09 Part B-2 — unified inbox, send text within 24h window, templates outside, visibility table, idempotency` ⇒ ادفع.
+4. **Part B-3** كوميت: `feat(whatsapp): SPRINT-09 Part B-3 — AI reply suggestion behind human approval (D-055) + learning signals (D-069)` ⇒ ادفع.
+5. **ادفع بعد كل ملف** (`wip:` ثم سحق إلى الكوميتات الأربعة قبل التسليم).
+6. املأ §6 بالسطر **وبأسماء منسوخة من الكود**؛ `WORK_STATE.md` (§1 ⇒ `SPRINT_09_DELIVERED_AWAITING_REVIEW`؛ سطر جديد أعلى §6). عند التسليم اكتب حرفياً: **«PR #N جاهز لمراجعة المخطط»**. لا تدمج (D-063).
+7. أي بند متعذر ⇒ وثّق الانحراف بالسطر والسبب؛ **لا** تُضعف: التوقيع الإلزامي، «لا رسالة بلا فاعل بشري»، D-070 نداء واحد للـPOST، جدول الرؤية، «لا نص في الإشارات».
+8. إن وجدت أن شكل حمولة Cloud API v26.0 يختلف عمّا افترضه هذا التوجيه (أسماء الحقول في `statuses`/`contacts`) ⇒ اتبع **الوثائق الرسمية** ووثّق الفرق في §6 مع رابط الصفحة — لا تُخمّن ولا تنسخ من PyWa.
+9. إن تطلّب تنفيذ A-3 (ب) تغيير توقيع `AIGateway` أو `_lock_item` بما يمسّ اختبارات SPRINT-07 ⇒ **توقّف واسأل في §6**.
 
 ---
 
 ## 6. تقرير المنفذ (يملؤه المنفذ)
 
-- **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي`
-- **Commit SHA Part A:** `e2b55a4` — **B-1:** `e5ed7bc` — **B-2:** `7ec7fed` — **docs:** `dbb87c8` (§6) + `7721b4f` (`WORK_STATE.md`) + كوميت هذا السطر
-- **PR:** [#26](https://github.com/belalalibb/ai_agancy_markting/pull/26) (`work/implementation` ⇒ `main` @ `e73e9cc`) — **CI: 5/5** على `7721b4f` (lint / unit / integration / secrets / licenses — كلها `success`، تشغيلان)
-- **الاختبارات:** وحدة **776** / تكامل **54** / الكل **830** ناجحاً، **0** فشل (`pytest --cov=src --cov-report=term-missing --cov-fail-under=95` على PG 17 حقيقي، 343s) — **التغطية:** **98.87%** (قبل A-2: TOTAL **94.30%** و`src/modules/publishing/infrastructure/postgres_repository.py` **76%** (95 عبارة، 20 مفقودة: 62-67,71-72,79,82-92,96-98,104,258-265)؛ بعد A-2: TOTAL **98.97%** على كود Part A وحده / **98.87%** على الكل، والملف نفسه **84%** (13 مفقودة: 67,71-72,82-92,97,258-265) ⇒ A2-M1 ≥ 84 ✓). `pytest -k "b7_u3 or b1_u or b2_u or b2_i1 or a1_u or a3_u" -q` ⇒ **107 passed**. ruff check + format --check على `src tests alembic scripts` ⇒ `All checks passed!` / `151 files already formatted`.
-- **A-1..A-4:**
-  - **A-1:** `src/modules/publishing/scheduler.py:81` ثابت `SCHEDULER_REQUIRES_ENCRYPTION_KEY = "SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"`؛ `PostgresScheduler.__init__` يرفض `encryption is None` (`scheduler.py:120`)؛ `src/main.py::_start_scheduler` (`main.py:84`) يرفع `RuntimeError(SCHEDULER_REQUIRES_ENCRYPTION_KEY)` عند `main.py:95` **قبل** بناء أي شيء. اختبارات: `tests/test_main.py:186 test_a1_u1_scheduler_enabled_without_encryption_key_refuses_boot`، `tests/test_main.py:210 test_a1_u1_postgres_scheduler_rejects_encryption_none`، `tests/test_main.py:227 test_a1_u2_scheduler_enabled_with_encryption_key_creates_task`.
-  - **A-2:** `pyproject.toml:120` `concurrency = ["thread", "greenlet"]` تحت `[tool.coverage.run]` (الأرقام قبل/بعد أعلاه؛ البوابة 95 باقية).
-  - **A-3:** `src/core/config.py:132` `publish_max_attempts: int = Field(default=3, ge=1, le=10)`؛ `src/modules/content/router.py:118` يمرّر `publish_max_attempts=settings.publish_max_attempts` إلى `ContentService`؛ `src/modules/content/service.py:130/137` يحفظه، و`_job_for(..., *, max_attempts)` يكتبه صراحةً في `PublishJob` عند `service.py:343` (schedule) و`service.py:447` (retry_publish). المجدول لا يقرأ الإعداد. اختبارات: `tests/modules/content/test_router.py:1323 test_a3_u1_publish_max_attempts_setting_is_written_into_new_job`، `:1347 test_a3_u2_changing_setting_after_creation_does_not_touch_existing_job`، `:1399 test_a3_u3_publish_max_attempts_zero_is_rejected_by_settings`.
-  - **A-4:** `tests/modules/content/test_router.py:1411 test_b7_u3_protected_route_count_and_openapi_operations` يستورد `PROTECTED, PROTECTED_ROUTE_COUNT` من `tests/test_auth_guard.py` (الثابت `tests/test_auth_guard.py:39`؛ التأكيد `== 34` في `test_auth_guard.py:54` و`test_router.py:1417` بعد B-2).
-- **B-1:**
-  - **الحزمة** `src/modules/publishing/channels/`: `__init__.py` (`get_registry()` بـ`lru_cache(maxsize=1)`)، `definition.py` (`ChannelDefinition`, `ChannelCapabilities`, `ActivationStatus{ACTIVE,NOT_CONFIGURED}`, `ActivationRequirement`, `RequirementOwner{PLATFORM_OWNER,BRAND_OWNER}`, `RequirementStatus{DONE,PENDING,NOT_STARTED}`, `MediaRule`, `MediaRuleError(reason)`, `PublisherDeps{settings,http_client}`؛ خصائص `limits`, `is_active`, `validate_media(media_refs)`, `incomplete_requirements()`, `build_publisher(settings, http_client)`)، `registry.py` (`ChannelRegistry(Mapping)` مع `get()/all()/activatable()/active()`؛ `UnknownChannelError(KeyError)`؛ `missing_publish_scopes(account, definition)` منقولة من `content/service.py`)، `meta_facebook.py` (`FACEBOOK_PAGE`, `META_ACTIVATION_REQUIREMENTS`, `build_meta_publisher(deps)` ⇒ `MetaPublisher(MetaGraphClient(deps.settings, deps.http_client))` باستيراد كسول)، `meta_instagram.py` (`INSTAGRAM` يشارك `build_meta_publisher` ونفس `PostgresPageTokenProvider` عبر المجدول)، `linkedin.py` (`LINKEDIN`)، `x.py` (`X`)، `tiktok.py` (`TIKTOK`)، `structural.py` (`StructuralPublisher`).
-  - **`Channel`** في `src/modules/content/domain/models.py:22` موسَّع إلى `FACEBOOK_PAGE, INSTAGRAM, LINKEDIN, X, TIKTOK`؛ `ChannelLiteral = Literal[tuple(c.value for c in Channel)]` في `src/modules/content/schemas.py` (مشتق لا مكرَّر — B1-U2).
-  - **ما حُذف من `content/`:** `CHANNEL_LIMITS` (كان `domain/models.py:28`)، `REQUIRED_PUBLISH_SCOPES` و`IMAGE_SUFFIXES` و`missing_publish_scopes` و`instagram_image_url` (كانت `service.py:91–125`)، `_CHANNEL_LABEL` (كان `prompts.py:21`). البديل: `service.py::channel_definition(channel)` ⇒ `get_registry().get(channel)` تستخدمه `enforce_channel_limit`، `/generate` (`max_tokens` والاقتطاع)، و`_validate_target` (`missing_publish_scopes(owner, definition)` + `definition.validate_media(refs)` ⇒ `InstagramRequiresImageError` عند `MediaRuleError` — نفس كود 422 `instagram_requires_image`)؛ `prompts.py::system_prompt` يقرأ `definition.display_name` و`definition.limits` (نص القالب لم يعد يذكر «إنستغرام 2200 / فيسبوك 5000» حرفياً — الحد يأتي من `{limit}`).
-  - **`PublisherResolver`:** `src/modules/publishing/scheduler.py:84` `PublisherResolver = Callable[[Channel], Publisher]`؛ معامل `PostgresScheduler.__init__` الثاني أصبح `publisher_resolver`؛ `_process` يحلّ `self._resolve_publisher(Channel(job.channel))` (`scheduler.py:193`). `src/main.py:72 build_publisher_resolver(settings, http_client)` يبني ناشراً واحداً لكل تعريف من `get_registry().all()` ويعيد `publishers.__getitem__`؛ `_start_scheduler` يستخدمه بدل `MetaPublisher(MetaGraphClient(...))` (أُزيل استيرادا `MetaPublisher`/`MetaGraphClient` من `main.py`).
-  - **`ErrorClass.CHANNEL_NOT_ACTIVATED = "channel_not_activated"`** في `src/modules/publishing/domain/models.py` — ليس في `RETRYABLE_ERROR_CLASSES` (اختبار `test_channel_not_activated_is_final_not_retryable`). **`ChannelNotActivatedError`** (`src/modules/content/exceptions.py`، 422 `channel_not_activated`، حقول `channel`, `requirements` = `incomplete_requirements()` فقط) تُرفع أول `_validate_target` (قبل `TargetPageNotSelectedError`) ⇒ تغطي `schedule` و`publish/retry`؛ `router.py::to_http` يضيف `channel`/`requirements` إلى `detail`.
-  - **0007:** `alembic/versions/0007_channels.py` — `upgrade`: إسقاط/إعادة `ck_content_items_channel` بالقيم الخمس فقط؛ `publish_jobs.channel` **بلا CHECK في 0006** (VARCHAR(16) عادي) ⇒ لا شيء يُوسَّع ولا يُضاف. `downgrade`: `UPDATE content_items SET status='archived', scheduled_for=NULL, published_at=NULL WHERE channel NOT IN (القديمة)` ثم `UPDATE … SET current_revision_id = NULL` ثم `DELETE FROM content_items WHERE channel NOT IN (القديمة)` (المراجعات/الأحداث/المهام تتبع بـCASCADE) ثم تضييق CHECK — انظر «انحرافات».
-  - **الاختبارات الجديدة:** `tests/modules/publishing/test_channels.py` — `:39 test_registry_has_exactly_five_channels_and_meta_only_active` (B1-U1)، `:67 test_channel_literal_derived_from_enum` (B1-U2)، `:73 test_capabilities_frozen_and_documented` (B1-U3)، `:168 test_validate_media_matches_sprint07_behaviour` (B1-U4، 15 حالة)، `:181 test_no_content_module_knows_channel_constants` (B1-U5، grep برمجي على `src/modules/content/**` للأسماء الثلاثة و`"https://"` + على `src/**` للأسماء الثلاثة)؛ `tests/integration/test_postgres_persistence.py:2706 test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg` (B1-M1: `head ⇒ 0006 ⇒ head` بصف `linkedin` في `draft` مع مراجعة و`current_revision_id` مضبوط؛ التخفيض لا يفشل؛ صفوف Meta تبقى؛ `x` يُرفض تحت 0006 ويُقبل عند head؛ لا CHECK على `publish_jobs.channel`).
-  - **اختبارات SPRINT-06/07 المعدَّلة (كلها لأسباب ميكانيكية، لا تغيير في السلوك المختبَر):**
-    1. `tests/modules/publishing/test_scheduler_unit.py:102` — `self.publisher` ⇒ `lambda _channel: self.publisher` (توقيع `PostgresScheduler` صار يأخذ `PublisherResolver`).
-    2. `tests/integration/test_scheduler_pg.py:192` (`_scheduler`) — `publisher` ⇒ `lambda _channel: publisher` (السبب نفسه).
-    3. `tests/test_main.py:220` (`test_a1_u1_postgres_scheduler_rejects_encryption_none` — من Part A) — `FakePublisher()` ⇒ `lambda _channel: FakePublisher()` (السبب نفسه).
-    4. `tests/modules/content/test_router.py:133 test_b3_u1_create_validates_body_and_channel` — مثال القناة المرفوضة `"tiktok"` ⇒ `"myspace"`؛ `tiktok` قناة مسجَّلة الآن والمسودة بها 201 حسب التوجيه (B1-د)، ويبقى التحقق من القيمة المجهولة ⇒ 422.
-    5. `tests/integration/test_postgres_persistence.py` — ستة تأكيدات `version_num == "0006"` بعد `upgrade head` (الأسطر 520، 925، 1946، 2016، 2437، 2566) ⇒ `"0007"` (رأس السلسلة تغيّر).
-- **B-2:**
-  - **المحوّلات:** `src/modules/publishing/channels/structural.py::StructuralPublisher(channel).publish()` ⇒ `PublishOutcome.failure(ErrorClass.CHANNEL_NOT_ACTIVATED)` فوراً؛ `del revision, page_token_provider, last_creation_id` (لا يلمسها)؛ `logger.warning("publish: channel not activated channel=%s job=%s item=%s", ...)` واحد بلا نص المنشور. مربوطة في `linkedin.py`/`x.py`/`tiktok.py` عبر `_structural(deps)` كـ`publisher_factory`.
-  - **`/channels`:** `src/modules/publishing/channels/router.py` — `router = APIRouter(prefix="/channels", tags=["channels"])`؛ `GET ""` ⇒ `ChannelListPublic{channels: list[ChannelPublic]}`؛ `GET "/{channel}"` ⇒ `ChannelPublic` أو 404 `{"error": "unknown_channel"}`؛ كلاهما بـ`CurrentUser` (بلا دور علامة). `ChannelPublic{channel, display_name, provider, activation_status, capabilities, required_scopes, activation_requirements: list[ActivationRequirementPublic{key,title,owner,status,note}]}`؛ لا حقل سرّي ولا بيانات علامة (B2-U2 يمشي على كل المفاتيح: لا مفتاح يحوي `token|secret|key` عدا `activation_requirements.key` التسمية). مُركَّب في `src/main.py:136` `api_v1.include_router(channels_router)`.
-  - **422 عند `schedule`:** انظر B-1 (`ChannelNotActivatedError` قبل أي فحص اتصال). `POST …/items` بـ`linkedin`/`x` ⇒ 201؛ `submit`/`approve` ⇒ 200؛ `schedule` ⇒ 422 `channel_not_activated{channel, requirements}` بالمتطلبات غير المكتملة فقط؛ لا مهمة تُنشأ.
-  - **`PROTECTED_ROUTE_COUNT`:** 32 ⇒ **34** (`tests/test_auth_guard.py:54`، `tests/modules/content/test_router.py:1417`).
-  - **`banned-api`:** `pyproject.toml:[tool.ruff.lint.flake8-tidy-imports.banned-api]` += `"linkedin"`, `"tweepy"`, `"tiktok"`, `"facebook_business"`, `"requests"` (الأخيرة `msg = "Use src.core.http shared client"`)؛ `per-file-ignores` بلا تغيير. `tests/modules/ai_gateway/test_contract.py` حُدِّث: ثابت `BANNED_PLATFORM_MODULES` و`test_b0_u1_pyproject_bans_the_same_modules` يتحقق من المجموعة الموسَّعة ومن رسالة AIGateway على الخمسة الأصلية فقط.
-  - **الاختبارات:** `tests/modules/publishing/test_channels.py:210 test_structural_publisher_never_calls_token_provider_or_network` (B2-U1 — مزوّد رموز يرمي `AssertionError` إن استُدعي؛ تحذير واحد؛ + grep برمجي: لا `import httpx` في أي ملف من `channels/` ولا `https://` خارج `meta_*`)، `:252 test_banned_api_extended` (B2-U5)؛ `tests/modules/content/test_router.py:1427 test_channels_endpoint_shape_and_no_secrets` (B2-U2)، `:1501 test_schedule_on_not_configured_channel_is_422_before_connection_checks` (B2-U3 — علامة بلا اتصال + عنصر `x` معتمد ⇒ 422 لا 409/`target_page_not_selected`؛ `developer_account` ضمن المتطلبات؛ 281 حرفاً على `x` ⇒ `body_too_long{limit:280}` من السجل)، `:1548 test_meta_channels_schedule_path_unchanged` (B2-U4 — السيناريوهات الثلاثة + 409 `reauth_required{missing_scopes:["pages_manage_posts"]}`)؛ `tests/integration/test_scheduler_pg.py:522 test_b2_i1_publisher_resolver_routes_meta_and_structural_jobs_on_pg` (B2-I1 — مهمة `facebook_page` تُنشر عبر `FakePublisher`؛ مهمة `linkedin` مُدرجة يدوياً ⇒ `failed`/`channel_not_activated`، محاولة `permanent_failure`، العنصر `publish_failed`، حدث نظام `publish_failed`، `counters["publish_failed"] == 1`، ناشر Meta لم يُستدعَ لها، ولا إعادة محاولة في دورة لاحقة).
+- **حالة التنفيذ:** `[ ] مكتمل` / `[ ] جزئي`
+- **Commit SHA Part A:** — **B-1:** — **B-2:** — **B-3:** — **docs:**
+- **PR:** #N (`work/implementation` ⇒ `main` @ …) — **CI:** …/5
+- **الاختبارات:** وحدة … / تكامل … / الكل … ناجحاً، … فشل — **التغطية:** …%
+- **A-1..A-3 (بالسطر):**
+- **B-1 / B-2 / B-3 (بالسطر):**
+- **اختبارات SPRINT-06/07/08 المعدَّلة (السبب لكل واحد):**
 - **القبول §3 (نواتج الـgreps حرفياً):**
-  ```
-  $ grep -rn "CHANNEL_LIMITS\|REQUIRED_PUBLISH_SCOPES\|instagram_image_url" src
-  (فارغ — exit 1)
-  $ grep -rn "import httpx\|https://" src/modules/publishing/channels/ | grep -v meta_
-  (فارغ — exit 1)
-  $ grep -rln "import httpx" src | sort
-  src/core/http.py
-  src/modules/ai_gateway/dependencies.py
-  src/modules/ai_gateway/facades/openai_compatible.py
-  src/modules/social_connect/meta_client.py
-  $ ls alembic/versions/
-  0001_initial_social_connections.py  0002_page_token_nullable.py  0003_tenancy.py  0004_auth.py  0005_content.py  0006_publishing.py  0007_channels.py
-  $ pytest -k "b7_u3 or b1_u or b2_u or b2_i1 or a1_u or a3_u" -q
-  107 passed, 723 deselected
-  ```
-  آلة الحالات: `tests/modules/content/test_lifecycle.py:106` ما زال `len(EXPECTED) == 56`. `git diff e73e9cc -- pyproject.toml` = `concurrency` + خمسة أسطر `banned-api` (+ تعليقان) فقط؛ لا تبعية جديدة. لا ملف محظور في الـdiff (`git diff --name-only e73e9cc..HEAD` = 30 ملفاً كلها تحت `src/ tests/ alembic/ pyproject.toml` + `CURRENT_DIRECTIVE.md`/`WORK_STATE.md` في كوميت docs).
+- **تقرير جاهزية الربط الحي (§3-12):**
 - **انحرافات (بالسطر والسبب):**
-  1. **تخفيض 0007 يحذف الصفوف لا يؤرشفها فقط** (`alembic/versions/0007_channels.py::downgrade`): التوجيه نصّ على `UPDATE … SET status='archived'` قبل التضييق؛ لكن صفاً يحتفظ بـ`channel='linkedin'` يكسر CHECK المضيَّق على PG حقيقي مهما كانت حالته. لذلك: `UPDATE` للأرشفة (حفاظاً على نية التوجيه في أي تدقيق) ثم `UPDATE … current_revision_id = NULL` لفكّ الـFK الدائري (`fk_content_items_current_revision_id` `ON DELETE SET NULL` — نمط 0005/0006) ثم `DELETE` فالـCASCADE. B1-M1 يثبت أن التخفيض لا يفشل وأن صفوف Meta لا تُمسّ. **لا تُفقد بيانات في الاتجاه الأمامي**؛ التخفيض هرم كامل لعالم 0006 الذي لا يعرف هذه القنوات أصلاً.
-  2. **توسيع `banned-api` نُقل من Part A إلى Part B-2** (هو مذكور في §2-0-د كقاعدة حاكمة وفي B2-U5 كاختبار): إضافته في Part A كسرت `tests/modules/ai_gateway/test_contract.py::test_b0_u1_pyproject_bans_the_same_modules` (كان يتحقق من **مساواة** المجموعة ورسالة واحدة للكل)، وقاعدة Part A «لا تغيير سلوكي خارج المذكور» منعت تعديل اختبار SPRINT-07 هناك. في B-2 عُدِّل الاختبار (`BANNED_PLATFORM_MODULES`) مع B2-U5.
-  3. **`https_image` في `MediaRule`** يُبنى بـ`"https:" + "//"` في `definition.py::_is_https_image` كي لا يحوي ملف في `channels/` خارج `meta_*` الحرفية `https://` (grep §3-4)؛ السلوك مطابق لـ`instagram_image_url` السابقة (B1-U4).
-  4. **`ChannelNotActivatedError` تُرفع داخل `_validate_target`** لا في `schedule` وحدها: `publish/retry` (B7) يمرّ بالدالة نفسها، فقناة غير مفعَّلة تُرفض فيه أيضاً بـ422 — متسق مع «لا نداء لمنصة غير مفعَّلة».
-  5. **نصوص `note`/`title` في مصفوفة التفعيل** صيغت بلا كلمتي `secret`/`token` (مثل «app credentials live only in environment variables») حتى يتحقق B2-U2 من غياب الكلمتين في الاستجابة كاملة لا في المفاتيح فقط.
-  6. **بيئة الساندبوكس:** أربع إعادات ضبط إضافية خلال هذا السبرنت (الإجمالي 19)؛ كل الشغل نجا عبر `wip:` + دفع بعد كل ملف ثم سُحق إلى الكوميتات الثلاثة (`git restore --source=<wip> …` لكل جزء؛ شجرة الكوميت الأعلى مطابقة بالـhash لآخر `wip`).
 - **أسئلة:**
-  1. `registry.py::ChannelRegistry.active()` أُضيفت فوق الثلاث المطلوبة (`get/all/activatable`) لاستخدام الاختبارات؛ تُحذف إن أردت الالتزام الحرفي.
-  2. بعد تفعيل قناة ثالثة لاحقاً: هل يُقلب `activation_status` من التعريف وحده (كما في M5) أم يُقرأ من إعداد؟ لم أغيّر شيئاً — فقط للتخطيط.
 
 ---
 
 ## 7. ما ينتظر المالك
 
-1. 🔑 **تدوير توكن GitHub — الطلب الثامن.** التوكن ظهر في المحادثة مجدداً؛ يُعدّ مكشوفاً. بعد التدوير يُمرَّر للمخطط مرة واحدة في بداية الجلسة فقط.
+1. 🔑 **تدوير توكن GitHub — الطلب التاسع.** التوكن ظهر في المحادثة مجدداً؛ يُعدّ مكشوفاً. بعد التدوير يُمرَّر للمخطط مرة واحدة في بداية الجلسة فقط.
 2. 🛡️ حماية `main` بالفحوص الخمسة + منع الدفع المباشر (ما زالت غير مفعَّلة؛ الدمج يتم عبر API بلا قيود).
-3. **M4 — App Review من Meta** لنطاقي `pages_manage_posts` و`instagram_content_publish`: النشر الفعلي جاهز تقنياً ويعمل لمدراء/مختبري التطبيق فقط حتى تكتمل المراجعة. **ابدأ الآن** (أسابيع). مصفوفة التفعيل في M5 ستُظهر هذا البند `pending`.
-4. **M5 — قرار بعد هذا السبرنت لا قبله:** أي من LinkedIn/X/TikTok تُفعَّل أولاً؟ المصفوفة من `GET /channels` ستُظهر ما يلزم لكل واحدة (حساب مطوّر مدفوع لـX؛ مراجعة Marketing API لـLinkedIn؛ تدقيق Content Posting لـTikTok). لا تُنشئ حسابات الآن.
-5. **قبل M6:** حساب WhatsApp Business (Cloud API) ورقم اختبار.
+3. **M4 — App Review من Meta** لنطاقي `pages_manage_posts` و`instagram_content_publish`: **ابدأ الآن** (أسابيع). مصفوفة `GET /channels` تُظهره `pending`.
+4. **M6 — قبل الربط الحي (ليس قبل التطوير):** حساب WhatsApp Business (Cloud API) + رقم اختبار + توكن نظام (System User) + `app_secret` للتطبيق. **التطوير والاختبار لا يتوقفان عليها** — تُحقن لاحقاً عبر `POST /brands/{id}/whatsapp/account`. بعد M6: إضافة نطاق `whatsapp_business_messaging` إلى App Review.
+5. **M5 — تفعيل المنصة الثالثة** يبقى مؤجَّلاً بقرارك (مؤجَّل #17).
 6. **قبل M7:** مزوّد الذكاء الاصطناعي الحقيقي الأول (OpenAI-compatible؛ الآن `AI_PROVIDER=fake`).
-7. **للعلم (قرارات المخطط على أسئلة المنفذ في SPRINT-07):** إعادة «تحقّقتُ يدوياً» بعد نتيجة مبهمة **مؤجَّلة** (#14)؛ `max_attempts` عمود المهمة + إعداد عند الإنشاء (A-3 هنا)؛ `SCHEDULER_ENABLED` على **نسخة واحدة** في بيئة التشغيل الأولى (#15) — سيُوثَّق في M9.
+7. **للعلم (قرارات المخطط على سؤالَي المنفذ في SPRINT-08):** `ChannelRegistry.active()` **تبقى**؛ مصدر `activation_status` = تعريف + وجود اعتماد (مؤجَّل #16). قرار **D-071**: PyWa مرجع قراءة لا تبعية.
