@@ -27,7 +27,11 @@ from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
 from src.modules.content import router as content_router
 from src.modules.publishing.infrastructure.meta_publisher import MetaPublisher
-from src.modules.publishing.scheduler import PostgresScheduler, scheduler_loop
+from src.modules.publishing.scheduler import (
+    SCHEDULER_REQUIRES_ENCRYPTION_KEY,
+    PostgresScheduler,
+    scheduler_loop,
+)
 from src.modules.social_connect import router as social_connect_router
 from src.modules.social_connect.infrastructure.status_marker import PostgresStatusMarker
 from src.modules.social_connect.meta_client import MetaGraphClient
@@ -63,14 +67,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | None:
-    """B6: the publish worker runs in-process only when ``SCHEDULER_ENABLED=true``."""
+    """B6: the publish worker runs in-process only when ``SCHEDULER_ENABLED=true``.
+
+    SPRINT-08 A-1: a worker without ``TOKEN_ENCRYPTION_KEY`` cannot decrypt any page token and
+    would silently fail every job with ``connection_unavailable`` — that is a configuration
+    error, so boot is refused **before** anything is built (second guard in
+    ``PostgresScheduler.__init__``).
+    """
     if not settings.scheduler_enabled:
         return None
-    encryption = None
-    if settings.token_encryption_key is not None:
-        from src.core.security import get_token_encryption_service
+    if settings.token_encryption_key is None:
+        raise RuntimeError(SCHEDULER_REQUIRES_ENCRYPTION_KEY)
+    from src.core.security import get_token_encryption_service
 
-        encryption = get_token_encryption_service(settings)
+    encryption = get_token_encryption_service(settings)
     scheduler = PostgresScheduler(
         database.get_session_factory,
         MetaPublisher(MetaGraphClient(settings, app.state.http_client)),

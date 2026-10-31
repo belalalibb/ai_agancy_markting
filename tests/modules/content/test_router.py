@@ -1315,3 +1315,107 @@ def test_b7_retry_revalidates_target_like_schedule(
     )
     res = _act(client, owner, item_id, "publish/retry")
     assert res.status_code == 409 and res.json()["detail"]["error"] == "reauth_required"
+
+
+# ------------------------------------------------------------ SPRINT-08 A-3 PUBLISH_MAX_ATTEMPTS
+def test_a3_u1_publish_max_attempts_setting_is_written_into_new_job(
+    app: FastAPI,
+    client: TestClient,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    """A-3: ``PUBLISH_MAX_ATTEMPTS=5`` ⇒ the job created by ``schedule`` has
+    ``max_attempts == 5`` (policy at creation, written through ``_job_for``)."""
+    from src.core.config import get_settings
+
+    base = app.dependency_overrides.get(get_settings)
+    current = base() if base else get_settings()
+    assert current.publish_max_attempts == 3  # default documented in A-3
+    app.dependency_overrides[get_settings] = lambda: current.model_copy(
+        update={"publish_max_attempts": 5}
+    )
+    try:
+        _, job = _schedule_fb(client, as_(OWNER_ID), fake_repo, publish_repo)
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert job.max_attempts == 5
+
+
+def test_a3_u2_changing_setting_after_creation_does_not_touch_existing_job(
+    app: FastAPI,
+    client: TestClient,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    """A-3: the row is the truth — a job created under ``max_attempts=3`` keeps 3 after the
+    setting changes to 1, and the scheduler honours the row (retryable ⇒ requeued, not failed)."""
+    import asyncio
+
+    from src.core.config import get_settings
+    from src.modules.publishing.domain.models import ErrorClass, JobStatus
+
+    owner = as_(OWNER_ID)
+    item_id, job = _schedule_fb(client, owner, fake_repo, publish_repo)
+    assert job.max_attempts == 3
+    base = app.dependency_overrides.get(get_settings)
+    current = base() if base else get_settings()
+    app.dependency_overrides[get_settings] = lambda: current.model_copy(
+        update={"publish_max_attempts": 1}
+    )
+    try:
+        # The existing job is untouched by the setting change …
+        assert publish_repo.jobs[job.id].max_attempts == 3
+        # … and a *new* job on another item picks the new policy.
+        _, fresh = _schedule_fb(client, owner, fake_repo, publish_repo)
+        assert fresh.max_attempts == 1 and fresh.id != job.id
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    # The scheduler decides from ``job.max_attempts`` only (never from settings).
+    async def _run() -> None:
+        now = datetime.now(tz=UTC) + timedelta(hours=2)
+        leased = await publish_repo.lease_due_jobs(
+            now=now, lease_until=now + timedelta(minutes=2), owner="unit:a3", batch=10
+        )
+        old = next(j for j in leased if j.id == job.id)
+        assert old.attempt_count == 1 and old.attempt_count < old.max_attempts  # 1 < 3
+        assert await publish_repo.complete_job(
+            old.id,
+            status=JobStatus.QUEUED,
+            now=now,
+            last_error_class=ErrorClass.TRANSIENT,
+            next_attempt_at=now + timedelta(seconds=60),
+        )
+
+    asyncio.run(_run())
+    assert publish_repo.jobs[job.id].status is JobStatus.QUEUED
+    assert publish_repo.jobs[job.id].max_attempts == 3
+
+
+def test_a3_u3_publish_max_attempts_zero_is_rejected_by_settings() -> None:
+    """A-3: ``PUBLISH_MAX_ATTEMPTS=0`` (and 11) ⇒ ``ValidationError`` (``ge=1, le=10``)."""
+    from pydantic import ValidationError
+    from src.core.config import Settings
+
+    for bad in (0, 11):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, publish_max_attempts=bad)  # type: ignore[call-arg]
+    assert Settings(_env_file=None, publish_max_attempts=10).publish_max_attempts == 10  # type: ignore[call-arg]
+
+
+# ------------------------------------------------------------ SPRINT-08 A-4 (= SPRINT-07 B7-U3)
+def test_b7_u3_protected_route_count_and_openapi_operations(client: TestClient) -> None:
+    """B7-U3 under its own name (A-4): the auth guard covers every non-auth route
+    (``PROTECTED_ROUTE_COUNT`` imported from ``tests/test_auth_guard.py``, not repeated) and
+    the content + publishing module exposes exactly 14 operations over 13 paths."""
+    from tests.test_auth_guard import PROTECTED, PROTECTED_ROUTE_COUNT
+
+    assert PROTECTED_ROUTE_COUNT == 32, PROTECTED
+    paths = client.get("/openapi.json").json()["paths"]
+    content_paths = {p for p in paths if "/content/" in p}
+    assert len(content_paths) == 13
+    assert sum(len(paths[p]) for p in content_paths) == 14
+    # Every content path is in the guard's protected list (``PROTECTED`` = ``(METHOD, path)``).
+    assert content_paths <= {path for _method, path in PROTECTED}

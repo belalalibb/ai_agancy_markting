@@ -114,6 +114,7 @@ def get_content_service(
         connections,
         publish_jobs,
         daily_token_budget=settings.ai_daily_token_budget_per_brand,
+        publish_max_attempts=settings.publish_max_attempts,  # SPRINT-08 A-3
     )
 
 

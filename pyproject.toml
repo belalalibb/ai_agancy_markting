@@ -107,6 +107,10 @@ indent-style = "space"
 [tool.coverage.run]
 source = ["src"]
 branch = true
+# SPRINT-08 A-2: SQLAlchemy async runs every flush()/execute() inside greenlet_spawn; without
+# greenlet tracing that code is invisible to coverage (greenlet ships with SQLAlchemy — no new
+# dependency).
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 show_missing = true

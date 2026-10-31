@@ -142,11 +142,14 @@ class ContentService:
         publish_jobs: PublishJobRepository,
         *,
         daily_token_budget: int = 200_000,
+        publish_max_attempts: int = 3,
     ) -> None:
         self._repo = repository
         self._connections = connections
         self._jobs = publish_jobs
         self._daily_token_budget = daily_token_budget
+        # SPRINT-08 A-3: written into every new job's ``max_attempts`` (policy at creation).
+        self._publish_max_attempts = publish_max_attempts
 
     # ------------------------------------------------------------ create ---
     async def create_item(
@@ -345,7 +348,15 @@ class ContentService:
         )
         try:
             await self._jobs.create_job(
-                _job_for(item, scheduled, page, actor_tenant_id, actor_user_id, now)
+                _job_for(
+                    item,
+                    scheduled,
+                    page,
+                    actor_tenant_id,
+                    actor_user_id,
+                    now,
+                    max_attempts=self._publish_max_attempts,
+                )
             )
         except ActiveJobExistsError as exc:
             raise PublishInProgressError() from exc
@@ -441,7 +452,15 @@ class ContentService:
             # insert fails (``uq_publish_jobs_active_item``) nothing of this request commits.
             try:
                 await self._jobs.create_job(
-                    _job_for(item, result, page, actor_tenant_id, actor_user_id, now)
+                    _job_for(
+                        item,
+                        result,
+                        page,
+                        actor_tenant_id,
+                        actor_user_id,
+                        now,
+                        max_attempts=self._publish_max_attempts,
+                    )
                 )
             except ActiveJobExistsError as exc:
                 raise PublishInProgressError() from exc
@@ -637,9 +656,13 @@ def _job_for(
     actor_tenant_id: UUID,
     actor_user_id: UUID,
     now: datetime,
+    *,
+    max_attempts: int,
 ) -> PublishJob:
     """The ``queued`` job for a freshly scheduled item (B2: ``run_at = scheduled_for``,
-    ``revision_id = current_revision_id``; D-055: who authorised it)."""
+    ``revision_id = current_revision_id``; D-055: who authorised it; SPRINT-08 A-3:
+    ``max_attempts`` is the ``PUBLISH_MAX_ATTEMPTS`` policy **at creation** — the row is the
+    truth afterwards, the scheduler never re-reads the setting)."""
     assert scheduled.scheduled_for is not None  # noqa: S101 - guaranteed by transition()
     assert item.current_revision_id is not None  # noqa: S101 - approved ⇒ has a revision
     return PublishJob(
@@ -651,6 +674,7 @@ def _job_for(
         run_at=scheduled.scheduled_for,
         scheduled_by_tenant_id=actor_tenant_id,
         scheduled_by_user_id=actor_user_id,
+        max_attempts=max_attempts,
         created_at=now,
         updated_at=now,
     )

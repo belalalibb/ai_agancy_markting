@@ -71,6 +71,11 @@ ContentRepoFactory = Callable[[AsyncSession], ContentRepository]
 ConnectionsRepoFactory = Callable[[AsyncSession], ConnectedAccountRepository]
 
 
+# SPRINT-08 A-1: shared message of the two-layer guard (``main._start_scheduler`` and
+# ``PostgresScheduler.__init__``) — a worker that cannot decrypt page tokens must not boot.
+SCHEDULER_REQUIRES_ENCRYPTION_KEY = "SCHEDULER_ENABLED requires TOKEN_ENCRYPTION_KEY"
+
+
 def default_lease_owner() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"[:64]
 
@@ -96,7 +101,13 @@ class PostgresScheduler:
         connections_repo: ConnectionsRepoFactory = PostgresConnectedAccountRepository,
     ) -> None:
         """The three ``*_repo`` factories default to the PostgreSQL repositories; tests inject
-        the in-memory fakes so the cycle logic is unit-testable without a database."""
+        the in-memory fakes so the cycle logic is unit-testable without a database.
+
+        ``encryption`` is mandatory (A-1): ``None`` raises ``RuntimeError`` with
+        ``SCHEDULER_REQUIRES_ENCRYPTION_KEY`` — second layer behind ``main._start_scheduler``.
+        """
+        if encryption is None:
+            raise RuntimeError(SCHEDULER_REQUIRES_ENCRYPTION_KEY)
         self._session_factory = session_factory
         self._publisher = publisher
         self._status_marker = status_marker

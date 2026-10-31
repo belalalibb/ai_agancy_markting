@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     scheduler_batch_size: int = 10
     # Backoff after retryable attempt n (1-based); the last value repeats.
     publish_retry_backoff_seconds: tuple[int, ...] = (60, 300, 900)
+    # SPRINT-08 A-3: policy at creation, evidence in the row — written into
+    # ``publish_jobs.max_attempts`` by ``content/service.py::_job_for``; the scheduler never
+    # reads this setting (``job.max_attempts`` is the truth for an existing job).
+    publish_max_attempts: int = Field(default=3, ge=1, le=10)
 
     @field_validator("meta_graph_api_version")
     @classmethod
