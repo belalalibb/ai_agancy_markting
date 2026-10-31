@@ -35,7 +35,7 @@ graph TD
 
 ## 🧱 1-ب. المخطط الفعلي المُنفَّذ حتى الآن (تُحدَّث من مراجعات المخطط)
 
-> المصدر الوحيد للحقيقة هو هجرات `alembic/versions/`؛ هذا الجدول تلخيص لها عند `main` @ `e414c5a` (الهجرة `0007`).
+> المصدر الوحيد للحقيقة هو هجرات `alembic/versions/`؛ هذا الجدول تلخيص لها عند `main` @ `e1e2fca` (الهجرة `0009`).
 
 | الجدول | الأعمدة الأساسية | القيود المهمة | الهجرة |
 |---|---|---|---|
@@ -52,7 +52,19 @@ graph TD
 | `publish_jobs` | `id`, `item_id` → content_items, `revision_id` → content_revisions, `brand_id`, `channel`, `target_page_id`, `run_at`, `status` ∈ {queued, leased, succeeded, failed, cancelled}, `attempt_count` ≥ 0, `max_attempts` ≥ 1 (default 3؛ **مصدر الحقيقة لكل مهمة** — القرار §3-2 في `SPRINT-07_REVIEW.md`), `next_attempt_at`, `lease_owner` (`hostname:pid`), `lease_until`, `last_error_class`, `external_post_id`, `permalink`, `scheduled_by_tenant_id`/`scheduled_by_user_id`, `created_at`/`updated_at` | **فهرس جزئي فريد** `uq_publish_jobs_active_item (item_id) WHERE status IN ('queued','leased')` — مهمة نشطة واحدة لكل عنصر؛ `ix_publish_jobs_status_run_at` للاستحقاق؛ CHECK `ck_publish_jobs_attempts`؛ الإيجار بـ`FOR UPDATE SKIP LOCKED` | 0006 |
 | `publish_attempts` | `id`, `job_id` → publish_jobs (CASCADE), `attempt_no` ≥ 1, `started_at`, `finished_at` NULL, `outcome` NULL ∈ {succeeded, retryable_failure, permanent_failure, ambiguous}, `error_class`, `graph_error_code`/`graph_error_subcode`/`graph_trace_id`, `external_post_id` (IG: `creation_id` بعد الخطوة 1), `lease_owner` | UNIQUE (`job_id`, `attempt_no`) `uq_publish_attempts_job_no`؛ CHECK outcome؛ **الصف يُلتزم بـ`outcome NULL` قبل نداء Graph** — محاولة مفتوحة عند انتهاء الإيجار = نتيجة مبهمة | 0006 |
 
-> **⚠️ F1 (مُثبَت على PG في مراجعة SPRINT-08):** CHECK `ck_content_items_published_at_iff_published` بصيغته في 0006 يمنع `published → archived` لأن `compare_and_set_status` يحتفظ بـ`published_at`؛ يُستبدل في **0008 (SPRINT-09 A-1)** بـ«`published` ⇒ غير فارغ؛ `archived` حرّ؛ الباقي فارغ».
+> **✅ F1 أُغلق (SPRINT-09 A-1، هجرة 0008):** `ck_content_items_published_at_iff_published` = `(status='published' AND published_at IS NOT NULL) OR (status='archived') OR (status NOT IN ('published','archived') AND published_at IS NULL)` — المؤرشَف يحتفظ بـ`published_at`؛ تخفيض 0008 يُصفّر `published_at` للمؤرشَف ثم يعيد القيد القديم.
+
+**جداول M6 — WhatsApp Cloud API (هجرة 0009، `src/modules/whatsapp/`):**
+
+| الجدول | الأعمدة الأساسية | القيود المهمة | الهجرة |
+|---|---|---|---|
+| `whatsapp_accounts` | `id`, `brand_id` → brands, `phone_number_id`, `waba_id`, `display_phone`, `encrypted_system_token`, `encrypted_app_secret`, `verify_token_hash`, `status` ∈ {active, disabled}, `created_by_user_id`, `created_at`/`updated_at` | UNIQUE `uq_whatsapp_accounts_phone_number_id`؛ UNIQUE `uq_whatsapp_accounts_brand_id` (حساب واحد لكل علامة — BYOK كامل، لا متغير بيئة) | 0009 |
+| `wa_conversations` | `id`, `brand_id`, `account_id` → whatsapp_accounts, `wa_id` (رقم العميل — يُقنَّع `…7890` في الاستجابات), `profile_name`, `last_inbound_at`, `window_expires_at` (= +24h), `unread_count`, `status` ∈ {open, archived} | UNIQUE `uq_wa_conversations_account_wa_id`؛ keyset `last_inbound_at DESC, id DESC` | 0009 |
+| `wa_messages` | `id`, `conversation_id`, `brand_id`, `direction` ∈ {inbound, outbound}, `wamid`, `client_message_id`, `kind` ∈ {text, template, image, unsupported}, `body`, `delivery_status` ∈ {received, queued, sent, delivered, read, failed, ambiguous}, `error_code`, `sent_by_user_id`, `reply_draft_id`, `platform_timestamp`, `created_at` | فهرس فريد **جزئي** `uq_wa_messages_wamid` و`uq_wa_messages_client_message_id`؛ CHECK `ck_wa_messages_outbound_has_actor` (صادر ⇒ `sent_by_user_id NOT NULL` — D-055) | 0009 |
+| `wa_reply_drafts` | `id`, `conversation_id`, `brand_id`, `in_reply_to_message_id`, `suggested_body`, `final_body`, `status` ∈ {suggested, approved, edited, rejected, expired}, `provenance` JSONB (عام `{kind, generated_at, prompt_version, truncated}`؛ خاص `model/prompt_hash/tokens/credential_mode`), `decided_by_user_id`, `decided_at`, `rejection_reason`, `created_at` | CHECK `ck_wa_reply_drafts_decided_has_actor`؛ فهرس `ix_wa_reply_drafts_conversation_status` **(غير فريد — N5، يصبح فريداً جزئياً WHERE status='suggested' في 0010)** | 0009 |
+| `wa_learning_signals` | `id`, `reply_draft_id`, `brand_id`, `signal` ∈ {approved_unchanged, approved_after_edit, rejected, expired}, `edit_distance_ratio`, `features` JSONB (`suggested_len, final_len, language, has_question, has_cta`), `prompt_version`, `model`, `credential_mode`, `created_at` | UNIQUE `uq_wa_learning_signals_reply_draft_id`؛ **لا عمود نصّ** (D-069) | 0009 |
+
+> **⚠️ N1–N4 (مُثبَتة على PG في مراجعة SPRINT-09، تُغلق في SPRINT-10 A):** كتابات `approve`/`disable`/`failed` تُمحى بـrollback الطلب عند رفع HTTP (N1)؛ `connect_account` يرفض أي صف قائم ولو `disabled` وتضارب `phone_number_id` ⇒ 500 (N2)؛ `update_status_by_wamid` بلا `brand_id` ولا رتابة (N3)؛ ميزانية المحتوى لا تقرأ `wa_reply_drafts` (N4). التفصيل: `sprints/SPRINT-09_REVIEW.md` §4.
 
 **واجهة سجلّ القنوات (M5، `src/modules/publishing/channels/`):** `ChannelRegistry(Mapping)` بـ`get(channel)` / `all()` / `activatable()` / `active()`؛ `get_registry()` بـ`lru_cache`؛ `ChannelDefinition{channel, display_name, provider, limits, capabilities, required_scopes, activation_requirements, media_rule, publisher_factory}`؛ `activation_status ∈ {active, not_configured}` **يُشتق من التعريف** (المنصّات الثلاث الجديدة `not_configured` حتى تُفعَّل بسبرنت خاص — مؤجَّل #16). `publish_jobs.channel` VARCHAR(16) **بلا CHECK** (السجلّ هو المتحقق).
 
@@ -60,7 +72,7 @@ graph TD
 
 ---
 
-### 1-ج. نقاط Meta Graph المستخدمة فعلياً (v26.0، `main` @ `e414c5a`)
+### 1-ج. نقاط Meta Graph المستخدمة فعلياً (v26.0، `main` @ `e1e2fca`)
 
 | النقطة | الطريقة | قناة الأسرار (D-064) | الاستخدام |
 |---|---|---|---|
@@ -74,9 +86,23 @@ graph TD
 | `/{ig_user_id}/media` | POST (`image_url`, `caption`) | Bearer توكن الصفحة + proof | M4 الخطوة 1: حاوية IG ⇒ `creation_id` (يُحفظ في `publish_attempts.external_post_id` فلا تُنشأ حاوية ثانية عند الإعادة) |
 | `/{ig_user_id}/media_publish` | POST (`creation_id`) | Bearer توكن الصفحة + proof | M4 الخطوة 2: النشر؛ `instagram_content_publish`؛ ثم `GET /{id}?fields=permalink` |
 
-> **⚠️ F2 (مُثبَت بـrespx في مراجعة SPRINT-08):** الثلاثة POST أعلاه (`/feed`, `/media`, `/media_publish`) تمرّ حالياً بحلقة إعادة محاولة العميل (حتى 3 مرات على 5xx/`ReadTimeout`) ⇒ تكرار محتمل. **SPRINT-09 A-2 (D-070):** POST ذو أثر جانبي بلا إعادة في العميل؛ فشل قبل الإرسال ⇒ `transient`، بعده ⇒ `ambiguous`. GET تبقى بإعادة.
+> **✅ F2 أُغلق (SPRINT-09 A-2، D-070):** `_request(..., idempotent=method.upper()=="GET")` — GET يحتفظ بحلقة الإعادة؛ POST عبر `_request_once_side_effecting` **مرة واحدة**: فشل قبل الإرسال (`ConnectError`/`ConnectTimeout`) ⇒ `MetaTransientError`؛ أي فشل بعده (5xx/`ReadTimeout`/كود 1/2) ⇒ `MetaAmbiguousError` ⇒ `PublishOutcome.ambiguous` بلا إعادة لاحقة (A2-I1).
 
 **نقاط داخلية جديدة (M5):** `GET /api/v1/channels` و`GET /api/v1/channels/{channel}` (خلف `CurrentUser`، بلا دور علامة) ⇒ مصفوفة التفعيل: `activation_status`, `capabilities`, `required_scopes`, `activation_requirements[{key,title,owner,status,note}]` — لا سرّ ولا بيانات علامة.
+
+**نقاط WhatsApp Cloud API (M6، `src/modules/whatsapp/client.py` فوق `core/http.py` — D-071، لا SDK):**
+
+| النقطة | الطريقة | قناة الأسرار (D-064) | الاستخدام |
+|---|---|---|---|
+| `/{phone_number_id}?fields=display_phone_number,verified_name` | GET (يُعاد) | Bearer توكن النظام | تحقق الاعتماد عند `POST /account`؛ توكن مرفوض ⇒ 422 `whatsapp_credentials_invalid` ولا صفّ |
+| `/{phone_number_id}/messages` (`type=text`) | POST **مرة واحدة** (D-070) | Bearer | إرسال نصّ حرّ داخل نافذة 24h — فاعل بشري إلزامي |
+| `/{phone_number_id}/messages` (`type=template`) | POST مرة واحدة | Bearer | خارج النافذة — قالب معتمد في WABA (`^[a-z0-9_]+$`) |
+| `/{phone_number_id}/messages` (`status=read`) | POST مرة واحدة | Bearer | `mark_read` |
+| **وارد:** `GET/POST /api/v1/webhooks/whatsapp` | عام (بلا JWT) | `hub.verify_token` ضد `verify_token_hash`؛ `X-Hub-Signature-256` HMAC ضد `app_secret` العلامة | التحقق + استقبال `messages`/`statuses`؛ خطأ توقيع ⇒ 401 وصفر كتابة |
+
+خريطة أكواد Meta ⇒ فئات داخلية: `{130429, 80007, 4, 80004}` ⇒ `rate_limited` (429 + `Retry-After`)؛ `{131026, 131047, 131051}` ⇒ `recipient` (422)؛ `{190, 10}` ⇒ `reauth_required` (409 — ويُعطَّل الحساب: **N1-b**)؛ `{1, 2, 131000}` ⇒ `transient` (503). لا نص Meta في أي استجابة أو سجل.
+
+**نقاط داخلية M6** تحت `/api/v1/brands/{brand_id}/whatsapp`: `POST/GET/DELETE /account` (OWNER)، `GET /conversations` (keyset)، `GET /conversations/{id}/messages`، `POST …/read`، `POST …/archive`، `POST …/messages` (201؛ 200 عند تكرار `Idempotency-Key`؛ 202 عند `ambiguous`)، `POST …/template`، `POST …/suggest-reply` (201؛ 60/ساعة/علامة؛ **صفر** نداء Cloud API)، `POST /reply-drafts/{id}/approve` (200/202/422 `whatsapp_window_closed`)، `POST /reply-drafts/{id}/reject`. دليل الربط الحي خطوة بخطوة في `CURRENT_DIRECTIVE.md` (SPRINT-09 §6-12 — مُعتمَد في `sprints/SPRINT-09_REVIEW.md` §2).
 
 > الحقول التي أوقفتها Meta في v3.3 على `/page/posts` (`caption, description, link, name, object_id, picture, source, type`) **غير مستخدمة**؛ البديل `attachments{…}`.
 
