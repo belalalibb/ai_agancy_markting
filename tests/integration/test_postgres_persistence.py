@@ -519,7 +519,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -924,7 +924,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1945,7 +1945,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2015,7 +2015,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2435,7 +2435,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2564,7 +2564,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2711,7 +2711,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2761,7 +2761,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2919,7 +2919,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -2966,7 +2966,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -3132,7 +3132,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
     at 0008 and come back; no other table is touched."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     wa_tables = {
@@ -3237,7 +3237,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert wa_tables <= present
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
@@ -4189,7 +4189,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
     the pre-cleanup marks the **older** one ``expired`` and the partial unique index
     ``uq_wa_reply_drafts_one_pending`` then rejects a second pending draft."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     command.downgrade(cfg, "0009")
@@ -4211,7 +4211,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
         _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 2
     )
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
     statuses = dict(_rows("SELECT id, status FROM wa_reply_drafts"))
     assert statuses[older] == "expired" and statuses[newer] == "suggested"
     assert (
@@ -4241,34 +4241,35 @@ BRAIN_PROFILE_BODY = {
 }
 
 
-def _brain_client(integration_app: FastAPI) -> tuple[TestClient, dict[str, str]]:
+def _brain_owner(integration_app: FastAPI) -> dict[str, str]:
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
-    return TestClient(integration_app), integration_headers(
-        integration_app.state.settings, OWNER_ID
-    )
+    reset_db_caches()
+    return integration_headers(integration_app.state.settings, OWNER_ID)
 
 
 def test_b1_i1_profile_if_match_cas_and_revisions_on_pg(integration_app: FastAPI) -> None:
     """B1-I1 — ``PUT /profile`` with ``If-Match`` ⇒ version bump + revision row (UNIQUE
-    brand/version); stale ``If-Match`` ⇒ 412 and nothing written; VIEWER-free read."""
-    client, owner = _brain_client(integration_app)
-    assert client.get(f"{BRAIN_PG}/profile", headers=owner).json()["version"] == 1
-    assert _run("SELECT COUNT(*) FROM brand_profiles", scalar=True) == 0  # reads never create
-
-    first = client.put(
-        f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
-    )
-    assert first.status_code == 200, first.text
-    second = client.put(
-        f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
-    )
-    assert second.status_code == 200 and second.json()["version"] == 2
-    stale = client.put(
-        f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
-    )
-    assert stale.status_code == 412
-    assert stale.json()["detail"]["current_version"] == 2
+    brand/version); stale ``If-Match`` ⇒ 412 and nothing written; reads never create rows."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        assert client.get(f"{BRAIN_PG}/profile", headers=owner).json()["version"] == 1
+        first = client.put(
+            f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+        )
+        assert first.status_code == 200, first.text
+        second = client.put(
+            f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+        )
+        assert second.status_code == 200 and second.json()["version"] == 2
+        stale = client.put(
+            f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+        )
+        assert stale.status_code == 412
+        assert stale.json()["detail"]["current_version"] == 2
+        revisions = client.get(f"{BRAIN_PG}/profile/revisions", headers=owner).json()
+        assert [r["version"] for r in revisions["items"]] == [2, 1]
+    reset_db_caches()
     assert (
         _run(
             "SELECT version FROM brand_profiles WHERE brand_id = :b", {"b": BRAND_ID}, scalar=True
@@ -4290,10 +4291,8 @@ def test_b1_i1_profile_if_match_cas_and_revisions_on_pg(integration_app: FastAPI
 def test_b1_i2_competitor_limit_race_is_201_201_201_409_on_pg(integration_app: FastAPI) -> None:
     """B1-I2 — four concurrent ``POST /competitors`` through two ASGI apps ⇒ exactly three
     rows and ``[201, 201, 201, 409]`` (brand row lock serialises count-then-insert)."""
-    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
-    _seed_fresh()
+    owner = _brain_owner(integration_app)
     settings = integration_app.state.settings
-    owner = integration_headers(settings, OWNER_ID)
     from src.main import create_app
 
     async def _race() -> list[int]:
@@ -4327,7 +4326,7 @@ def test_b1_i3_evidence_checks_keyset_and_refresh_from_real_tables_on_pg(
     """B1-I3 — ``ck_brand_evidence_kind_source`` rejects ``measured/public_web``;
     ``POST /evidence/refresh`` measures the five internal metrics from the real
     ``wa_conversations`` / ``wa_messages`` / ``publish_jobs`` tables; keyset paging holds."""
-    client, owner = _brain_client(integration_app)
+    owner = _brain_owner(integration_app)
     with pytest.raises(IntegrityError, match="ck_brand_evidence_kind_source"):
         _run(
             "INSERT INTO brand_evidence (id, brand_id, subject_kind, subject_id, evidence_kind, "
@@ -4341,20 +4340,41 @@ def test_b1_i3_evidence_checks_keyset_and_refresh_from_real_tables_on_pg(
     conv = _wa_conversation_row(account_id, wa_id=WA_CUSTOMER, last_inbound_at=now)
     _run(
         "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, kind, body, "
-        "delivery_status, created_at) VALUES (:id, :c, :b, 'outbound', 'text', 'hi', 'sent', "
-        ":at)",
-        {"id": uuid4(), "c": conv, "b": BRAND_ID, "at": now + timedelta(seconds=90)},
+        "delivery_status, sent_by_user_id, created_at) VALUES (:id, :c, :b, 'outbound', 'text', "
+        "'hi', 'sent', :u, :at)",
+        {
+            "id": uuid4(),
+            "c": conv,
+            "b": BRAND_ID,
+            "u": USER_BY_TENANT[OWNER_ID],
+            "at": now + timedelta(seconds=90),
+        },
     )
 
-    refreshed = client.post(f"{BRAIN_PG}/evidence/refresh", headers=owner)
-    assert refreshed.status_code == 200, refreshed.text
-    assert refreshed.json()["collected"] == 5
-    by_metric = {
-        m: v
-        for m, v in _rows(
-            "SELECT metric, value FROM brand_evidence WHERE brand_id = :b", {"b": BRAND_ID}
-        )
-    }
+    with TestClient(integration_app) as client:
+        refreshed = client.post(f"{BRAIN_PG}/evidence/refresh", headers=owner)
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["collected"] == 5
+        page1 = client.get(f"{BRAIN_PG}/evidence", params={"limit": 2}, headers=owner).json()
+        assert len(page1["items"]) == 2 and page1["next_cursor"]
+        seen = [i["id"] for i in page1["items"]]
+        page2 = client.get(
+            f"{BRAIN_PG}/evidence",
+            params={"limit": 2, "cursor": page1["next_cursor"]},
+            headers=owner,
+        ).json()
+        seen += [i["id"] for i in page2["items"]]
+        page3 = client.get(
+            f"{BRAIN_PG}/evidence",
+            params={"limit": 2, "cursor": page2["next_cursor"]},
+            headers=owner,
+        ).json()
+        seen += [i["id"] for i in page3["items"]]
+        assert len(set(seen)) == 5 and page3["next_cursor"] is None
+    reset_db_caches()
+    by_metric = dict(
+        _rows("SELECT metric, value FROM brand_evidence WHERE brand_id = :b", {"b": BRAND_ID})
+    )
     assert by_metric["wa_conversations_7d"] == {"count": 1, "window_days": 7}
     assert by_metric["posting_frequency_7d"] == {"count": 0, "window_days": 7}
     assert by_metric["wa_approval_rate_30d"] == {"unavailable": "no_data", "window_days": 30}
@@ -4365,26 +4385,13 @@ def test_b1_i3_evidence_checks_keyset_and_refresh_from_real_tables_on_pg(
         for k, s in _rows("SELECT evidence_kind, source_kind FROM brand_evidence")
     )
 
-    page1 = client.get(f"{BRAIN_PG}/evidence", params={"limit": 2}, headers=owner).json()
-    assert len(page1["items"]) == 2 and page1["next_cursor"]
-    seen = [i["id"] for i in page1["items"]]
-    page2 = client.get(
-        f"{BRAIN_PG}/evidence", params={"limit": 2, "cursor": page1["next_cursor"]}, headers=owner
-    ).json()
-    seen += [i["id"] for i in page2["items"]]
-    page3 = client.get(
-        f"{BRAIN_PG}/evidence", params={"limit": 2, "cursor": page2["next_cursor"]}, headers=owner
-    ).json()
-    seen += [i["id"] for i in page3["items"]]
-    assert len(set(seen)) == 5 and page3["next_cursor"] is None
-
 
 def test_b1_i4_cost_log_feeds_budget_union_and_daily_report_on_pg(
     integration_app: FastAPI,
 ) -> None:
     """B1-I4 — ``ai_cost_log`` rows count in the shared daily budget (``UNION ALL``) and in
     ``GET /brain/cost`` (OWNER only); the error-iff-category CHECK holds; no text column."""
-    client, owner = _brain_client(integration_app)
+    owner = _brain_owner(integration_app)
     from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
 
     def _cost(outcome: str, category: str | None, *, days_ago: int = 0) -> None:
@@ -4411,23 +4418,26 @@ def test_b1_i4_cost_log_feeds_budget_union_and_daily_report_on_pg(
     assert not columns & {"prompt", "output", "text", "body"}
 
     async def _usage() -> int:
-        reset_db_caches()
-        from src.core import database
-
-        async with database.get_session_factory()() as session:
-            return await PgBudgetUsageReader(session).combined_usage_since(
-                BRAND_ID, datetime.now(tz=UTC) - timedelta(hours=24)
-            )
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            async with AsyncSession(eng) as session:
+                return await PgBudgetUsageReader(session).combined_usage_since(
+                    BRAND_ID, datetime.now(tz=UTC) - timedelta(hours=24)
+                )
+        finally:
+            await eng.dispose()
 
     assert asyncio.run(_usage()) == 300  # two rows of 150 tokens inside 24 h
 
-    report = client.get(f"{BRAIN_PG}/cost", headers=owner)
-    assert report.status_code == 200, report.text
-    body = report.json()
-    assert body["total_calls"] == 3 and body["items"][0]["errors"] == 1
-    assert body["total_prompt_tokens"] == 300
     manager = integration_headers(integration_app.state.settings, AGENCY_ID)
-    assert client.get(f"{BRAIN_PG}/cost", headers=manager).status_code in (403, 404)
+    with TestClient(integration_app) as client:
+        report = client.get(f"{BRAIN_PG}/cost", headers=owner)
+        assert report.status_code == 200, report.text
+        body = report.json()
+        assert body["total_calls"] == 3 and body["items"][0]["errors"] == 1
+        assert body["total_prompt_tokens"] == 300
+        assert client.get(f"{BRAIN_PG}/cost", headers=manager).status_code in (403, 404)
+    reset_db_caches()
 
 
 def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
