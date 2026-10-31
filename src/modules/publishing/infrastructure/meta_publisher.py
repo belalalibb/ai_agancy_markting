@@ -25,6 +25,7 @@ from src.modules.publishing.domain.publisher import PageTokenProvider, ResolvedP
 from src.modules.social_connect.domain.models import AccountStatus
 from src.modules.social_connect.domain.repository import ConnectedAccountRepository
 from src.modules.social_connect.exceptions import (
+    MetaAmbiguousError,
     MetaGraphError,
     MetaNetworkError,
     MetaOAuthError,
@@ -141,6 +142,21 @@ class MetaPublisher:
                 result = await self._client.publish_page_post(
                     page_token, target.page_id, revision.body
                 )
+        except MetaAmbiguousError as exc:
+            # D-070 (SPRINT-09 A-2): the POST was sent exactly once; Meta may have applied
+            # it. Scheduler records attempt ``ambiguous`` + job ``failed`` — no auto-retry.
+            logger.info(
+                "publish provider ambiguous: job=%s code=%s http=%s",
+                job.id,
+                exc.code,
+                exc.http_status,
+            )
+            return PublishOutcome.ambiguous(
+                graph_error_code=exc.code,
+                graph_error_subcode=exc.subcode,
+                graph_trace_id=exc.fbtrace_id,
+                external_post_id=creation_id,
+            )
         except MetaGraphError as exc:
             error_class = classify_graph_error(exc)
             logger.info(

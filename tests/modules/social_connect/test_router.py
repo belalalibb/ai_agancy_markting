@@ -937,12 +937,23 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
 
     offenders = [h for name in sorted(reachable) for h in walk(schemas[name], name)]
     assert offenders == [], offenders
-    # Request side: password may appear, but never a hash or secret.
+    # Request side: password may appear, but never a hash or secret. SPRINT-09 B-1 adds one
+    # more *write-only* credential intake — the BYOK Cloud API number (``WhatsAppAccountCreate``:
+    # ``system_token`` / ``app_secret`` / ``verify_token``, ``repr=False``, encrypted at rest,
+    # §2-0 ج). It is request-only: the response closure above still forbids these names in
+    # every response schema, and ``WhatsAppAccountPublic`` is asserted to be reachable.
+    byok_request_fields = {
+        "WhatsAppAccountCreate/properties/system_token",
+        "WhatsAppAccountCreate/properties/app_secret",
+        "WhatsAppAccountCreate/properties/verify_token",
+    }
+    assert "WhatsAppAccountCreate" not in reachable
+    assert "WhatsAppAccountPublic" in reachable
     request_hits = [
         h
         for name in sorted(set(schemas) - reachable)
         for h in walk(schemas[name], name)
-        if "password" not in h.lower()
+        if "password" not in h.lower() and h not in byok_request_fields
     ]
     assert request_hits == [], request_hits
     # And no path leaks a token-like segment either.

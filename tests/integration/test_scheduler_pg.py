@@ -596,3 +596,70 @@ async def test_b2_i1_publisher_resolver_routes_meta_and_structural_jobs_on_pg(
     # Nothing left to do: no retry is ever scheduled for a channel_not_activated failure.
     assert await scheduler.run_once(now + timedelta(hours=1)) == 0
     assert meta.calls == {fb_job.id: 1} and structural_calls == ["linkedin"]
+
+
+# ================================================================ SPRINT-09 A-2 (D-070) ===
+async def test_a2_i1_ambiguous_publisher_outcome_fails_job_without_later_retry(
+    engine: AsyncEngine,
+    session_factory: SessionFactory,
+    integration_settings: Settings,
+    encryption: TokenEncryptionService,
+    world: UUID,
+) -> None:
+    """A2-I1 — the publisher reports ``MetaAmbiguousError`` ⇒ ``PublishOutcome.ambiguous``:
+    attempt ``ambiguous``, job ``failed(ambiguous_outcome)``, item ``publish_failed``; later
+    cycles never retry it (the post may already be live)."""
+    from src.modules.publishing.domain.publisher import PageTokenProvider
+    from src.modules.publishing.infrastructure.meta_publisher import MetaPublisher
+    from src.modules.social_connect.exceptions import MetaAmbiguousError
+
+    class AmbiguousClient:
+        """Stands in for ``MetaGraphClient``: the one-shot POST raised after being sent."""
+
+        calls = 0
+
+        async def publish_page_post(self, token: str, page_id: str, body: str):  # noqa: ANN202
+            AmbiguousClient.calls += 1
+            raise MetaAmbiguousError("outcome unknown", code=2, http_status=502, fbtrace_id="t")
+
+    class CountingPublisher:
+        def __init__(self) -> None:
+            self.inner = MetaPublisher(AmbiguousClient())  # type: ignore[arg-type]
+            self.calls: dict[UUID, int] = {}
+
+        async def publish(
+            self,
+            job: PublishJob,
+            revision: ContentRevision,
+            provider: PageTokenProvider,
+            *,
+            last_creation_id: str | None = None,
+        ) -> PublishOutcome:
+            self.calls[job.id] = self.calls.get(job.id, 0) + 1
+            return await self.inner.publish(
+                job, revision, provider, last_creation_id=last_creation_id
+            )
+
+    settings = integration_settings.model_copy(
+        update={"publish_retry_backoff_seconds": (1, 1, 1), "publish_max_attempts": 3}
+    )
+    now = datetime.now(tz=UTC)
+    item, job = await _scheduled_item(session_factory, run_at=now - timedelta(minutes=1))
+    publisher = CountingPublisher()
+    scheduler = _scheduler(session_factory, publisher, settings, encryption)  # type: ignore[arg-type]
+
+    assert await scheduler.run_once(now) == 1
+    assert publisher.calls == {job.id: 1} and AmbiguousClient.calls == 1
+    status_, attempts, lu, lo, next_at, _p, _pl, err = await _job_row(engine, job.id)
+    assert status_ == "failed" and attempts == 1 and err == "ambiguous_outcome"
+    assert lu is None and lo is None and next_at is None
+    rows = await _attempts(engine, job.id)
+    assert [a[:3] for a in rows] == [(1, "ambiguous", "ambiguous_outcome")]
+    item_status, scheduled_for, _pub = await _item_row(engine, item.id)
+    assert item_status == "publish_failed" and scheduled_for is None
+    assert counters["publish_failed"] == 1 and counters["publish_retried"] == 0
+
+    # Later cycles (well past any backoff) never pick the job up again.
+    for delta in (timedelta(seconds=5), timedelta(hours=1), timedelta(days=1)):
+        assert await scheduler.run_once(now + delta) == 0
+    assert publisher.calls == {job.id: 1} and AmbiguousClient.calls == 1

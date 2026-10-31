@@ -63,6 +63,7 @@ from src.modules.social_connect.domain.status_marker import StatusMarker
 from src.modules.social_connect.exceptions import (
     ConnectionRevokedError,
     InstagramNotLinkedError,
+    MetaAmbiguousError,
     MetaGraphError,
     MetaNetworkError,
     MetaRateLimitError,
@@ -518,7 +519,12 @@ class MetaConnectService:
             return await self._client.debug_token(long_lived)
         except MetaTokenExpiredError:
             raise
-        except (MetaNetworkError, MetaTransientError, MetaRateLimitError) as exc:
+        except (
+            MetaNetworkError,
+            MetaTransientError,
+            MetaAmbiguousError,  # D-070: /debug_token is a POST transport; still self-healing
+            MetaRateLimitError,
+        ) as exc:
             logger.warning(
                 "debug_token failed; continuing with unknown identity/expiry: %s "
                 "(code=%s, http=%s)",

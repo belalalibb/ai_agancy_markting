@@ -64,7 +64,9 @@ class ContentBodyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     body: str = Field(min_length=1, max_length=5000)
-    media_refs: list[MediaRef] = Field(default_factory=list, max_length=1)
+    # SPRINT-09 A-3 (F3): omitted/``null`` ⇒ keep the current revision's refs; ``[]`` ⇒
+    # remove them. (Explicit compat change from SPRINT-07, where omission meant ``[]``.)
+    media_refs: list[MediaRef] | None = Field(default=None, max_length=1)
 
 
 class RejectRequest(BaseModel):

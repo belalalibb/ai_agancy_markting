@@ -97,11 +97,14 @@ ignore = [
 "tiktok".msg = "No platform SDK: channel adapters are structural until activated (SPRINT-08)"
 "facebook_business".msg = "No platform SDK: Meta goes through social_connect.meta_client (SPRINT-08)"
 "requests".msg = "Use src.core.http shared client"
+# SPRINT-09 (D-071): PyWa is a read-only reference — the Cloud API client is hand-written.
+"pywa".msg = "Read-only reference — D-071; use src.modules.whatsapp.client"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "ANN", "SLF001", "TID251"]
 "src/modules/ai_gateway/**" = ["TID251"]
 "src/modules/social_connect/meta_client.py" = ["TID251"]
+"src/modules/whatsapp/client.py" = ["TID251"]
 "src/core/**" = ["TID251"]
 
 [tool.ruff.format]

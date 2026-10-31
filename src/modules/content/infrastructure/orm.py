@@ -45,8 +45,11 @@ class ContentItemRow(Base):
             "(status = 'scheduled') = (scheduled_for IS NOT NULL)",
             name="ck_content_items_scheduled_for_iff_scheduled",
         ),
+        # SPRINT-09 A-1 (0008): ``archived`` may keep ``published_at`` (it was published).
         CheckConstraint(
-            "(status = 'published') = (published_at IS NOT NULL)",
+            "(status = 'published' AND published_at IS NOT NULL) "
+            "OR (status = 'archived') "
+            "OR (status NOT IN ('published', 'archived') AND published_at IS NULL)",
             name="ck_content_items_published_at_iff_published",
         ),
     )

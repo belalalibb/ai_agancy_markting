@@ -540,11 +540,21 @@ class FakeContentRepository:
     ):
         from src.modules.content.domain.models import ContentRevision
 
+        if media_refs is None:  # SPRINT-09 A-3: None ⇒ keep the current revision's refs
+            item = self.items[item_id]
+            media_refs = next(
+                (
+                    list(rev.media_refs)
+                    for rev in self.revisions.get(item_id, [])
+                    if rev.id == item.current_revision_id
+                ),
+                [],
+            )
         revision = ContentRevision(
             item_id=item_id,
             revision_no=len(self.revisions.get(item_id, [])) + 1,
             body=body,
-            media_refs=list(media_refs or []),
+            media_refs=list(media_refs),
             provenance=provenance,
             created_by_tenant_id=created_by_tenant_id,
             created_at=created_at,
@@ -875,3 +885,310 @@ class FakePublisher:
         if self.barrier is not None:
             await self.barrier.wait()
         return self.outcomes.get(job.id, self.default)
+
+
+# =============================================================== SPRINT-09 WhatsApp ======
+class FakeWhatsAppRepository:
+    """In-memory ``WhatsAppRepository`` (mirrors ``PostgresWhatsAppRepository`` semantics:
+    wamid dedupe, ``(account_id, wa_id)`` upsert, keyset ordering, token aggregation)."""
+
+    def __init__(self) -> None:
+        self.accounts: dict[UUID, object] = {}
+        self.conversations: dict[UUID, object] = {}
+        self.messages: dict[UUID, object] = {}
+        self.drafts: dict[UUID, object] = {}
+        self.signals: dict[UUID, object] = {}
+        # B-3: the content repository whose ``ai_generated`` revisions share the daily budget
+        # (mirrors the PG ``UNION ALL``); wired by the ``wa_app`` fixture.
+        self.content_repo: FakeContentRepository | None = None
+
+    # ------------------------------------------------------------- accounts ----
+    async def create_account(self, account):  # noqa: ANN001, ANN201
+        self.accounts[account.id] = account
+        return account
+
+    async def get_account(self, brand_id: UUID):  # noqa: ANN201
+        return next((a for a in self.accounts.values() if a.brand_id == brand_id), None)
+
+    async def get_account_by_id(self, account_id: UUID):  # noqa: ANN201
+        return self.accounts.get(account_id)
+
+    async def get_account_by_phone_number_id(self, phone_number_id: str):  # noqa: ANN201
+        return next(
+            (a for a in self.accounts.values() if a.phone_number_id == phone_number_id), None
+        )
+
+    async def list_active_accounts(self):  # noqa: ANN201
+        return [a for a in self.accounts.values() if a.status.value == "active"]
+
+    async def set_account_status(self, account_id: UUID, status, *, now) -> None:  # noqa: ANN001
+        acc = self.accounts[account_id]
+        self.accounts[account_id] = acc.model_copy(update={"status": status, "updated_at": now})
+
+    # -------------------------------------------------------- conversations ----
+    async def get_conversation(self, brand_id: UUID, conversation_id: UUID):  # noqa: ANN201
+        conv = self.conversations.get(conversation_id)
+        return conv if conv is not None and conv.brand_id == brand_id else None
+
+    async def get_conversation_for_update(self, brand_id: UUID, conversation_id: UUID):  # noqa: ANN201
+        return await self.get_conversation(brand_id, conversation_id)
+
+    async def upsert_conversation_inbound(  # noqa: ANN201
+        self,
+        *,
+        brand_id: UUID,
+        account_id: UUID,
+        wa_id: str,
+        profile_name,
+        at,
+        window_expires_at,  # noqa: ANN001
+    ):
+        from src.modules.whatsapp.domain.models import Conversation, ConversationStatus
+
+        existing = next(
+            (
+                c
+                for c in self.conversations.values()
+                if c.account_id == account_id and c.wa_id == wa_id
+            ),
+            None,
+        )
+        if existing is None:
+            conv = Conversation(
+                brand_id=brand_id,
+                account_id=account_id,
+                wa_id=wa_id,
+                profile_name=profile_name,
+                last_inbound_at=at,
+                window_expires_at=window_expires_at,
+                unread_count=1,
+                created_at=at,
+                updated_at=at,
+            )
+        else:
+            conv = existing.model_copy(
+                update={
+                    "profile_name": profile_name or existing.profile_name,
+                    "last_inbound_at": max(filter(None, [existing.last_inbound_at, at])),
+                    "window_expires_at": max(
+                        filter(None, [existing.window_expires_at, window_expires_at])
+                    ),
+                    "unread_count": existing.unread_count + 1,
+                    "status": ConversationStatus.OPEN,
+                    "updated_at": at,
+                }
+            )
+        self.conversations[conv.id] = conv
+        return conv
+
+    async def list_conversations(self, brand_id: UUID, *, status, limit: int, cursor):  # noqa: ANN001, ANN201
+        from datetime import UTC, datetime
+
+        floor = datetime.min.replace(tzinfo=UTC)
+        rows = [
+            c
+            for c in self.conversations.values()
+            if c.brand_id == brand_id and (status is None or c.status == status)
+        ]
+        rows.sort(key=lambda c: (c.last_inbound_at or floor, c.id.int), reverse=True)
+        if cursor is not None:
+            last_at, last_id = cursor
+            rows = [
+                c for c in rows if (c.last_inbound_at or floor, c.id.int) < (last_at, last_id.int)
+            ]
+        out = []
+        for c in rows[: limit + 1]:
+            last = await self.last_message(c.id)
+            pending = await self.pending_draft(c.id)
+            out.append((c, last.body if last else None, pending is not None))
+        return out
+
+    async def mark_conversation_read(self, conversation_id: UUID, *, now) -> None:  # noqa: ANN001
+        c = self.conversations[conversation_id]
+        self.conversations[conversation_id] = c.model_copy(
+            update={"unread_count": 0, "updated_at": now}
+        )
+
+    async def mark_conversation_read_delta(self, conversation_id: UUID, delta: int) -> None:
+        c = self.conversations[conversation_id]
+        self.conversations[conversation_id] = c.model_copy(
+            update={"unread_count": max(c.unread_count + delta, 0)}
+        )
+
+    async def set_conversation_status(self, conversation_id: UUID, status, *, now) -> None:  # noqa: ANN001
+        c = self.conversations[conversation_id]
+        self.conversations[conversation_id] = c.model_copy(
+            update={"status": status, "updated_at": now}
+        )
+
+    async def touch_outbound(self, conversation_id: UUID, *, at) -> None:  # noqa: ANN001
+        c = self.conversations[conversation_id]
+        self.conversations[conversation_id] = c.model_copy(
+            update={"last_outbound_at": at, "updated_at": at}
+        )
+
+    # ------------------------------------------------------------- messages ----
+    async def insert_inbound_if_new(self, message) -> bool:  # noqa: ANN001
+        if message.wamid and any(m.wamid == message.wamid for m in self.messages.values()):
+            return False
+        self.messages[message.id] = message
+        return True
+
+    async def insert_outbound(self, message):  # noqa: ANN001, ANN201
+        self.messages[message.id] = message
+        return message
+
+    async def get_message(self, brand_id: UUID, message_id: UUID):  # noqa: ANN201
+        m = self.messages.get(message_id)
+        return m if m is not None and m.brand_id == brand_id else None
+
+    async def get_message_by_client_id(self, brand_id: UUID, client_message_id: UUID):  # noqa: ANN201
+        return next(
+            (
+                m
+                for m in self.messages.values()
+                if m.brand_id == brand_id and m.client_message_id == client_message_id
+            ),
+            None,
+        )
+
+    def _ordered(self, conversation_id: UUID) -> list:
+        return sorted(
+            (m for m in self.messages.values() if m.conversation_id == conversation_id),
+            key=lambda m: (m.created_at, m.id.int),
+        )
+
+    async def last_inbound_wamid(self, conversation_id: UUID):  # noqa: ANN201
+        for m in reversed(self._ordered(conversation_id)):
+            if m.direction.value == "inbound" and m.wamid:
+                return m.wamid
+        return None
+
+    async def last_message(self, conversation_id: UUID):  # noqa: ANN201
+        rows = self._ordered(conversation_id)
+        return rows[-1] if rows else None
+
+    async def list_messages(self, conversation_id: UUID, *, limit: int, cursor):  # noqa: ANN001, ANN201
+        rows = self._ordered(conversation_id)
+        if cursor is not None:
+            last_at, last_id = cursor
+            rows = [m for m in rows if (m.created_at, m.id.int) > (last_at, last_id.int)]
+        return rows[: limit + 1]
+
+    async def recent_messages(self, conversation_id: UUID, *, limit: int):  # noqa: ANN201
+        return list(reversed(self._ordered(conversation_id)))[:limit]
+
+    async def set_delivery_status(  # noqa: ANN201
+        self,
+        message_id: UUID,
+        status,
+        *,
+        wamid=None,
+        error_code=None,  # noqa: ANN001
+    ):
+        m = self.messages[message_id]
+        update = {"delivery_status": status}
+        if wamid is not None:
+            update["wamid"] = wamid
+        if error_code is not None:
+            update["error_code"] = error_code
+        self.messages[message_id] = m.model_copy(update=update)
+
+    async def update_status_by_wamid(self, wamid: str, status, *, error_code) -> bool:  # noqa: ANN001
+        for mid, m in self.messages.items():
+            if m.wamid == wamid and m.direction.value == "outbound":
+                update = {"delivery_status": status}
+                if error_code is not None:
+                    update["error_code"] = error_code
+                self.messages[mid] = m.model_copy(update=update)
+                return True
+        return False
+
+    # --------------------------------------------------------- reply drafts ----
+    async def create_draft(self, draft):  # noqa: ANN001, ANN201
+        self.drafts[draft.id] = draft
+        return draft
+
+    async def get_draft(self, brand_id: UUID, draft_id: UUID):  # noqa: ANN201
+        d = self.drafts.get(draft_id)
+        return d if d is not None and d.brand_id == brand_id else None
+
+    async def pending_draft(self, conversation_id: UUID):  # noqa: ANN201
+        rows = [
+            d
+            for d in self.drafts.values()
+            if d.conversation_id == conversation_id and d.status.value == "suggested"
+        ]
+        rows.sort(key=lambda d: d.created_at, reverse=True)
+        return rows[0] if rows else None
+
+    async def list_drafts(self, conversation_id: UUID):  # noqa: ANN201
+        return sorted(
+            (d for d in self.drafts.values() if d.conversation_id == conversation_id),
+            key=lambda d: (d.created_at, d.id.int),
+        )
+
+    async def decide_draft(  # noqa: ANN201
+        self,
+        draft_id: UUID,
+        *,
+        status,  # noqa: ANN001
+        final_body,  # noqa: ANN001
+        decided_by_user_id,  # noqa: ANN001
+        decided_at,  # noqa: ANN001
+        rejection_reason=None,  # noqa: ANN001
+    ):
+        d = self.drafts[draft_id]
+        self.drafts[draft_id] = d.model_copy(
+            update={
+                "status": status,
+                "final_body": final_body,
+                "decided_by_user_id": decided_by_user_id,
+                "decided_at": decided_at,
+                "rejection_reason": rejection_reason,
+            }
+        )
+
+    async def expire_pending_drafts(self, conversation_id: UUID, *, now):  # noqa: ANN001, ANN201
+        from src.modules.whatsapp.domain.models import DraftStatus
+
+        changed = []
+        for did, d in list(self.drafts.items()):
+            if d.conversation_id == conversation_id and d.status is DraftStatus.SUGGESTED:
+                self.drafts[did] = d.model_copy(
+                    update={"status": DraftStatus.EXPIRED, "decided_at": now}
+                )
+                changed.append(self.drafts[did])
+        return changed
+
+    # ------------------------------------------------------------- signals ----
+    async def add_signal(self, signal):  # noqa: ANN001, ANN201
+        self.signals[signal.id] = signal
+        return signal
+
+    async def ai_token_usage_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
+        return sum(
+            int(d.provenance.get("prompt_tokens") or 0)
+            + int(d.provenance.get("completion_tokens") or 0)
+            for d in self.drafts.values()
+            if d.brand_id == brand_id and d.created_at >= since
+        )
+
+    async def ai_token_usage_combined_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
+        """Mirror of the PG ``UNION ALL``: drafts + (optional) linked content repository."""
+        total = await self.ai_token_usage_since(brand_id, since)
+        if self.content_repo is not None:
+            total += await self.content_repo.ai_token_usage_since(brand_id, since)
+        return total
+
+    async def learning_signals(self, brand_id: UUID):  # noqa: ANN201
+        return [
+            {
+                "signal": s.signal.value,
+                "edit_distance_ratio": s.edit_distance_ratio,
+                "rejection_reason": s.rejection_reason.value if s.rejection_reason else None,
+                "features": dict(s.features),
+            }
+            for s in sorted(self.signals.values(), key=lambda s: s.created_at)
+            if s.brand_id == brand_id
+        ]

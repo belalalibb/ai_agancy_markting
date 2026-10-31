@@ -66,7 +66,9 @@ class ContentRepository(Protocol):
         media_refs: list[dict[str, Any]] | None = None,
     ) -> ContentRevision:
         """Insert the next revision (``revision_no`` assigned here — the caller must hold the
-        aggregate lock from :meth:`get_for_update`) and point ``current_revision_id`` at it."""
+        aggregate lock from :meth:`get_for_update`) and point ``current_revision_id`` at it.
+        SPRINT-09 A-3: ``media_refs=None`` ⇒ copy the current revision's refs; ``[]`` ⇒
+        drop them."""
         ...
 
     async def list_revisions(self, item_id: UUID, *, limit: int) -> list[ContentRevision]:

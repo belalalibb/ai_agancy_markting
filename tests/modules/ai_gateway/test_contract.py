@@ -26,10 +26,20 @@ SRC = Path(__file__).resolve().parents[3] / "src"
 BANNED_MODULES = ("httpx", "openai", "anthropic", "litellm", "google.generativeai")
 # SPRINT-08 §2-0 (د): platform SDKs + ``requests`` are banned too (different messages; the
 # AIGateway message stays on the five above).
-BANNED_PLATFORM_MODULES = ("linkedin", "tweepy", "tiktok", "facebook_business", "requests")
+BANNED_PLATFORM_MODULES = (
+    "linkedin",
+    "tweepy",
+    "tiktok",
+    "facebook_business",
+    "requests",
+    "pywa",  # SPRINT-09 D-071: read-only reference
+)
 # Must mirror ``[tool.ruff.lint.per-file-ignores]`` for TID251 in pyproject.toml.
 ALLOWED_PREFIXES = ("modules/ai_gateway/", "core/")
-ALLOWED_FILES = ("modules/social_connect/meta_client.py",)
+ALLOWED_FILES = (
+    "modules/social_connect/meta_client.py",
+    "modules/whatsapp/client.py",  # SPRINT-09 B-1 (§2-0 هـ)
+)
 
 
 def _imports_of(path: Path) -> set[str]:
@@ -83,6 +93,8 @@ def test_b0_u1_pyproject_bans_the_same_modules() -> None:
     ignores = lint["per-file-ignores"]
     assert "TID251" in ignores["src/modules/ai_gateway/**"]
     assert "TID251" in ignores["src/modules/social_connect/meta_client.py"]
+    assert "TID251" in ignores["src/modules/whatsapp/client.py"]  # SPRINT-09
+    assert banned["pywa"]["msg"] == "Read-only reference — D-071; use src.modules.whatsapp.client"
     assert "TID251" in ignores["src/core/**"]
     assert "TID251" in ignores["tests/**"]
 

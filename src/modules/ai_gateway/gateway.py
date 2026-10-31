@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.modules.ai_gateway.contract import CredentialMode, Operation, Usage
 
-Purpose = Literal["content_draft"]
+Purpose = Literal["content_draft", "reply_suggestion"]  # SPRINT-09 B-3 adds reply_suggestion
 
 
 class CompletionRequest(BaseModel):

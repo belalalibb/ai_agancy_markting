@@ -21,6 +21,10 @@ PUBLIC = {
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/refresh"),
     ("GET", "/api/v1/social/meta/callback"),
+    # SPRINT-09 B-1: Meta calls these without our JWT — GET is the hub.challenge handshake
+    # (verify_token hash), POST is protected by the mandatory X-Hub-Signature-256 HMAC.
+    ("GET", "/api/v1/webhooks/whatsapp"),
+    ("POST", "/api/v1/webhooks/whatsapp"),
     ("GET", "/health"),
     ("GET", "/health/ready"),
 }
@@ -41,7 +45,15 @@ IDS = [f"{m} {p}" for m, p in PROTECTED]
 
 
 def _concrete(template: str) -> str:
-    for name in ("brand_id", "connection_id", "grant_id", "tenant_id", "item_id"):
+    for name in (
+        "brand_id",
+        "connection_id",
+        "grant_id",
+        "tenant_id",
+        "item_id",
+        "conversation_id",  # SPRINT-09
+        "draft_id",
+    ):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
     return template
 
@@ -51,7 +63,12 @@ def test_protected_route_count_is_reported() -> None:
     print(f"\nB-U1 protected routes: {PROTECTED_ROUTE_COUNT}")
     # auth: logout, logout-all, me (3) + tenancy: 7 + social: 8 + content: 12 (SPRINT-06)
     # + publishing: GET …/publish, POST …/publish/retry (2, SPRINT-07 B7-U3) = 32
-    assert PROTECTED_ROUTE_COUNT == 34, PROTECTED  # SPRINT-08 B-2: +2 GET /channels
+    # SPRINT-09 B-2: +9 whatsapp (account ×3, conversations, messages, read, send, template,
+    # archive) ⇒ 43. (The directive's "42" counted eight; the nine listed routes are
+    # authoritative — documented in §6.)
+    # SPRINT-09 B-3: +3 (suggest-reply, reply-drafts approve, reply-drafts reject) ⇒ 46
+    # (directive says 45 for the same reason).
+    assert PROTECTED_ROUTE_COUNT == 46, PROTECTED
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)
