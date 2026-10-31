@@ -205,7 +205,7 @@ pytest -k "a1_ or a2_ or a3_ or b1_u or b1_m or b1_i or b2_u or b2_i or b3_u or 
 
 - **حالة التنفيذ:** `[x] مكتمل` / `[ ] جزئي`
 - **Commit SHA Part A:** `0c0f3bd` — **B-1:** `bed94f3` — **B-2:** `33e3023` — **B-3:** `89e5730` — **docs:** (كوميت التوثيق الأعلى — SHA في وصف الـPR)
-- **PR:** #N (`work/implementation` ⇒ `main` @ `ec9f7f0`) — **CI:** …/5 (يُحدَّث في وصف الـPR)
+- **PR:** [#29](https://github.com/belalalibb/ai_agancy_markting/pull/29) (`work/implementation` ⇒ `main` @ `ec9f7f0`) — **CI:** يُثبَّت على الكوميت الأعلى في وصف الـPR
 - **الاختبارات:** وحدة 885 / تكامل 65 / الكل **950 ناجحاً، 0 فشل** (PG 17 حقيقية، `pytest --cov=src --cov-fail-under=95 -p no:cacheprovider`) — **التغطية: 98.05%**. الجديدة في SPRINT-09: `pytest -k "a1_ or a2_ or a3_ or b1_u or b1_m or b1_i or b2_u or b2_i or b3_u or b3_i"` ⇒ 232 مُختاراً (يشمل أسماء SPRINT-06/07/08 المتطابقة البادئة). خطّ الأساس 830 ⇒ 950 (+120). كل كوميت من الأربعة يمرّ الحزمة كاملة وحده (شجرة A: 848/98.88%؛ B-1 وB-2 وB-3: سجلات `/tmp/full_B1.log`، `/tmp/full_B2.log`، `/tmp/full.log` — B-3 = 950/98.05%).
 - **A-1..A-3 (بالسطر):**
   - **A-1 (F1):** `alembic/versions/0008_published_at_check.py` يُسقط ويعيد `ck_content_items_published_at_iff_published` بـ`(status = 'published' AND published_at IS NOT NULL) OR (status = 'archived') OR (status NOT IN ('published','archived') AND published_at IS NULL)`؛ المرآة في `src/modules/content/infrastructure/orm.py`. اختبارات: `test_a1_i1_published_item_archived_via_api_keeps_published_at_on_pg`، `test_a1_i2_scheduled_item_archived_via_api_has_null_published_at_on_pg`، `test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg`.
