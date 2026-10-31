@@ -42,7 +42,7 @@ LINKEDIN = ChannelDefinition(
             title="LinkedIn developer app created",
             owner=RequirementOwner.PLATFORM_OWNER,
             status=RequirementStatus.NOT_STARTED,
-            note="LinkedIn Developer Portal; client id/secret as environment variables.",
+            note="LinkedIn Developer Portal; app credentials live only in environment variables.",
         ),
         ActivationRequirement(
             key="marketing_api_access",

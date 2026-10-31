@@ -49,7 +49,7 @@ X = ChannelDefinition(
             title="App configured for OAuth 2.0 with PKCE (user context)",
             owner=RequirementOwner.PLATFORM_OWNER,
             status=RequirementStatus.NOT_STARTED,
-            note="Client id/secret as environment variables.",
+            note="App credentials live only in environment variables.",
         ),
         ActivationRequirement(
             key="brand_oauth",

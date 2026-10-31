@@ -1414,10 +1414,174 @@ def test_b7_u3_protected_route_count_and_openapi_operations(client: TestClient) 
     the content + publishing module exposes exactly 14 operations over 13 paths."""
     from tests.test_auth_guard import PROTECTED, PROTECTED_ROUTE_COUNT
 
-    assert PROTECTED_ROUTE_COUNT == 32, PROTECTED
+    assert PROTECTED_ROUTE_COUNT == 34, PROTECTED  # SPRINT-08 B-2: 32 + GET /channels (x2)
     paths = client.get("/openapi.json").json()["paths"]
     content_paths = {p for p in paths if "/content/" in p}
     assert len(content_paths) == 13
     assert sum(len(paths[p]) for p in content_paths) == 14
     # Every content path is in the guard's protected list (``PROTECTED`` = ``(METHOD, path)``).
     assert content_paths <= {path for _method, path in PROTECTED}
+
+
+# ------------------------------------------------ SPRINT-08 B-2 channels API + 422 --
+def test_channels_endpoint_shape_and_no_secrets(client: TestClient, as_: Headers) -> None:
+    """B2-U2 — ``GET /channels`` for any authenticated user: five items, the documented
+    shape, no key anywhere that smells like a secret, no brand data; ``/{channel}`` mirrors
+    one item and an unknown value is 404 ``unknown_channel``; anonymous ⇒ 401."""
+    res = client.get(f"{API}/channels", headers=as_(STRANGER_ID))  # any user, no brand role
+    assert res.status_code == 200, res.text
+    channels = res.json()["channels"]
+    assert [c["channel"] for c in channels] == [
+        "facebook_page",
+        "instagram",
+        "linkedin",
+        "x",
+        "tiktok",
+    ]
+    assert {c["activation_status"] for c in channels if c["provider"] == "meta"} == {"active"}
+    assert {c["activation_status"] for c in channels if c["provider"] != "meta"} == {
+        "not_configured"
+    }
+    expected_keys = {
+        "channel",
+        "display_name",
+        "provider",
+        "activation_status",
+        "capabilities",
+        "required_scopes",
+        "activation_requirements",
+    }
+
+    def _walk(node: object, path: str = "") -> list[str]:
+        found: list[str] = []
+        if isinstance(node, dict):
+            for key, value in node.items():
+                found.append(f"{path}.{key}")
+                found += _walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for value in node:
+                found += _walk(value, path)
+        return found
+
+    for item in channels:
+        assert set(item) == expected_keys, item
+        assert set(item["capabilities"]) == {
+            "text_limit",
+            "requires_media",
+            "max_media",
+            "media_kinds",
+            "supports_link",
+            "supports_scheduling",
+        }
+        for req in item["activation_requirements"]:
+            assert set(req) == {"key", "title", "owner", "status", "note"}
+    # No key anywhere in the payload contains token|secret|key — ``requirement.key`` is the
+    # row label (``developer_app`` …), the only accepted exception; no secret-like values.
+    keys = _walk(res.json())
+    suspicious = [
+        k
+        for k in keys
+        if any(w in k.rsplit(".", 1)[-1].lower() for w in ("token", "secret", "key"))
+        and not k.endswith(".activation_requirements.key")
+    ]
+    assert suspicious == []
+    text = res.text.lower()
+    assert "gaaaaa" not in text and str(BRAND_ID) not in text and "nile" not in text
+    assert "secret" not in text and "token" not in text
+
+    one = client.get(f"{API}/channels/x", headers=as_(STRANGER_ID))
+    assert one.status_code == 200 and one.json() == channels[3]
+    assert one.json()["capabilities"]["text_limit"] == 280
+    missing = client.get(f"{API}/channels/myspace", headers=as_(STRANGER_ID))
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["error"] == "unknown_channel"
+    assert client.get(f"{API}/channels").status_code == 401
+
+
+def test_schedule_on_not_configured_channel_is_422_before_connection_checks(
+    client: TestClient,
+    as_: Headers,
+    fake_repo: FakeConnectedAccountRepository,
+    publish_repo,  # noqa: ANN001
+) -> None:
+    """B2-U3 — brand with **no** connection + approved ``x`` item ⇒ ``schedule`` is 422
+    ``channel_not_activated`` (not 409 / not ``target_page_not_selected``), the payload lists
+    only incomplete requirements (``developer_account`` among them), no job is created; the
+    draft/submit/approve path for a structural channel is untouched (201/200/200)."""
+    owner = as_(OWNER_ID)
+    later = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    assert fake_repo.rows == {}
+    created = client.post(
+        f"{BASE}/items", json={"channel": "x", "body": "short enough for x"}, headers=owner
+    )
+    assert created.status_code == 201, created.text
+    item_id = created.json()["id"]
+    assert _act(client, owner, item_id, "submit").status_code == 200
+    assert _act(client, owner, item_id, "approve").status_code == 200
+    # Even with a page id and no connection: the activation check comes first.
+    res = _act(client, owner, item_id, "schedule", scheduled_for=later, target_page_id="1001")
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert detail["error"] == "channel_not_activated"
+    assert detail["channel"] == "x"
+    keys = {r["key"] for r in detail["requirements"]}
+    assert "developer_account" in keys
+    assert all(r["status"] in {"pending", "not_started"} for r in detail["requirements"])
+    assert all(
+        set(r) == {"key", "title", "owner", "status", "note"} for r in detail["requirements"]
+    )
+    assert publish_repo.jobs == {}
+    # Still approved (no state change), and also 422 with a connection present.
+    assert client.get(f"{BASE}/items/{item_id}", headers=owner).json()["status"] == "approved"
+    _active_connection(fake_repo)
+    res = _act(client, owner, item_id, "schedule", scheduled_for=later, target_page_id="1002")
+    assert res.status_code == 422 and res.json()["detail"]["error"] == "channel_not_activated"
+    # linkedin: x limit is 280 — a 281-char body on ``x`` is body_too_long from the registry.
+    too_long = client.post(
+        f"{BASE}/items", json={"channel": "x", "body": "a" * 281}, headers=owner
+    )
+    assert too_long.status_code == 422 and too_long.json()["detail"]["limit"] == 280
+    li = client.post(f"{BASE}/items", json={"channel": "linkedin", "body": BODY}, headers=owner)
+    assert li.status_code == 201 and li.json()["channel"] == "linkedin"
+
+
+def test_meta_channels_schedule_path_unchanged(
+    client: TestClient, as_: Headers, fake_repo: FakeConnectedAccountRepository
+) -> None:
+    """B2-U4 — the three SPRINT-07 B2-U3 scenarios keep their codes after the registry move:
+    (1) Instagram without an https image ⇒ 422 ``instagram_requires_image``; (2) Instagram
+    with https jpeg + query ⇒ 200; (3) Facebook without media ⇒ 200 — plus the SPRINT-07
+    B2-U2 409 ``reauth_required`` list for a connection lacking the publishing scopes."""
+    owner = as_(OWNER_ID)
+    later = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    _active_connection(fake_repo)
+    # (1)
+    ig = _create(
+        client, owner, channel="instagram", media_refs=[{"url": "http://x.example/a.jpg"}]
+    )
+    _act(client, owner, ig["id"], "submit")
+    _act(client, owner, ig["id"], "approve")
+    res = _act(client, owner, ig["id"], "schedule", scheduled_for=later, target_page_id="1001")
+    assert res.status_code == 422 and res.json()["detail"]["error"] == "instagram_requires_image"
+    # (2)
+    ig2 = _create(
+        client,
+        owner,
+        channel="instagram",
+        media_refs=[{"url": "https://cdn.example.com/a.JPEG?w=1"}],
+    )
+    _act(client, owner, ig2["id"], "submit")
+    _act(client, owner, ig2["id"], "approve")
+    res = _act(client, owner, ig2["id"], "schedule", scheduled_for=later, target_page_id="1001")
+    assert res.status_code == 200, res.text
+    # (3)
+    fb = _to_approved(client, owner)
+    res = _act(client, owner, fb, "schedule", scheduled_for=later, target_page_id="1002")
+    assert res.status_code == 200, res.text
+    # scopes still come from the registry definition (facebook_page ⇒ pages_manage_posts).
+    for cid, acc in list(fake_repo.rows.items()):
+        fake_repo.rows[cid] = acc.model_copy(update={"granted_scopes": ["pages_show_list"]})
+    fb2 = _to_approved(client, owner)
+    res = _act(client, owner, fb2, "schedule", scheduled_for=later, target_page_id="1002")
+    assert res.status_code == 409
+    assert res.json()["detail"]["missing_scopes"] == ["pages_manage_posts"]

@@ -28,6 +28,7 @@ from src.modules.auth import router as auth_router
 from src.modules.content import router as content_router
 from src.modules.content.domain.models import Channel
 from src.modules.publishing.channels import get_registry
+from src.modules.publishing.channels.router import router as channels_router
 from src.modules.publishing.domain.publisher import Publisher
 from src.modules.publishing.scheduler import (
     SCHEDULER_REQUIRES_ENCRYPTION_KEY,
@@ -132,6 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(tenancy_router)
     api_v1.include_router(social_connect_router)
     api_v1.include_router(content_router)
+    api_v1.include_router(channels_router)  # SPRINT-08 B-2: GET /channels[/{channel}]
     app.include_router(api_v1)
 
     @app.get("/health", tags=["System"], summary="Liveness probe")

@@ -24,6 +24,9 @@ SRC = Path(__file__).resolve().parents[3] / "src"
 
 # ------------------------------------------------------------------ B0-U1 No-Bypass ----------
 BANNED_MODULES = ("httpx", "openai", "anthropic", "litellm", "google.generativeai")
+# SPRINT-08 §2-0 (د): platform SDKs + ``requests`` are banned too (different messages; the
+# AIGateway message stays on the five above).
+BANNED_PLATFORM_MODULES = ("linkedin", "tweepy", "tiktok", "facebook_business", "requests")
 # Must mirror ``[tool.ruff.lint.per-file-ignores]`` for TID251 in pyproject.toml.
 ALLOWED_PREFIXES = ("modules/ai_gateway/", "core/")
 ALLOWED_FILES = ("modules/social_connect/meta_client.py",)
@@ -74,8 +77,9 @@ def test_b0_u1_pyproject_bans_the_same_modules() -> None:
     lint = cfg["tool"]["ruff"]["lint"]
     assert "TID" in lint["select"]
     banned = lint["flake8-tidy-imports"]["banned-api"]
-    assert set(banned) == set(BANNED_MODULES)
-    assert all(v["msg"] == "Use AIGateway (D-068)" for v in banned.values())
+    assert set(banned) == set(BANNED_MODULES) | set(BANNED_PLATFORM_MODULES)
+    assert all(banned[m]["msg"] == "Use AIGateway (D-068)" for m in BANNED_MODULES)
+    assert banned["requests"]["msg"] == "Use src.core.http shared client"
     ignores = lint["per-file-ignores"]
     assert "TID251" in ignores["src/modules/ai_gateway/**"]
     assert "TID251" in ignores["src/modules/social_connect/meta_client.py"]

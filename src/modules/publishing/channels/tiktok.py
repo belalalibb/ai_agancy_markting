@@ -42,7 +42,7 @@ TIKTOK = ChannelDefinition(
             title="TikTok developer app created",
             owner=RequirementOwner.PLATFORM_OWNER,
             status=RequirementStatus.NOT_STARTED,
-            note="TikTok for Developers; client key/secret as environment variables.",
+            note="TikTok for Developers; app credentials live only in environment variables.",
         ),
         ActivationRequirement(
             key="content_posting_api_audit",

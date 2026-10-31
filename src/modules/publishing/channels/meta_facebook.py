@@ -19,7 +19,7 @@ from src.modules.publishing.domain.publisher import Publisher
 META_ACTIVATION_REQUIREMENTS: tuple[ActivationRequirement, ...] = (
     ActivationRequirement(
         key="developer_app",
-        title="Meta developer app created (App ID / secret in settings)",
+        title="Meta developer app created (app credentials in settings)",
         owner=RequirementOwner.PLATFORM_OWNER,
         status=RequirementStatus.DONE,
         note="SPRINT-02 onboarding; credentials live only in environment variables.",
