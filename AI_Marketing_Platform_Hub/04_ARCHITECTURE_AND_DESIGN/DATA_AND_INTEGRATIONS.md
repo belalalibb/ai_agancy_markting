@@ -35,7 +35,7 @@ graph TD
 
 ## 🧱 1-ب. المخطط الفعلي المُنفَّذ حتى الآن (تُحدَّث من مراجعات المخطط)
 
-> المصدر الوحيد للحقيقة هو هجرات `alembic/versions/`؛ هذا الجدول تلخيص لها عند `main` @ `0ceb125` (الهجرة `0006`).
+> المصدر الوحيد للحقيقة هو هجرات `alembic/versions/`؛ هذا الجدول تلخيص لها عند `main` @ `e414c5a` (الهجرة `0007`).
 
 | الجدول | الأعمدة الأساسية | القيود المهمة | الهجرة |
 |---|---|---|---|
@@ -46,17 +46,21 @@ graph TD
 | `social_connection_pages` | `id`, `connection_id` → social_connections (CASCADE), `page_id`, `page_name`, `category`, `tasks`, `encrypted_page_token` (NULL = لا توكن), `is_selected`, حقول IG (`ig_user_id`, `ig_username`, `ig_name`, `ig_profile_picture_url`) | UNIQUE (`connection_id`, `page_id`)؛ CHECK: `is_selected = false OR encrypted_page_token IS NOT NULL` | 0001 → 0003 |
 | `users`, `refresh_sessions` | ✅ (SPRINT-04/04.1، `main` @ `32c20cb`) مستخدم واحد ↔ مستأجر واحد؛ `users.is_active`؛ `refresh_sessions` (`token_hash` sha256، `expires_at`، `revoked_at`، `replaced_by`) — الإبطال أولاً ثم الإصدار | `/api/v1/auth/*` | 0004 |
 | `social_connections.scopes_verified` | `BOOLEAN NOT NULL DEFAULT false`؛ backfill `true` حيث `granted_scopes::text <> '[]'` — يميّز «فارغ مؤكَّد» عن «مجهول» (درس 9) | — | 0005 |
-| `content_items` | `id`, `brand_id` → brands (CASCADE), `created_by_tenant_id` → tenants (RESTRICT), `channel` ∈ {instagram, facebook_page}, `target_page_id` NULL, `status` ∈ {draft, pending_approval, approved, rejected, scheduled, **published, publish_failed**, archived}, `published_at` NULL (0006؛ CHECK `ck_content_items_published_at_iff_published`), `current_revision_id` → content_revisions (FK دائري يُضاف بعد الجدولين)، `scheduled_for` NULL، `created_at`/`updated_at` | CHECK `ck_content_items_status`؛ CHECK `ck_content_items_scheduled_for_iff_scheduled` (`status='scheduled' ⇔ scheduled_for IS NOT NULL`)؛ فهرس جزئي للمجدولة؛ الانتقالات CAS `UPDATE … WHERE status=:expected` | 0005 |
+| `content_items` | `id`, `brand_id` → brands (CASCADE), `created_by_tenant_id` → tenants (RESTRICT), `channel` ∈ {facebook_page, instagram, linkedin, x, tiktok} (0007؛ CHECK `ck_content_items_channel` — تخفيض 0007 **يؤرشف ثم يحذف** صفوف القنوات الثلاث الجديدة مع تبعاتها CASCADE)، `target_page_id` NULL, `status` ∈ {draft, pending_approval, approved, rejected, scheduled, **published, publish_failed**, archived}, `published_at` NULL (0006؛ CHECK `ck_content_items_published_at_iff_published`), `current_revision_id` → content_revisions (FK دائري يُضاف بعد الجدولين)، `scheduled_for` NULL، `created_at`/`updated_at` | CHECK `ck_content_items_status`؛ CHECK `ck_content_items_scheduled_for_iff_scheduled` (`status='scheduled' ⇔ scheduled_for IS NOT NULL`)؛ فهرس جزئي للمجدولة؛ الانتقالات CAS `UPDATE … WHERE status=:expected` | 0005 |
 | `content_revisions` | `id`, `item_id` → content_items (CASCADE), `revision_no` ≥ 1, `body` (≤ 5000), `media_refs` JSONB, `provenance` JSONB (`{"kind":"human"}` أو `ai_generated` + provider/model/prompt_hash/generated_at/tokens/latency — عام `{kind, generated_at, prompt_version}` / خاص للمالك والمدير، D-066 ✅ SPRINT-07), `created_by_tenant_id`, `created_at` | UNIQUE (`item_id`, `revision_no`) `uq_content_revisions_item_no` (الترقيم تحت `SELECT … FOR UPDATE` على صف العنصر ✅ SPRINT-07 A-3)؛ CHECK `ck_content_revisions_body_length` | 0005 |
 | `approval_events` | `id`, `item_id` → content_items (CASCADE), `revision_id` → content_revisions, `action` VARCHAR(32) ∈ {submitted, withdrawn, approved, rejected, scheduled, unscheduled, archived, **published, publish_failed, publish_cancelled**}, `actor_tenant_id`/`actor_user_id` **NULL مسموح فقط** للأحداث النظامية `published`/`publish_failed`, `note` NULL, `created_at` | CHECK `ck_approval_events_action`؛ CHECK `ck_approval_events_actor_required`؛ دليل D-055 القابل للتدقيق (من وافق/رفض/جدول أي مراجعة ومتى؛ هوية من أذن بالنشر في `publish_jobs.scheduled_by_*`) | 0005, 0006 |
 | `publish_jobs` | `id`, `item_id` → content_items, `revision_id` → content_revisions, `brand_id`, `channel`, `target_page_id`, `run_at`, `status` ∈ {queued, leased, succeeded, failed, cancelled}, `attempt_count` ≥ 0, `max_attempts` ≥ 1 (default 3؛ **مصدر الحقيقة لكل مهمة** — القرار §3-2 في `SPRINT-07_REVIEW.md`), `next_attempt_at`, `lease_owner` (`hostname:pid`), `lease_until`, `last_error_class`, `external_post_id`, `permalink`, `scheduled_by_tenant_id`/`scheduled_by_user_id`, `created_at`/`updated_at` | **فهرس جزئي فريد** `uq_publish_jobs_active_item (item_id) WHERE status IN ('queued','leased')` — مهمة نشطة واحدة لكل عنصر؛ `ix_publish_jobs_status_run_at` للاستحقاق؛ CHECK `ck_publish_jobs_attempts`؛ الإيجار بـ`FOR UPDATE SKIP LOCKED` | 0006 |
 | `publish_attempts` | `id`, `job_id` → publish_jobs (CASCADE), `attempt_no` ≥ 1, `started_at`, `finished_at` NULL, `outcome` NULL ∈ {succeeded, retryable_failure, permanent_failure, ambiguous}, `error_class`, `graph_error_code`/`graph_error_subcode`/`graph_trace_id`, `external_post_id` (IG: `creation_id` بعد الخطوة 1), `lease_owner` | UNIQUE (`job_id`, `attempt_no`) `uq_publish_attempts_job_no`؛ CHECK outcome؛ **الصف يُلتزم بـ`outcome NULL` قبل نداء Graph** — محاولة مفتوحة عند انتهاء الإيجار = نتيجة مبهمة | 0006 |
 
+> **⚠️ F1 (مُثبَت على PG في مراجعة SPRINT-08):** CHECK `ck_content_items_published_at_iff_published` بصيغته في 0006 يمنع `published → archived` لأن `compare_and_set_status` يحتفظ بـ`published_at`؛ يُستبدل في **0008 (SPRINT-09 A-1)** بـ«`published` ⇒ غير فارغ؛ `archived` حرّ؛ الباقي فارغ».
+
+**واجهة سجلّ القنوات (M5، `src/modules/publishing/channels/`):** `ChannelRegistry(Mapping)` بـ`get(channel)` / `all()` / `activatable()` / `active()`؛ `get_registry()` بـ`lru_cache`؛ `ChannelDefinition{channel, display_name, provider, limits, capabilities, required_scopes, activation_requirements, media_rule, publisher_factory}`؛ `activation_status ∈ {active, not_configured}` **يُشتق من التعريف** (المنصّات الثلاث الجديدة `not_configured` حتى تُفعَّل بسبرنت خاص — مؤجَّل #16). `publish_jobs.channel` VARCHAR(16) **بلا CHECK** (السجلّ هو المتحقق).
+
 **قرارات بيانات مرتبطة:** D-059 (النموذج)، D-060 (اختيار الصفحات)، D-061 (الهوية والاسم)، D-066 (`provenance` كسجل تكلفة/جودة أولي ورؤيته عام/خاص)، D-067 (عقد المزوّد ومسارا المفاتيح). **مؤجل:** `tenant_members` (عضوية متعددة داخل المستأجر) — انظر `DEFERRED_DECISIONS.md`.
 
 ---
 
-### 1-ج. نقاط Meta Graph المستخدمة فعلياً (v26.0، `main` @ `0ceb125`)
+### 1-ج. نقاط Meta Graph المستخدمة فعلياً (v26.0، `main` @ `e414c5a`)
 
 | النقطة | الطريقة | قناة الأسرار (D-064) | الاستخدام |
 |---|---|---|---|
@@ -69,6 +73,10 @@ graph TD
 | `/{page_id}/feed` | POST (جسم form `message[, link]`) | Bearer توكن الصفحة + proof | M4 نشر منشور صفحة؛ `pages_manage_posts`؛ ثم `GET /{post_id}?fields=permalink_url` بأفضل جهد |
 | `/{ig_user_id}/media` | POST (`image_url`, `caption`) | Bearer توكن الصفحة + proof | M4 الخطوة 1: حاوية IG ⇒ `creation_id` (يُحفظ في `publish_attempts.external_post_id` فلا تُنشأ حاوية ثانية عند الإعادة) |
 | `/{ig_user_id}/media_publish` | POST (`creation_id`) | Bearer توكن الصفحة + proof | M4 الخطوة 2: النشر؛ `instagram_content_publish`؛ ثم `GET /{id}?fields=permalink` |
+
+> **⚠️ F2 (مُثبَت بـrespx في مراجعة SPRINT-08):** الثلاثة POST أعلاه (`/feed`, `/media`, `/media_publish`) تمرّ حالياً بحلقة إعادة محاولة العميل (حتى 3 مرات على 5xx/`ReadTimeout`) ⇒ تكرار محتمل. **SPRINT-09 A-2 (D-070):** POST ذو أثر جانبي بلا إعادة في العميل؛ فشل قبل الإرسال ⇒ `transient`، بعده ⇒ `ambiguous`. GET تبقى بإعادة.
+
+**نقاط داخلية جديدة (M5):** `GET /api/v1/channels` و`GET /api/v1/channels/{channel}` (خلف `CurrentUser`، بلا دور علامة) ⇒ مصفوفة التفعيل: `activation_status`, `capabilities`, `required_scopes`, `activation_requirements[{key,title,owner,status,note}]` — لا سرّ ولا بيانات علامة.
 
 > الحقول التي أوقفتها Meta في v3.3 على `/page/posts` (`caption, description, link, name, object_id, picture, source, type`) **غير مستخدمة**؛ البديل `attachments{…}`.
 

@@ -84,3 +84,4 @@ temp/
 
 # Local recovery backups
 .backups/
+.rv/
