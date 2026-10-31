@@ -21,9 +21,9 @@ _SYSTEM = (
     "د) قالب الرد: تحية، إقرار بالطلب، خطوة تالية واحدة، بلا وعود سعرية أو زمنية.\n"
     "هـ) اللغة: عربية أولاً ما لم تُشر لغات الجمهور إلى غير ذلك.\n"
     + COMMON_RULES
-    + "المخطط / Schema: {\"summary\": str (≤300), \"recommendations\": [{\"kind\": "
-    "\"tone_adjustment\"|\"reply_template\", \"title\": str (≤120), \"rationale\": str (≤400), "
-    "\"template\": str|null (≤600, reply_template only), \"evidence_ids\": [uuid]}] (≤6)}.\n"
+    + 'المخطط / Schema: {"summary": str (≤300), "recommendations": [{"kind": '
+    '"tone_adjustment"|"reply_template", "title": str (≤120), "rationale": str (≤400), '
+    '"template": str|null (≤600, reply_template only), "evidence_ids": [uuid]}] (≤6)}.\n'
     "You own the brand voice: propose one tone adjustment and up to five short WhatsApp reply "
     "templates grounded in evidence. JSON only."
 )
@@ -31,7 +31,9 @@ _SYSTEM = (
 TONE_PROFILE_V1 = PromptTemplate(
     prompt_version="tone_profile_v1",
     system=_SYSTEM,
-    source_note="agency-agents: marketing/brand-voice-copywriter.md, support/customer-support-lead.md",
+    source_note=(
+        "agency-agents: marketing/brand-voice-copywriter.md, support/customer-support-lead.md"
+    ),
     max_tokens=1000,
     temperature=0.4,
 )

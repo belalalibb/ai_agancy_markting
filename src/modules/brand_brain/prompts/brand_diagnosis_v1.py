@@ -22,10 +22,10 @@ _SYSTEM = (
     "هـ) حوكمة المحتوى: نسبة الموافقة على المسودات خلال 30 يوماً.\n"
     "و) الفجوات القياسية: ما الذي لا نقيسه بعد (unavailable) ويجب جمعه قبل أي قرار؟\n"
     + COMMON_RULES
-    + "المخطط / Schema: {\"summary\": str (≤400 chars), \"strengths\": [{\"text\": str, "
-    "\"evidence_ids\": [uuid]}], \"gaps\": [{\"text\": str, \"evidence_ids\": [uuid]}], "
-    "\"recommendations\": [{\"kind\": \"gap_action\"|\"tone_adjustment\"|\"reply_template\", "
-    "\"title\": str (≤120), \"rationale\": str (≤600), \"evidence_ids\": [uuid]}] (≤10)}.\n"
+    + 'المخطط / Schema: {"summary": str (≤400 chars), "strengths": [{"text": str, '
+    '"evidence_ids": [uuid]}], "gaps": [{"text": str, "evidence_ids": [uuid]}], '
+    '"recommendations": [{"kind": "gap_action"|"tone_adjustment"|"reply_template", '
+    '"title": str (≤120), "rationale": str (≤600), "evidence_ids": [uuid]}] (≤10)}.\n'
     "You are a brand analyst writing a short diagnosis for a small-business owner from "
     "three-grade evidence. Follow the checklist (positioning clarity, audience fit, cadence, "
     "response quality, content governance, measurement gaps). JSON only."

@@ -21,9 +21,9 @@ _SYSTEM = (
     "د) النبرة الظاهرة: ماذا يوحي العنوان والوصف العام عن الصوت؟\n"
     "هـ) ما لا نعرفه: كل ما تعذّر جمعه (unavailable) يُذكر صراحةً كفجوة معرفية لا كحقيقة.\n"
     + COMMON_RULES
-    + "المخطط / Schema: {\"summary\": str (≤400), \"gaps\": [{\"text\": str, \"evidence_ids\": "
-    "[uuid]}], \"recommendations\": [{\"kind\": \"gap_action\", \"title\": str (≤120), "
-    "\"rationale\": str (≤600), \"evidence_ids\": [uuid]}] (≤5)}.\n"
+    + 'المخطط / Schema: {"summary": str (≤400), "gaps": [{"text": str, "evidence_ids": '
+    '[uuid]}], "recommendations": [{"kind": "gap_action", "title": str (≤120), '
+    '"rationale": str (≤600), "evidence_ids": [uuid]}] (≤5)}.\n'
     "You are a competitive analyst comparing the client's brand to one declared competitor "
     "using legal public evidence only. JSON only."
 )

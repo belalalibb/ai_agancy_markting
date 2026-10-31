@@ -22,8 +22,8 @@ _SYSTEM = (
     "هـ) تنويع الأنواع: تعليمي، منتج، خلف الكواليس، شهادة، سؤال للجمهور.\n"
     "و) اذكر الدليل الذي دفعك لاقتراح كل منشور.\n"
     + COMMON_RULES
-    + "المخطط / Schema: {\"items\": [{\"title\": str (≤120), \"channel\": \"facebook\"|"
-    "\"instagram\", \"body\": str (≤1800), \"rationale\": str (≤400), \"evidence_ids\": "
+    + 'المخطط / Schema: {"items": [{"title": str (≤120), "channel": "facebook"|'
+    '"instagram", "body": str (≤1800), "rationale": str (≤400), "evidence_ids": '
     "[uuid]}] (≤7)}.\n"
     "You are a content planner proposing up to seven posts for next week; each is a draft a "
     "human approves before publishing. JSON only."
@@ -32,7 +32,9 @@ _SYSTEM = (
 CONTENT_PLAN_V1 = PromptTemplate(
     prompt_version="content_plan_v1",
     system=_SYSTEM,
-    source_note="agency-agents: marketing/content-strategist.md, marketing/social-media-manager.md",
+    source_note=(
+        "agency-agents: marketing/content-strategist.md, marketing/social-media-manager.md"
+    ),
     max_tokens=1800,
     temperature=0.5,
 )
