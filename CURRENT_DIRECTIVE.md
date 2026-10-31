@@ -11,7 +11,7 @@
 | **معرف المهمة** | `SPRINT-09-WHATSAPP-CONVERSATIONS` |
 | **النوع** | Part A: إغلاق ثلاث ثغرات سلوكية موروثة من SPRINT-07 (F1 CHECK مقابل الأرشفة · F2 إعادة POST ذي أثر جانبي — **D-070** · F3 قفل عبر الشبكة + مسح `media_refs`) · Part B: **M6 — محادثات WhatsApp Cloud API**: Webhook موقَّع، تكرار `wamid`، نافذة 24 ساعة مقابل القوالب، صندوق وارد موحَّد معزول بالعلامة، **ردّ مقترح بالذكاء الاصطناعي خلف موافقة بشرية (D-055) + إشارة تعلّم (D-069)**. عميل خفيف فوق `core/http.py` (**D-071** — لا PyWa كتبعية). **كل الاختبارات تعمل في CI بلا WABA حية.** |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
-| **يبدأ من** | `main` @ *(SHA دمج PR التوجيه — يُثبَّت في `WORK_STATE.md` §6)*. أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
+| **يبدأ من** | `main` @ `df4f434` (دمج PR #27 — هذا التوجيه). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
 | **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-09: WhatsApp conversations (M6) + SPRINT-07 latent fixes (F1/F2/F3)` |
 | **الكوميتات** | **أربعة**: Part A ⇒ B-1 (العميل + Webhook + التخزين + هجرة 0009) ⇒ B-2 (صندوق الوارد + الإرسال + النافذة/القوالب) ⇒ B-3 (ردّ مقترح + موافقة + إشارة تعلّم). كل كوميت يمرّ الحزمة كاملة وحده |
 | **تبعيات جديدة** | **لا شيء.** `hmac`/`hashlib` من المكتبة القياسية للتوقيع؛ `httpx` عبر `core/http.py` فقط. **`pywa` ممنوعة** كاستيراد (أضفها إلى `banned-api`) — تُقرأ كمرجع فقط (D-071) |
