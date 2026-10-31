@@ -452,6 +452,14 @@ class StubSession:
     async def get(self, cls: type, key: object) -> object:
         return self.identity.get((cls, key))
 
+    # SPRINT-10 Part A: the WhatsApp / budget adapters use the ``Session.scalar`` /
+    # ``Session.scalars`` shortcuts — same scripted results, same recording.
+    async def scalar(self, statement: object, params: object = None) -> object:
+        return (await self.execute(statement, params)).scalar_one_or_none()
+
+    async def scalars(self, statement: object, params: object = None) -> StubResult:
+        return (await self.execute(statement, params)).scalars()
+
 
 def compiled(statement: object) -> str:
     """Render a statement as PostgreSQL SQL (for structural assertions)."""
