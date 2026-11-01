@@ -26,7 +26,9 @@ from src.core.security import (
     TokenEncryptionService,
     get_token_encryption_service,
 )
-from src.modules.ai_gateway.dependencies import BudgetReader, Gateway
+from src.modules.ai_gateway.budget_guard import BudgetGuardError
+from src.modules.ai_gateway.dependencies import GuardedGateway
+from src.modules.ai_gateway.http_errors import budget_error_to_http
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.exceptions import ContentError
@@ -156,22 +158,14 @@ BrandRepo = Annotated[BrandRepository, Depends(get_brand_repository)]
 
 def get_suggestion_service(
     repo: Repo,
-    budget_reader: BudgetReader,
-    gateway: Gateway,
+    gateway: GuardedGateway,
     inbox: Inbox,
     limiter: Limiter,
     independent: Independent,
-    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ReplySuggestionService:
-    return ReplySuggestionService(
-        repo,
-        budget_reader,
-        gateway,
-        inbox,
-        limiter,
-        independent,
-        daily_token_budget=settings.ai_daily_token_budget_per_brand,
-    )
+    """SPRINT-11 B-4: the gateway is the ``BudgetGuard`` (daily tokens + platform cap +
+    ``ai_cost_log`` reservation — D-075)."""
+    return ReplySuggestionService(repo, gateway, inbox, limiter, independent)
 
 
 Suggestions = Annotated[ReplySuggestionService, Depends(get_suggestion_service)]
@@ -577,8 +571,10 @@ async def suggest_reply(
         )
     except WhatsAppError as exc:
         raise to_http(exc) from exc
-    except ContentError as exc:  # rate limit / budget — same codes as SPRINT-07 A-5
+    except ContentError as exc:  # rate limit — same codes as SPRINT-07 A-5
         raise content_to_http(exc) from exc
+    except BudgetGuardError as exc:  # SPRINT-11 B-3 (D-075): budget / cap / pricing
+        raise budget_error_to_http(exc) from exc
     return ReplyDraftPublic.from_domain(draft, private=True)
 
 

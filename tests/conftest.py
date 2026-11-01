@@ -31,6 +31,7 @@ from tests.fakes import (
     FakeBudgetUsageReader,
     FakeConnectedAccountRepository,
     FakeContentRepository,
+    FakeCostLogWriter,
     FakePasswordHasher,
     FakePublishJobRepository,
     FakeRateLimiter,
@@ -239,7 +240,7 @@ def app(
 ) -> FastAPI:
     """App wired to the fakes — isolated tests never touch PostgreSQL."""
     from src.main import create_app
-    from src.modules.ai_gateway.dependencies import get_budget_usage_reader
+    from src.modules.ai_gateway.dependencies import get_budget_usage_reader, get_cost_log_writer
     from src.modules.auth.dependencies import (
         get_password_hasher,
         get_rate_limiter,
@@ -269,8 +270,13 @@ def app(
             content_repo.release_locks()
 
     application.dependency_overrides[get_content_repository] = _content_repo_unit_of_work
-    # SPRINT-10 A-4: the one shared budget reader (content + WhatsApp drafts).
-    application.state.budget_reader = FakeBudgetUsageReader(content_repo)
+    # SPRINT-11 B-1: one shared in-memory ``ai_cost_log`` (the only AI usage source) read
+    # by the one shared budget reader — content, WhatsApp and Brand Brain alike.
+    application.state.cost_writer = FakeCostLogWriter()
+    application.state.budget_reader = FakeBudgetUsageReader(
+        content_repo, application.state.cost_writer
+    )
+    application.dependency_overrides[get_cost_log_writer] = lambda: application.state.cost_writer
     application.dependency_overrides[get_budget_usage_reader] = lambda: (
         application.state.budget_reader
     )

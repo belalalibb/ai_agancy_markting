@@ -16,6 +16,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from src.modules.ai_gateway.cost_log import CostEntry, CostOutcome
+from src.modules.ai_gateway.infrastructure.pg_cost_log import AICostLogRow
 from src.modules.brand_brain.domain.hosts import (
     BLOCKED_PLATFORM_HOSTS,
     host_matches,
@@ -28,9 +30,9 @@ from src.modules.brand_brain.domain.metrics import (
     METRICS,
     source_allowed,
 )
-from src.modules.brand_brain.domain.models import CostEntry, CostOutcome, Evidence
+from src.modules.brand_brain.domain.models import Evidence
 from src.modules.brand_brain.exceptions import BrandBrainError
-from src.modules.brand_brain.infrastructure.orm import AICostLogRow, BrandEvidenceRow
+from src.modules.brand_brain.infrastructure.orm import BrandEvidenceRow
 from src.modules.brand_brain.router import decode_cursor, encode_cursor, parse_if_match, to_http
 from src.modules.brand_brain.schemas import ProfileUpdate
 from src.modules.brand_brain.service import (

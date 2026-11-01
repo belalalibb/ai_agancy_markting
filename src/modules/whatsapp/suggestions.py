@@ -6,9 +6,9 @@ path (:meth:`WhatsAppInboxService.send_text`) with ``messages.reply_draft_id`` l
 ``reject``. Every decision writes one :class:`LearningSignal` made of **features only**
 (:mod:`src.modules.whatsapp.signals`): the text never lands in the signals table.
 
-Budget: the daily token budget is the one SPRINT-07 A-5 introduced
-(``AI_DAILY_TOKEN_BUDGET_PER_BRAND``) read through the **single** shared reader of SPRINT-10
-A-4 (:mod:`src.modules.ai_gateway.budget`), so every AI feature shares one allowance (N4).
+Budget: since SPRINT-11 B-4 the injected ``gateway`` is the
+:class:`~src.modules.ai_gateway.budget_guard.BudgetGuard` — daily tokens, the platform USD cap
+and the ``ai_cost_log`` reservation are enforced there for every AI feature alike (D-075).
 """
 
 from __future__ import annotations
@@ -22,13 +22,9 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 
 from src.core.metrics import counters
-from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
 from src.modules.auth.domain.rate_limit import RateLimiter
-from src.modules.content.exceptions import (
-    GenerationBudgetExceededError,
-    GenerationRateLimitedError,
-)
+from src.modules.content.exceptions import GenerationRateLimitedError
 from src.modules.whatsapp.domain.models import (
     Direction,
     DraftStatus,
@@ -80,21 +76,18 @@ class ReplySuggestionService:
     def __init__(
         self,
         repo: WhatsAppRepository,
-        budget_reader: BudgetUsageReader,
         gateway: AIGateway,
         inbox: WhatsAppInboxService,
         limiter: RateLimiter,
         independent: IndependentWrites,
-        *,
-        daily_token_budget: int,
     ) -> None:
         self._repo = repo
-        self._budget_reader = budget_reader
+        # SPRINT-11 B-4: ``gateway`` is the ``BudgetGuard`` — daily tokens, platform cap and
+        # the ``ai_cost_log`` row are enforced there (D-075), not in this service.
         self._gateway = gateway
         self._inbox = inbox
         self._limiter = limiter
         self._independent = independent  # SPRINT-10 A-1 (D-072)
-        self._budget = DailyBudget(daily_token_budget)  # SPRINT-10 A-4 (N4)
 
     # ---------------------------------------------------------------- suggest ----
     async def suggest(
@@ -120,7 +113,6 @@ class ReplySuggestionService:
         )
         if retry_after is not None:
             raise GenerationRateLimitedError(retry_after)
-        await self._check_token_budget(brand_id)
 
         recent = await self._repo.recent_messages(conv.id, limit=DEFAULT_MAX_TURNS)
         transcript = [(m.direction.value, m.body) for m in reversed(recent)]
@@ -198,14 +190,6 @@ class ReplySuggestionService:
             len(draft.suggested_body),
         )
         return draft
-
-    async def _check_token_budget(self, brand_id: UUID) -> None:
-        """A-5 budget shared by every AI feature through the one A-4 reader."""
-        verdict = await self._budget.check(brand_id, usage_reader=self._budget_reader)
-        if not verdict.allowed:
-            raise GenerationBudgetExceededError(
-                verdict.budget, verdict.used, verdict.resets_in_seconds
-            )
 
     # ---------------------------------------------------------------- decide -----
     async def get_pending_or_raise(self, brand_id: UUID, draft_id: UUID) -> ReplyDraft:

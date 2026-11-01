@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import secrets
 import warnings
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -123,6 +124,14 @@ class Settings(BaseSettings):
     ai_price_table_json: str = Field(
         default="", description="JSON price table per model for cost estimates (optional)."
     )
+    # SPRINT-11 B-4 (D-075): rolling 24 h USD cap on **platform-paid** AI calls (sum of
+    # ``ai_cost_log.estimated_cost_usd`` where ``credential_mode='platform'``) ⇒ 503
+    # ``platform_budget_exhausted``. ``0`` refuses every platform-paid call.
+    platform_daily_usd_cap: Decimal = Field(default=Decimal("25"), ge=Decimal("0"))
+    # SPRINT-11 B-4 (D-076 kill switch): ``False`` lets a platform-paid call on an **unpriced**
+    # model through (cost ``NULL``) instead of 503 ``ai_model_unpriced``; a WARNING is logged
+    # at boot. The reserve/settle write path itself can never be disabled.
+    feature_budget_guard_strict: bool = True
 
     # --- Scheduler / publishing (SPRINT-07 B3) ------------------------------------------
     # Off by default (tests, dev). The worker loop is started in ``lifespan`` only when on.

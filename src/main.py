@@ -14,6 +14,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
@@ -35,6 +36,7 @@ from src.modules.publishing.scheduler import (
     SCHEDULER_REQUIRES_ENCRYPTION_KEY,
     PostgresScheduler,
     PublisherResolver,
+    SchedulerStep,
     scheduler_loop,
 )
 from src.modules.social_connect import router as social_connect_router
@@ -107,12 +109,39 @@ def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | N
         encryption=encryption,
     )
     logger.info("scheduler: started (poll=%ss)", settings.scheduler_poll_seconds)
-    return asyncio.create_task(scheduler_loop(scheduler, settings.scheduler_poll_seconds))
+    return asyncio.create_task(
+        scheduler_loop(
+            scheduler,
+            settings.scheduler_poll_seconds,
+            extra_steps=(settle_stale_cost_reservations_step(settings),),
+        )
+    )
+
+
+def settle_stale_cost_reservations_step(settings: Settings) -> SchedulerStep:
+    """SPRINT-11 B-4 (D-075): second scheduler step — ``pending`` ``ai_cost_log`` rows older
+    than ``2 × AI_HTTP_TIMEOUT_SECONDS`` become ``ambiguous`` (counted against the cap)."""
+    from src.modules.ai_gateway.budget_guard import settle_stale_reservations
+    from src.modules.ai_gateway.infrastructure.pg_cost_log import PgCostLogWriter
+
+    writer = PgCostLogWriter()
+
+    async def step(now: datetime) -> int:
+        return await settle_stale_reservations(
+            writer, now=now, timeout_seconds=settings.ai_http_timeout_seconds
+        )
+
+    return step
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging()  # H2: httpx/httpcore at WARNING + root secret-redaction filter
+    if not settings.feature_budget_guard_strict:  # SPRINT-11 B-4 kill switch (D-076)
+        logger.warning(
+            "FEATURE_BUDGET_GUARD_STRICT=false — unpriced models are allowed on the platform "
+            "key (cost recorded as NULL); re-enable before production."
+        )
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,

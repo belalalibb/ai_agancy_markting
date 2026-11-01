@@ -78,3 +78,12 @@ class DailyBudget:
         return BudgetVerdict(
             allowed=False, budget=self._limit, used=used, resets_in_seconds=resets_in
         )
+
+
+class EntitlementLimitsReader(Protocol):
+    """SPRINT-11 B-3/C-1 (D-073): plan limits of the brand. Implemented by
+    ``entitlements.service.PgEntitlementLimitsReader`` (Part C); ``None`` ⇒ no plan check.
+    Raises :class:`~src.modules.ai_gateway.budget_guard.EntitlementLimitError` when the plan
+    is inactive or its ``daily_tokens`` are exhausted."""
+
+    async def check(self, brand_id: UUID, purpose: str) -> None: ...

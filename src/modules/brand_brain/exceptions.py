@@ -70,18 +70,6 @@ class BrainRateLimitedError(BrandBrainError):
         super().__init__("brain rate limited")
 
 
-class BrainBudgetExceededError(BrandBrainError):
-    """The shared daily AI token budget (``DailyBudget``) is exhausted ⇒ 429."""
-
-    error = "generation_budget_exceeded"
-
-    def __init__(self, budget: int, used: int, resets_in_seconds: int) -> None:
-        self.budget = budget
-        self.used = used
-        self.resets_in_seconds = resets_in_seconds
-        super().__init__("daily token budget exceeded")
-
-
 class InvalidModelOutputError(BrandBrainError):
     """The model answered with JSON that does not match the template schema ⇒ 502."""
 

@@ -27,7 +27,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.exc import IntegrityError
 
-from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.brand_brain.domain.models import (
@@ -46,7 +45,6 @@ from src.modules.brand_brain.domain.models import (
 )
 from src.modules.brand_brain.domain.repository import BrandBrainRepository
 from src.modules.brand_brain.exceptions import (
-    BrainBudgetExceededError,
     BrainRateLimitedError,
     InvalidModelOutputError,
     ProfileConflictError,
@@ -211,15 +209,13 @@ class BrandAdvisor:
         *,
         gateway: AIGateway,
         limiter: RateLimiter,
-        budget: DailyBudget,
-        budget_reader: BudgetUsageReader,
         content: ContentService | None = None,
     ) -> None:
         self._repo = repo
+        # SPRINT-11 B-4: ``gateway`` is the ``BudgetGuard`` (daily tokens, platform cap,
+        # ``ai_cost_log`` reservation — D-075); the advisor only rate-limits.
         self._gateway = gateway
         self._limiter = limiter
-        self._budget = budget
-        self._budget_reader = budget_reader
         self._content = content
 
     # ------------------------------------------------------------ guards ----
@@ -227,9 +223,6 @@ class BrandAdvisor:
         retry = self._limiter.hit(bucket, str(brand_id), limit, window)
         if retry is not None:
             raise BrainRateLimitedError(retry)
-        verdict = await self._budget.check(brand_id, usage_reader=self._budget_reader)
-        if not verdict.allowed:
-            raise BrainBudgetExceededError(verdict.budget, verdict.used, verdict.resets_in_seconds)
 
     async def _context(self, brand_id: UUID) -> tuple[BrandProfile, list[Evidence]]:
         profile = await self._repo.get_profile(brand_id)

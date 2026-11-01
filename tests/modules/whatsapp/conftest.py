@@ -74,11 +74,10 @@ async def wa_client(settings: Settings):  # noqa: ANN201
 
 @pytest.fixture
 def wa_app(app: FastAPI, wa_repo: FakeWhatsAppRepository, content_repo) -> FastAPI:  # noqa: ANN001
-    """The fake-wired app with the WhatsApp repository overridden too (B-3: the content
-    repository is linked so the shared daily token budget sums both features)."""
+    """The fake-wired app with the WhatsApp repository overridden too (SPRINT-11 B-1: the
+    shared daily token budget is read from the one fake ``ai_cost_log``)."""
     from src.modules.whatsapp import router, webhook
 
-    app.state.budget_reader.wa_repo = wa_repo  # A-4: drafts count in the shared budget
     app.state.independent_writes = FakeIndependentWrites(wa_repo)  # A-1 (D-072)
     app.dependency_overrides[webhook._repo] = lambda: wa_repo
     app.dependency_overrides[router.get_whatsapp_repository] = lambda: wa_repo

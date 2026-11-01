@@ -12,7 +12,6 @@ from src.modules.brand_brain.domain.models import (
     BrandProfileRevision,
     Competitor,
     CostDay,
-    CostEntry,
     Evidence,
     LearningSignal,
     Recommendation,
@@ -116,9 +115,3 @@ class BrandBrainRepository(Protocol):
 
     # -------------------------------------------------- learning signals ----
     async def add_learning_signal(self, signal: LearningSignal) -> LearningSignal: ...
-
-
-class CostLogWriter(Protocol):
-    """D-072: one committed independent row per gateway call (``ai_gateway`` wrapper)."""
-
-    async def write(self, entry: CostEntry) -> None: ...

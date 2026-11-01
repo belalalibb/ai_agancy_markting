@@ -14,7 +14,6 @@ from src.modules.tenancy.domain.models import GrantRole
 from tests.conftest import AGENCY_ID, BRAND_ID, OWNER_ID, STRANGER_ID, grant
 from tests.fakes import (
     FakeBrandBrainRepository,
-    FakeCostLogWriter,
     FakeInternalMetricsReader,
     FakeStore,
 )
@@ -50,8 +49,9 @@ def brain_app(
     # are "not configured" unless a test overrides them (``test_b2_competitor_refresh``).
     app.dependency_overrides[router.get_graph_page_source] = lambda: None
     app.dependency_overrides[router.get_public_page_source] = lambda: None
-    app.state.cost_writer = FakeCostLogWriter(brain_repo)
-    app.dependency_overrides[router.get_cost_log_writer] = lambda: app.state.cost_writer
+    # SPRINT-11 B-1: the app-wide fake cost writer (``tests/conftest.py``) mirrors its rows
+    # into ``brain_repo.cost_entries`` so ``GET /brain/cost`` sees them.
+    app.state.cost_writer.repo = brain_repo
     return app
 
 

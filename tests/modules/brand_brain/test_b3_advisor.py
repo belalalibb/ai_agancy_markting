@@ -106,7 +106,24 @@ def gateway() -> ScriptedGateway:
 
 @pytest.fixture
 def b3_client(brain_app: FastAPI, gateway: ScriptedGateway) -> TestClient:
-    brain_app.dependency_overrides[router.get_brain_gateway] = lambda: gateway
+    """The scripted provider wrapped in the real ``BudgetGuard`` (SPRINT-11 B-4) on the
+    app-wide fake cost log / budget reader — ``scripted-1`` is priced at zero."""
+    from decimal import Decimal
+
+    from src.modules.ai_gateway.budget import DailyBudget
+    from src.modules.ai_gateway.budget_guard import BudgetGuard
+    from src.modules.ai_gateway.pricing import PriceTable
+
+    settings = brain_app.state.settings
+    guard = BudgetGuard(
+        gateway,
+        writer=brain_app.state.cost_writer,
+        price_table=PriceTable({"scripted-1": (Decimal("0"), Decimal("0"))}),
+        daily_budget=DailyBudget(settings.ai_daily_token_budget_per_brand),
+        platform_daily_usd_cap=settings.platform_daily_usd_cap,
+        usage_reader=brain_app.state.budget_reader,
+    )
+    brain_app.dependency_overrides[router.get_brain_gateway] = lambda: guard
     return TestClient(brain_app)
 
 
@@ -691,15 +708,7 @@ def test_list_recommendations_filters_and_projects_provenance(
 
 # --------------------------------------------------------- service edge cases --
 def _advisor(repo: FakeBrandBrainRepository, limiter: FakeRateLimiter) -> BrandAdvisor:
-    from src.modules.ai_gateway.budget import DailyBudget, NullBudgetUsageReader
-
-    return BrandAdvisor(
-        repo,
-        gateway=ScriptedGateway(),
-        limiter=limiter,
-        budget=DailyBudget(1000),
-        budget_reader=NullBudgetUsageReader(),
-    )
+    return BrandAdvisor(repo, gateway=ScriptedGateway(), limiter=limiter)
 
 
 async def test_advisor_cas_race_on_decide_is_409(

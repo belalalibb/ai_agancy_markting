@@ -18,7 +18,6 @@ from typing import Any
 from uuid import UUID
 
 from src.core.metrics import counters
-from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget, NullBudgetUsageReader
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import (
@@ -43,7 +42,6 @@ from src.modules.content.exceptions import (
     ChannelNotActivatedError,
     ContentInsufficientRoleError,
     ContentNotFoundError,
-    GenerationBudgetExceededError,
     GenerationRateLimitedError,
     InstagramNotLinkedError,
     InstagramRequiresImageError,
@@ -92,7 +90,6 @@ GENERATION_BUCKET = "ai_generate_brand"
 GENERATION_LIMIT_PER_HOUR = 20
 GENERATION_WINDOW_SECONDS = 3600
 GENERATION_STATES = frozenset({ContentStatus.DRAFT, ContentStatus.REJECTED})
-# A-5: daily token budget window (per brand; summed from revision provenance).
 # Actions that take the item out of ``scheduled`` by hand (the job must be cancelled).
 _CANCELLING_ACTIONS = frozenset({Action.UNSCHEDULE, Action.ARCHIVE})
 
@@ -126,16 +123,13 @@ class ContentService:
         connections: ConnectedAccountRepository,
         publish_jobs: PublishJobRepository,
         *,
-        daily_token_budget: int = 200_000,
         publish_max_attempts: int = 3,
-        budget_reader: BudgetUsageReader | None = None,
     ) -> None:
         self._repo = repository
         self._connections = connections
         self._jobs = publish_jobs
-        # SPRINT-10 A-4: one shared budget reader for every AI feature (N4).
-        self._budget = DailyBudget(daily_token_budget)
-        self._budget_reader: BudgetUsageReader = budget_reader or NullBudgetUsageReader()
+        # SPRINT-11 B-4: the daily token budget, the platform cap and the cost row are all
+        # enforced by the ``BudgetGuard`` the router injects as ``gateway`` (D-075).
         # SPRINT-08 A-3: written into every new job's ``max_attempts`` (policy at creation).
         self._publish_max_attempts = publish_max_attempts
 
@@ -513,7 +507,6 @@ class ContentService:
         )
         if retry_after is not None:
             raise GenerationRateLimitedError(retry_after)
-        await self._check_token_budget(brand_id)
         system = system_prompt(item.channel, tone=tone, language=language)
         user = user_prompt(brief)
         request = CompletionRequest(
@@ -586,15 +579,6 @@ class ContentService:
             media_refs=None,  # A-3 (F3): keep the current revision's media_refs
         )
         return await self.get_item(brand_id, item_id)
-
-    async def _check_token_budget(self, brand_id: UUID) -> None:
-        """A-5 / SPRINT-10 A-4: the **shared** daily budget (content + WhatsApp + Brand
-        Brain) through :class:`DailyBudget`; ``used >= budget`` ⇒ 429."""
-        verdict = await self._budget.check(brand_id, usage_reader=self._budget_reader)
-        if not verdict.allowed:
-            raise GenerationBudgetExceededError(
-                verdict.budget, verdict.used, verdict.resets_in_seconds
-            )
 
     async def _validate_schedule(
         self,

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from uuid import uuid4
 
 import httpx
 import pytest
@@ -22,8 +21,6 @@ from src.modules.whatsapp.client import WhatsAppCloudClient
 from src.modules.whatsapp.domain.models import (
     DELIVERY_RANK,
     DeliveryStatus,
-    Direction,
-    MessageKind,
     delivery_transition_allowed,
 )
 from src.modules.whatsapp.exceptions import CredentialsInvalidError, PhoneNumberInUseError
@@ -424,19 +421,24 @@ async def test_a4_daily_budget_verdict_and_retry_after_from_shared_reader() -> N
 async def test_a4_wa_draft_tokens_block_content_generate_in_the_fake_world(
     wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, auth_headers, roles: None, wa_account
 ) -> None:
-    """Fake mirror of A4-I1: one WhatsApp draft with ``budget + 1`` tokens ⇒ ``/generate`` 429."""
-    from src.modules.whatsapp.domain.models import ReplyDraft
+    """Fake mirror of A4-I1 (SPRINT-11 B-1): one WhatsApp suggestion settled in the shared
+    ``ai_cost_log`` with ``budget + 1`` tokens ⇒ ``/generate`` **and** ``/suggest`` 429."""
+    from src.modules.ai_gateway.cost_log import CostEntry, CostOutcome
 
     conv = await _seed_conversation(wa_repo, wa_account.id)
-    inbound = next(m for m in wa_repo.messages.values() if m.direction is Direction.INBOUND)
-    assert inbound.kind is MessageKind.TEXT
-    await wa_repo.create_draft(
-        ReplyDraft(
-            conversation_id=conv.id,
+    budget = wa_app.state.settings.ai_daily_token_budget_per_brand
+    await wa_app.state.cost_writer.reserve(
+        CostEntry(
             brand_id=BRAND_ID,
-            in_reply_to_message_id=inbound.id,
-            suggested_body="x",
-            provenance={"kind": "ai_suggested", "prompt_tokens": 10**9, "completion_tokens": 1},
+            purpose="reply_suggestion",
+            provider="fake",
+            model="fake-1",
+            credential_mode="platform",
+            prompt_tokens=budget,
+            completion_tokens=1,
+            latency_ms=1,
+            prompt_version="reply_suggestion_v1",
+            outcome=CostOutcome.OK,
             created_at=datetime.now(tz=UTC),
         )
     )
@@ -455,9 +457,8 @@ async def test_a4_wa_draft_tokens_block_content_generate_in_the_fake_world(
         )
         assert res.status_code == 429, res.text
         assert res.json()["detail"]["error"] == "generation_budget_exceeded"
+        assert res.json()["detail"]["limit_kind"] == "brand_daily_tokens"
         assert "Retry-After" in res.headers
         again = _suggest(client, owner, conv.id)
-        assert (
-            again.status_code == 409
-        )  # pending draft exists (A-5 uniqueness) — budget not reached
-        _ = uuid4()
+        assert again.status_code == 429  # the same shared allowance
+    assert not wa_repo.drafts
