@@ -147,6 +147,27 @@ async def get_current_user_fresh(
 CurrentUserFresh = Annotated[AuthenticatedActor, Depends(get_current_user_fresh)]
 
 
+async def require_platform_admin(
+    actor: CurrentUserFresh,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AuthenticatedActor:
+    """SPRINT-11 C-3: ``/api/v1/admin/*`` guard — a **fresh** session whose ``user_id`` is in
+    ``PLATFORM_ADMIN_USER_IDS``. An empty list refuses everyone (safe by default); the
+    identity is the JWT ``sub`` only (``AuthenticatedActor`` has no e-mail)."""
+    if actor.user_id not in settings.platform_admin_user_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "platform_admin_required",
+                "message": "this route is restricted to platform administrators",
+            },
+        )
+    return actor
+
+
+PlatformAdmin = Annotated[AuthenticatedActor, Depends(require_platform_admin)]
+
+
 # ------------------------------------------------------------- rate limiting --
 IP_LIMIT = 10
 IP_WINDOW_SECONDS = 60

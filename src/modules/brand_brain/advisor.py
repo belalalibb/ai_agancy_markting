@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
 from src.modules.auth.domain.rate_limit import RateLimiter
+from src.modules.brand_brain.consent import BrandConsentReader, may_write_signal
 from src.modules.brand_brain.domain.models import (
     MAX_CONTENT_PLAN_ITEMS,
     MAX_DIAGNOSIS_RECOMMENDATIONS,
@@ -210,8 +211,10 @@ class BrandAdvisor:
         gateway: AIGateway,
         limiter: RateLimiter,
         content: ContentService | None = None,
+        consent: BrandConsentReader | None = None,
     ) -> None:
         self._repo = repo
+        self._consent = consent  # SPRINT-11 C-6 (D-080): ``none`` ⇒ no ``learning_signals`` row
         # SPRINT-11 B-4: ``gateway`` is the ``BudgetGuard`` (daily tokens, platform cap,
         # ``ai_cost_log`` reservation — D-075); the advisor only rate-limits.
         self._gateway = gateway
@@ -480,11 +483,11 @@ class BrandAdvisor:
         decided = rec.model_copy(
             update={"status": "accepted", "decided_by_user_id": actor_user_id, "decided_at": now}
         )
-        signal = await self._repo.add_learning_signal(self._signal(decided, "accepted", now))
+        signals = await self._record_signal(decided, "accepted", now)
         logger.info(
             "brain recommendation accepted: %s kind=%s by=%s", rec.id, rec.kind, actor_user_id
         )
-        return DecisionResult(recommendation=decided, profile_revision=revision, signals=[signal])
+        return DecisionResult(recommendation=decided, profile_revision=revision, signals=signals)
 
     async def dismiss(
         self, brand_id: UUID, recommendation_id: UUID, *, actor_user_id: UUID
@@ -503,11 +506,19 @@ class BrandAdvisor:
         decided = rec.model_copy(
             update={"status": "dismissed", "decided_by_user_id": actor_user_id, "decided_at": now}
         )
-        signal = await self._repo.add_learning_signal(self._signal(decided, "dismissed", now))
+        signals = await self._record_signal(decided, "dismissed", now)
         logger.info(
             "brain recommendation dismissed: %s kind=%s by=%s", rec.id, rec.kind, actor_user_id
         )
-        return DecisionResult(recommendation=decided, signals=[signal])
+        return DecisionResult(recommendation=decided, signals=signals)
+
+    async def _record_signal(
+        self, rec: Recommendation, signal: str, now: datetime
+    ) -> list[LearningSignal]:
+        """D-080: ``learning_consent='none'`` ⇒ the decision stands, no signal row."""
+        if not await may_write_signal(self._consent, rec.brand_id):
+            return []
+        return [await self._repo.add_learning_signal(self._signal(rec, signal, now))]
 
     async def _locked_proposed(self, brand_id: UUID, recommendation_id: UUID) -> Recommendation:
         rec = await self._repo.get_recommendation_for_update(brand_id, recommendation_id)

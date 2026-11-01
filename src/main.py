@@ -29,6 +29,8 @@ from src.modules.auth import router as auth_router
 from src.modules.brand_brain.router import router as brand_brain_router
 from src.modules.content import router as content_router
 from src.modules.content.domain.models import Channel
+from src.modules.entitlements.router import admin_router as entitlements_admin_router
+from src.modules.entitlements.router import router as entitlements_router
 from src.modules.publishing.channels import get_registry
 from src.modules.publishing.channels.router import router as channels_router
 from src.modules.publishing.domain.publisher import Publisher
@@ -142,6 +144,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "FEATURE_BUDGET_GUARD_STRICT=false — unpriced models are allowed on the platform "
             "key (cost recorded as NULL); re-enable before production."
         )
+    if not settings.feature_entitlements_enforced:  # SPRINT-11 C-1 kill switch (D-076)
+        logger.warning(
+            "FEATURE_ENTITLEMENTS_ENFORCED=false — plan limits (D-073) are not enforced; "
+            "every brand is allowed. Re-enable before production."
+        )
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
@@ -170,6 +177,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(whatsapp_webhook_router)
     api_v1.include_router(whatsapp_router)  # SPRINT-09 B-2/B-3: /brands/{id}/whatsapp/…
     api_v1.include_router(brand_brain_router)  # SPRINT-10 B-1: /brands/{id}/brain/…
+    # SPRINT-11 C-5 (D-073/D-076): removable — see src/modules/entitlements/REMOVABILITY.md
+    api_v1.include_router(entitlements_router)
+    api_v1.include_router(entitlements_admin_router)
     app.include_router(api_v1)
 
     @app.get("/health", tags=["System"], summary="Liveness probe")

@@ -27,11 +27,14 @@ from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole
 from tests.fakes import (
     FakeBrandAccessGrantRepository,
     FakeBrandAccessResolver,
+    FakeBrandConsentReader,
     FakeBrandRepository,
     FakeBudgetUsageReader,
     FakeConnectedAccountRepository,
     FakeContentRepository,
     FakeCostLogWriter,
+    FakeCounterUsageReader,
+    FakeEntitlementRepository,
     FakePasswordHasher,
     FakePublishJobRepository,
     FakeRateLimiter,
@@ -240,7 +243,11 @@ def app(
 ) -> FastAPI:
     """App wired to the fakes — isolated tests never touch PostgreSQL."""
     from src.main import create_app
-    from src.modules.ai_gateway.dependencies import get_budget_usage_reader, get_cost_log_writer
+    from src.modules.ai_gateway.dependencies import (
+        get_budget_usage_reader,
+        get_cost_log_writer,
+        get_entitlement_limits_reader,
+    )
     from src.modules.auth.dependencies import (
         get_password_hasher,
         get_rate_limiter,
@@ -248,9 +255,15 @@ def app(
         get_user_repository,
     )
     from src.modules.content.router import get_content_repository, get_publish_job_repository
+    from src.modules.entitlements.dependencies import (
+        get_counter_usage_reader,
+        get_entitlement_repository,
+    )
+    from src.modules.entitlements.service import PgEntitlementLimitsReader
     from src.modules.social_connect.router import get_repository, get_status_marker
     from src.modules.tenancy.dependencies import (
         get_brand_access_resolver,
+        get_brand_consent_reader,
         get_brand_repository,
         get_grant_repository,
         get_tenant_repository,
@@ -294,6 +307,27 @@ def app(
     )
     application.dependency_overrides[get_brand_access_resolver] = lambda: FakeBrandAccessResolver(
         store
+    )
+    # SPRINT-11 C: entitlements + consent fakes over the same ``FakeStore`` brands. The
+    # ``BudgetGuard`` plan check (``get_entitlement_limits_reader``) uses the same fake repo.
+    application.state.entitlement_repo = FakeEntitlementRepository(store)
+    application.state.counter_reader = FakeCounterUsageReader()
+    application.dependency_overrides[get_entitlement_repository] = lambda: (
+        application.state.entitlement_repo
+    )
+    application.dependency_overrides[get_counter_usage_reader] = lambda: (
+        application.state.counter_reader
+    )
+    application.dependency_overrides[get_brand_consent_reader] = lambda: FakeBrandConsentReader(
+        store
+    )
+    application.dependency_overrides[get_entitlement_limits_reader] = lambda: (
+        PgEntitlementLimitsReader(
+            application.state.entitlement_repo,
+            usage_reader=application.state.budget_reader,
+            counters=application.state.counter_reader,
+            enforced=settings.feature_entitlements_enforced,
+        )
     )
     return application
 

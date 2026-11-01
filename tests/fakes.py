@@ -200,6 +200,14 @@ class FakeBrandRepository:
                 out.append((self._s.brands[g.brand_id], BrandRole(g.role.value)))
         return out
 
+    async def set_learning_consent(self, brand_id: UUID, consent: str) -> Brand | None:
+        brand = self._s.brands.get(brand_id)
+        if brand is None:
+            return None
+        updated = brand.model_copy(update={"learning_consent": consent})
+        self._s.brands[brand_id] = updated
+        return updated
+
 
 class FakeBrandAccessGrantRepository:
     def __init__(self, store: FakeStore) -> None:
@@ -1631,3 +1639,65 @@ class FakeInternalMetricsReader:
     async def read(self, brand_id: UUID, *, now):  # noqa: ANN001, ANN201
         self.calls.append(brand_id)
         return self.metrics
+
+
+# ------------------------------------------------------------ entitlements (SPRINT-11 C) --
+class FakeBrandConsentReader:
+    """``BrandConsentReader`` (whatsapp/brand_brain protocols) over the fake brand store."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+
+    async def learning_consent(self, brand_id: UUID) -> str:
+        brand = self._s.brands.get(brand_id)
+        return brand.learning_consent if brand is not None else "signals_only"
+
+
+class FakeEntitlementRepository:
+    """In-memory ``EntitlementRepository``; brands come from the shared ``FakeStore``."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+        self.entitlements: dict[UUID, Any] = {}
+        self.events: list[Any] = []
+        self.locks: list[UUID] = []
+
+    async def lock_brand(self, brand_id: UUID):  # noqa: ANN201
+        self.locks.append(brand_id)
+        return await self.brand_ref(brand_id)
+
+    async def brand_ref(self, brand_id: UUID):  # noqa: ANN201
+        from src.modules.entitlements.domain.repository import BrandRef
+
+        brand = self._s.brands.get(brand_id)
+        if brand is None:
+            return None
+        return BrandRef(id=brand.id, referred_by_brand_id=brand.referred_by_brand_id)
+
+    async def get(self, brand_id: UUID):  # noqa: ANN201
+        return self.entitlements.get(brand_id)
+
+    async def upsert(self, entitlement):  # noqa: ANN001, ANN201
+        self.entitlements[entitlement.brand_id] = entitlement
+        return entitlement
+
+    async def add_event(self, event):  # noqa: ANN001, ANN201
+        self.events.append(event)
+        return event
+
+    async def has_event(self, brand_id: UUID, kind: str) -> bool:
+        return any(e.brand_id == brand_id and e.kind == kind for e in self.events)
+
+    async def list_events(self, brand_id: UUID, *, limit: int) -> list[Any]:
+        mine = [e for e in self.events if e.brand_id == brand_id]
+        return sorted(mine, key=lambda e: e.created_at, reverse=True)[:limit]
+
+
+class FakeCounterUsageReader:
+    """``CounterUsageReader`` with per-brand/per-counter overrides."""
+
+    def __init__(self) -> None:
+        self.used: dict[tuple[UUID, str], int] = {}
+
+    async def monthly_used(self, brand_id: UUID, counter: str, *, since) -> int:  # noqa: ANN001
+        return self.used.get((brand_id, counter), 0)

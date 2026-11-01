@@ -10,10 +10,11 @@ import secrets
 import warnings
 from decimal import Decimal
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 AppEnv = Literal["development", "test", "staging", "production"]
 
@@ -132,6 +133,14 @@ class Settings(BaseSettings):
     # model through (cost ``NULL``) instead of 503 ``ai_model_unpriced``; a WARNING is logged
     # at boot. The reserve/settle write path itself can never be disabled.
     feature_budget_guard_strict: bool = True
+    # SPRINT-11 C-1 (D-073 + D-076 kill switch): ``False`` ⇒ plan limits are never enforced
+    # (``PgEntitlementLimitsReader`` answers "allowed" for every brand) and one WARNING is
+    # logged at boot. The entitlement tables and admin routes keep working.
+    feature_entitlements_enforced: bool = True
+    # SPRINT-11 C-3: comma-separated user ids allowed on ``/api/v1/admin/*``. Empty ⇒ every
+    # admin route answers 403 ``platform_admin_required`` (safe by default). Moves to the
+    # database in SPRINT-11.1.
+    platform_admin_user_ids: Annotated[list[UUID], NoDecode] = Field(default_factory=list)
 
     # --- Scheduler / publishing (SPRINT-07 B3) ------------------------------------------
     # Off by default (tests, dev). The worker loop is started in ``lifespan`` only when on.
@@ -145,6 +154,14 @@ class Settings(BaseSettings):
     # ``publish_jobs.max_attempts`` by ``content/service.py::_job_for``; the scheduler never
     # reads this setting (``job.max_attempts`` is the truth for an existing job).
     publish_max_attempts: int = Field(default=3, ge=1, le=10)
+
+    @field_validator("platform_admin_user_ids", mode="before")
+    @classmethod
+    def _split_admin_ids(cls, value: object) -> object:
+        """``PLATFORM_ADMIN_USER_IDS=<uuid>,<uuid>`` (whitespace tolerated; empty ⇒ ``[]``)."""
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
 
     @field_validator("meta_graph_api_version")
     @classmethod

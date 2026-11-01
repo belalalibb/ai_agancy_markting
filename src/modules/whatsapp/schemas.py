@@ -173,6 +173,7 @@ class MessagePublic(BaseModel):
     platform_timestamp: datetime | None
     created_at: datetime
     wamid: str | None = None
+    referral: dict[str, Any] | None = None  # SPRINT-11 C-7 (CTWA)
 
     @classmethod
     def from_domain(cls, message: Message, *, private: bool) -> MessagePublic:
@@ -190,6 +191,7 @@ class MessagePublic(BaseModel):
             platform_timestamp=message.platform_timestamp,
             created_at=message.created_at,
             wamid=message.wamid if private else None,
+            referral=message.referral,
         )
 
 

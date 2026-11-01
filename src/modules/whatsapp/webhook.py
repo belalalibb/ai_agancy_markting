@@ -54,6 +54,8 @@ from src.core.security import (
     TokenEncryptionService,
     get_token_encryption_service,
 )
+from src.modules.tenancy.infrastructure.postgres_repository import PostgresBrandConsentReader
+from src.modules.whatsapp.consent import BrandConsentReader
 from src.modules.whatsapp.domain.models import (
     WINDOW,
     AccountStatus,
@@ -176,11 +178,39 @@ def _message_fields(raw: dict[str, Any]) -> tuple[MessageKind, str | None, str |
     return kind, body, media_id
 
 
+REFERRAL_KEYS: tuple[str, ...] = (
+    "source_url",
+    "source_id",
+    "source_type",
+    "headline",
+    "body",
+    "ctwa_clid",
+)
+REFERRAL_MAX_CHARS = 512
+
+
+def referral_fields(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """SPRINT-11 C-7: ``messages[i]["referral"]`` (Click-to-WhatsApp) — known keys only,
+    every value coerced to text and trimmed to 512 chars; ``None`` when absent/empty."""
+    referral = raw.get("referral")
+    if not isinstance(referral, dict):
+        return None
+    kept: dict[str, Any] = {}
+    for key in REFERRAL_KEYS:
+        value = referral.get(key)
+        if isinstance(value, str | int | float) and not isinstance(value, bool):
+            kept[key] = str(value)[:REFERRAL_MAX_CHARS]
+    return kept or None
+
+
 class WebhookProcessor:
     """Processes one verified payload inside the request transaction."""
 
-    def __init__(self, repo: WhatsAppRepository) -> None:
+    def __init__(
+        self, repo: WhatsAppRepository, *, consent: BrandConsentReader | None = None
+    ) -> None:
         self._repo = repo
+        self._consent = consent  # SPRINT-11 C-6 (D-080)
 
     async def handle_webhook_payload(
         self, payload: Any, *, accounts: dict[str, WhatsAppAccount]
@@ -254,6 +284,7 @@ class WebhookProcessor:
                 media_id=media_id,
                 delivery_status=DeliveryStatus.RECEIVED,
                 platform_timestamp=at,
+                referral=referral_fields(raw),  # C-7 (CTWA)
                 created_at=datetime.now(tz=UTC),
             )
         )
@@ -268,7 +299,7 @@ class WebhookProcessor:
         counters.increment("wa_inbound")
         now = datetime.now(tz=UTC)
         expired = await self._repo.expire_pending_drafts(conversation.id, now=now)
-        await record_expired(self._repo, expired, now=now)  # B-3: ``expired`` signals (D-069)
+        await record_expired(self._repo, expired, now=now, consent=self._consent)  # D-069/D-080
         outcome.expired_drafts.extend(d.id for d in expired)
         logger.info(
             "wa inbound: brand=%s conv=%s kind=%s len=%d",
@@ -343,6 +374,16 @@ def _encryption(settings: Annotated[Settings, Depends(get_settings)]) -> TokenEn
 
 Encryption = Annotated[TokenEncryptionService, Depends(_encryption)]
 
+
+def _consent(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> BrandConsentReader:
+    """SPRINT-11 C-6 (D-080): ``brands.learning_consent`` for the ``expired`` signals."""
+    return PostgresBrandConsentReader(session)
+
+
+Consent = Annotated[BrandConsentReader, Depends(_consent)]
+
 WEBHOOK_PATH = "/webhooks/whatsapp"
 
 
@@ -373,7 +414,7 @@ async def verify_webhook(
     status_code=status.HTTP_200_OK,
 )
 async def receive_webhook(
-    request: Request, repo: Repo, encryption: Encryption
+    request: Request, repo: Repo, encryption: Encryption, consent: Consent
 ) -> dict[str, int | list[str]]:
     raw_body = await read_body_capped(request)  # A-5 (1): 1 MiB cap, streamed
     header = request.headers.get(SIGNATURE_HEADER)
@@ -412,7 +453,9 @@ async def receive_webhook(
         counters.increment("wa_webhook_rejected")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"error": "webhook_unverified"})
 
-    outcome = await WebhookProcessor(repo).handle_webhook_payload(payload, accounts=accounts)
+    outcome = await WebhookProcessor(repo, consent=consent).handle_webhook_payload(
+        payload, accounts=accounts
+    )
     if outcome.unparsed:
         counters.increment("wa_webhook_unparsed", outcome.unparsed)
     return {

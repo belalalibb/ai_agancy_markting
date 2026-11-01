@@ -39,6 +39,9 @@ if not TEST_DATABASE_URL:
 ROOT = Path(__file__).resolve().parents[2]
 # Truncation order is irrelevant with CASCADE, but listed children-first for readability.
 TABLES = (
+    # SPRINT-11 C-2 (0014) — entitlements, children first.
+    "entitlement_events",
+    "brand_entitlements",
     # SPRINT-10 B-3 (0012) — recommendations + the general learning signal.
     "learning_signals",
     "brand_recommendations",

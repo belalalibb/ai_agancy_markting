@@ -87,10 +87,27 @@ def get_cost_log_writer() -> CostLogWriter:
     return PgCostLogWriter()
 
 
-def get_entitlement_limits_reader() -> EntitlementLimitsReader | None:
-    """Part C wires ``entitlements.service.PgEntitlementLimitsReader`` here; ``None`` ⇒ no
-    plan check (the brand daily budget and platform cap still apply)."""
-    return None
+def get_entitlement_limits_reader(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    usage_reader: Annotated[BudgetUsageReader, Depends(get_budget_usage_reader)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> EntitlementLimitsReader | None:
+    """SPRINT-11 C-1: the plan-limits reader injected into ``BudgetGuard`` (D-073). This is
+    the **only** import of ``entitlements`` outside ``src/main.py`` (D-076 — removing the
+    module = return ``None`` here). ``None`` ⇒ no plan check; the brand daily budget and the
+    platform cap still apply."""
+    from src.modules.entitlements.infrastructure.postgres_repository import (
+        PgCounterUsageReader,
+        PgEntitlementRepository,
+    )
+    from src.modules.entitlements.service import PgEntitlementLimitsReader
+
+    return PgEntitlementLimitsReader(
+        PgEntitlementRepository(session),
+        usage_reader=usage_reader,
+        counters=PgCounterUsageReader(session),
+        enforced=settings.feature_entitlements_enforced,
+    )
 
 
 CostWriter = Annotated[CostLogWriter, Depends(get_cost_log_writer)]

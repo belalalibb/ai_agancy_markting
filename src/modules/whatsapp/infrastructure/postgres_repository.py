@@ -93,6 +93,7 @@ def _message(row: MessageRow) -> Message:
         sent_by_user_id=row.sent_by_user_id,
         reply_draft_id=row.reply_draft_id,
         platform_timestamp=row.platform_timestamp,
+        referral=row.referral,
         created_at=row.created_at,
     )
 
@@ -366,6 +367,7 @@ class PostgresWhatsAppRepository:
             "sent_by_user_id": message.sent_by_user_id,
             "reply_draft_id": message.reply_draft_id,
             "platform_timestamp": message.platform_timestamp,
+            "referral": message.referral,
             "created_at": message.created_at,
         }
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -42,6 +42,10 @@ class Tenant(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+LearningConsent = Literal["signals_only", "none", "full"]
+DEFAULT_LEARNING_CONSENT: LearningConsent = "signals_only"
+
+
 class Brand(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
@@ -49,6 +53,11 @@ class Brand(BaseModel):
     owner_tenant_id: UUID
     slug: Slug
     name: str = Field(..., min_length=1, max_length=255)
+    # SPRINT-11 C-6 (D-080): ``none`` ⇒ no new learning signals are written for this brand;
+    # ``full`` additionally allows (future) cross-brand learning readers.
+    learning_consent: LearningConsent = DEFAULT_LEARNING_CONSENT
+    # SPRINT-11 C-4 (D-078): the referring brand, if any — set once at creation.
+    referred_by_brand_id: UUID | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

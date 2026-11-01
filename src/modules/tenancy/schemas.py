@@ -8,7 +8,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.modules.tenancy.domain.access import BrandRole
-from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole, Slug, Tenant
+from src.modules.tenancy.domain.models import (
+    Brand,
+    BrandAccessGrant,
+    GrantRole,
+    LearningConsent,
+    Slug,
+    Tenant,
+)
 
 
 class TenantOut(BaseModel):
@@ -32,6 +39,8 @@ class BrandCreate(BaseModel):
 
     slug: Slug
     name: str = Field(..., min_length=1, max_length=255)
+    # SPRINT-11 C-6: optional referrer (must exist; not a new route — D-078).
+    referred_by_brand_id: UUID | None = None
 
 
 class BrandOut(BaseModel):
@@ -41,6 +50,7 @@ class BrandOut(BaseModel):
     owner_tenant_id: UUID
     slug: str
     name: str
+    learning_consent: LearningConsent  # D-080; ``referred_by_brand_id`` is never exposed here
     created_at: datetime
     updated_at: datetime
 

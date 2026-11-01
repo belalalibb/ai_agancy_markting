@@ -84,6 +84,9 @@ class EntitlementLimitsReader(Protocol):
     """SPRINT-11 B-3/C-1 (D-073): plan limits of the brand. Implemented by
     ``entitlements.service.PgEntitlementLimitsReader`` (Part C); ``None`` ⇒ no plan check.
     Raises :class:`~src.modules.ai_gateway.budget_guard.EntitlementLimitError` when the plan
-    is inactive or its ``daily_tokens`` are exhausted."""
+    is inactive or its ``daily_tokens`` are exhausted. Returns ``True`` when a **stored**
+    active entitlement governs the brand — its ``daily_tokens`` then *replace* the global
+    ``ai_daily_token_budget_per_brand`` (C-1); ``False`` (no row / kill switch) ⇒ the
+    ``BudgetGuard`` applies the global setting as before."""
 
-    async def check(self, brand_id: UUID, purpose: str) -> None: ...
+    async def check(self, brand_id: UUID, purpose: str) -> bool: ...

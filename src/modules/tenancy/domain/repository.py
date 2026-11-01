@@ -34,6 +34,10 @@ class BrandRepository(Protocol):
         """Brands owned by ``tenant_id`` (OWNER) plus brands with an *active* grant."""
         ...
 
+    async def set_learning_consent(self, brand_id: UUID, consent: str) -> Brand | None:
+        """SPRINT-11 C-6 (D-080): update ``learning_consent``; ``None`` when unknown."""
+        ...
+
 
 @runtime_checkable
 class BrandAccessGrantRepository(Protocol):

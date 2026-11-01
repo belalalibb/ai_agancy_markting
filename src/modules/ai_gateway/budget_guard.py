@@ -6,10 +6,13 @@ write path into ``ai_cost_log``. The order inside :meth:`BudgetGuard.complete` i
 
 1. **price first** — a platform-paid model missing from the price table is refused before
    any row or any call (:class:`UnpricedModelError`); ``Decimal("0")`` is a valid price;
-2. the brand's daily token budget (:class:`DailyBudget`) ⇒ :class:`BrandBudgetExceededError`;
+2. the brand's daily tokens: the plan limits (``limits_reader``, Part C ⇒
+   :class:`EntitlementLimitError`) when a stored active entitlement governs the brand,
+   otherwise the global :class:`DailyBudget` setting ⇒ :class:`BrandBudgetExceededError`
+   (the plan **replaces** the setting — C-1; ``None`` reader / kill switch ⇒ setting only);
 3. the platform USD cap over the last 24 h (platform mode only) ⇒
    :class:`PlatformBudgetExhaustedError`;
-4. the plan limits (``limits_reader``, Part C) ⇒ :class:`EntitlementLimitError`;
+4. (plan limits already applied in step 2; kept here for the historical numbering);
 5. **reserve** a ``pending`` row on an independent transaction (D-072) carrying a
    conservative estimate (``price × (prompt_estimate + max_tokens)``) so concurrent calls
    already count against the cap;
@@ -223,12 +226,17 @@ class BudgetGuard:
         if unit_price is None and ctx.platform_pays and self._strict:
             raise UnpricedModelError(model)
 
-        # 2. brand tokens.
-        verdict = await self._daily_budget.check(
-            ctx.brand_id, usage_reader=self._usage_reader, now=now
-        )
-        if not verdict.allowed:
-            raise BrandBudgetExceededError(verdict)
+        # 2. brand tokens — the plan's daily_tokens replace the global setting when a stored
+        #    active entitlement governs the brand (C-1); otherwise the setting applies.
+        governed = False
+        if self._limits is not None:
+            governed = bool(await self._limits.check(ctx.brand_id, ctx.purpose))
+        if not governed:
+            verdict = await self._daily_budget.check(
+                ctx.brand_id, usage_reader=self._usage_reader, now=now
+            )
+            if not verdict.allowed:
+                raise BrandBudgetExceededError(verdict)
 
         # 3. platform cap (platform only).
         if ctx.platform_pays:
@@ -240,9 +248,7 @@ class BudgetGuard:
             if used_usd >= self._cap:
                 raise PlatformBudgetExhaustedError()
 
-        # 4. plan limits (Part C).
-        if self._limits is not None:
-            await self._limits.check(ctx.brand_id, ctx.purpose)
+        # 4. plan limits — applied in step 2 (they replace the setting, not add to it).
 
         # 5. reserve.
         prompt_estimate = estimate_prompt_tokens(req)

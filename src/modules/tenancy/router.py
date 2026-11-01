@@ -93,7 +93,9 @@ async def get_tenant(tenant_id: UUID, actor: ActorTenantId, service: Service) ->
 )
 async def create_brand(payload: BrandCreate, actor: ActorTenantId, service: Service) -> BrandOut:
     try:
-        brand = await service.create_brand(actor, payload.slug, payload.name)
+        brand = await service.create_brand(
+            actor, payload.slug, payload.name, referred_by_brand_id=payload.referred_by_brand_id
+        )
     except TenancyError as exc:
         raise to_http(exc) from exc
     return BrandOut.from_domain(brand)

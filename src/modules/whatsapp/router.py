@@ -33,7 +33,11 @@ from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rat
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.exceptions import ContentError
 from src.modules.content.router import to_http as content_to_http
-from src.modules.tenancy.dependencies import get_brand_access_resolver, get_brand_repository
+from src.modules.tenancy.dependencies import (
+    get_brand_access_resolver,
+    get_brand_consent_reader,
+    get_brand_repository,
+)
 from src.modules.tenancy.domain.access import (
     CONNECTION_WRITE_ROLES,
     GRANT_ROLES,
@@ -45,6 +49,7 @@ from src.modules.tenancy.domain.repository import BrandRepository
 from src.modules.tenancy.exceptions import BrandNotFoundError, InsufficientRoleError, TenancyError
 from src.modules.tenancy.router import to_http as tenancy_to_http
 from src.modules.whatsapp.client import WhatsAppCloudClient
+from src.modules.whatsapp.consent import BrandConsentReader
 from src.modules.whatsapp.domain.models import Conversation, ConversationStatus, Message
 from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, WhatsAppRepository
 from src.modules.whatsapp.exceptions import (
@@ -131,6 +136,7 @@ Independent = Annotated[IndependentWrites, Depends(get_independent_writes)]
 Client = Annotated[WhatsAppCloudClient, Depends(get_whatsapp_client)]
 Encryption = Annotated[TokenEncryptionService, Depends(get_encryption)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
+Consent = Annotated[BrandConsentReader, Depends(get_brand_consent_reader)]  # C-6 (D-080)
 Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
 LimitQuery = Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)]
 CursorQuery = Annotated[str | None, Query(max_length=128)]
@@ -144,10 +150,10 @@ def get_account_service(
 
 
 def get_inbox_service(
-    repo: Repo, client: Client, encryption: Encryption, independent: Independent
+    repo: Repo, client: Client, encryption: Encryption, independent: Independent, consent: Consent
 ) -> WhatsAppInboxService:
     return WhatsAppInboxService(
-        repo, client, PostgresWhatsAppTokenProvider(repo, encryption), independent
+        repo, client, PostgresWhatsAppTokenProvider(repo, encryption), independent, consent
     )
 
 
@@ -162,10 +168,11 @@ def get_suggestion_service(
     inbox: Inbox,
     limiter: Limiter,
     independent: Independent,
+    consent: Consent,
 ) -> ReplySuggestionService:
     """SPRINT-11 B-4: the gateway is the ``BudgetGuard`` (daily tokens + platform cap +
     ``ai_cost_log`` reservation — D-075)."""
-    return ReplySuggestionService(repo, gateway, inbox, limiter, independent)
+    return ReplySuggestionService(repo, gateway, inbox, limiter, independent, consent)
 
 
 Suggestions = Annotated[ReplySuggestionService, Depends(get_suggestion_service)]

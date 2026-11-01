@@ -72,7 +72,9 @@ def test_protected_route_count_is_reported() -> None:
     # (directive says 45 for the same reason).
     # SPRINT-10 B-2: +1 (POST …/brain/competitors/{competitor_id}/refresh) ⇒ 57
     # SPRINT-10 B-3: +5 (diagnose, content-plan, GET recommendations, accept, dismiss) ⇒ 62
-    assert PROTECTED_ROUTE_COUNT == 62, PROTECTED  # SPRINT-10: 47 + 15 brain routes
+    # SPRINT-11 C-5: +4 entitlements (admin activate, admin read, brand entitlement,
+    # learning-consent) ⇒ 66
+    assert PROTECTED_ROUTE_COUNT == 66, PROTECTED  # SPRINT-11: 62 + 4 entitlement routes
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)

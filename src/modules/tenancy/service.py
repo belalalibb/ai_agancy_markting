@@ -63,12 +63,42 @@ class TenancyService:
         return tenant
 
     # ----------------------------------------------------------------- brands --
-    async def create_brand(self, owner_tenant_id: UUID, slug: str, name: str) -> Brand:
+    async def create_brand(
+        self,
+        owner_tenant_id: UUID,
+        slug: str,
+        name: str,
+        *,
+        referred_by_brand_id: UUID | None = None,
+    ) -> Brand:
         if await self._tenants.get(owner_tenant_id) is None:
             raise TenantNotFoundError()
         if await self._brands.get_by_owner_and_slug(owner_tenant_id, slug) is not None:
             raise BrandSlugTakenError(f"brand slug {slug!r} already exists for this tenant")
-        return await self._brands.add(Brand(owner_tenant_id=owner_tenant_id, slug=slug, name=name))
+        if (
+            referred_by_brand_id is not None
+            and await self._brands.get(referred_by_brand_id) is None
+        ):
+            # SPRINT-11 C-6 (D-078): the referrer must exist — 404 hides nothing sensitive here.
+            raise BrandNotFoundError("referred_by_brand_id does not exist")
+        return await self._brands.add(
+            Brand(
+                owner_tenant_id=owner_tenant_id,
+                slug=slug,
+                name=name,
+                referred_by_brand_id=referred_by_brand_id,
+            )
+        )
+
+    async def set_learning_consent(
+        self, actor_tenant_id: UUID, brand_id: UUID, consent: str
+    ) -> Brand:
+        """SPRINT-11 C-6 (D-080): OWNER only."""
+        await self.require_role(actor_tenant_id, brand_id, GRANT_ROLES)
+        brand = await self._brands.set_learning_consent(brand_id, consent)
+        if brand is None:  # pragma: no cover - resolver already proved existence
+            raise BrandNotFoundError()
+        return brand
 
     async def list_brands(self, actor_tenant_id: UUID) -> list[tuple[Brand, BrandRole]]:
         return await self._brands.list_accessible(actor_tenant_id)

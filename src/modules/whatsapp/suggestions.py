@@ -25,6 +25,7 @@ from src.core.metrics import counters
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.exceptions import GenerationRateLimitedError
+from src.modules.whatsapp.consent import BrandConsentReader, may_write_signal
 from src.modules.whatsapp.domain.models import (
     Direction,
     DraftStatus,
@@ -80,8 +81,10 @@ class ReplySuggestionService:
         inbox: WhatsAppInboxService,
         limiter: RateLimiter,
         independent: IndependentWrites,
+        consent: BrandConsentReader | None = None,
     ) -> None:
         self._repo = repo
+        self._consent = consent  # SPRINT-11 C-6 (D-080): ``none`` ⇒ no new signal rows
         # SPRINT-11 B-4: ``gateway`` is the ``BudgetGuard`` — daily tokens, platform cap and
         # the ``ai_cost_log`` row are enforced there (D-075), not in this service.
         self._gateway = gateway
@@ -221,7 +224,14 @@ class ReplySuggestionService:
 
         async def _decide(repo: WhatsAppRepository) -> ReplyDraft:
             return await self._decide_and_record(
-                repo, brand_id, draft, body=body, edited=edited, actor=actor_user_id, now=now
+                repo,
+                brand_id,
+                draft,
+                body=body,
+                edited=edited,
+                actor=actor_user_id,
+                now=now,
+                consent=self._consent,
             )
 
         decided = await self._independent.run(_decide)
@@ -249,6 +259,7 @@ class ReplySuggestionService:
         edited: bool,
         actor: UUID,
         now: datetime,
+        consent: BrandConsentReader | None = None,
     ) -> ReplyDraft:
         """Runs on the independent session: lock ⇒ re-check ``suggested`` ⇒ decide ⇒ signal."""
         locked = await _lock_pending(repo, brand_id, draft.id)
@@ -260,16 +271,17 @@ class ReplySuggestionService:
             decided_at=now,
         )
         decided = await _reload(repo, brand_id, locked.id)
-        await repo.add_signal(
-            build_signal(
-                decided,
-                Signal.APPROVED_AFTER_EDIT if edited else Signal.APPROVED_UNCHANGED,
-                edit_distance_ratio=edit_distance_ratio(draft.suggested_body, body)
-                if edited
-                else 0.0,
-                now=now,
+        if await may_write_signal(consent, brand_id):
+            await repo.add_signal(
+                build_signal(
+                    decided,
+                    Signal.APPROVED_AFTER_EDIT if edited else Signal.APPROVED_UNCHANGED,
+                    edit_distance_ratio=edit_distance_ratio(draft.suggested_body, body)
+                    if edited
+                    else 0.0,
+                    now=now,
+                )
             )
-        )
         return decided
 
     async def reject(
@@ -290,7 +302,8 @@ class ReplySuggestionService:
                 rejection_reason=reason,
             )
             decided = await _reload(repo, brand_id, locked.id)
-            await repo.add_signal(build_signal(decided, Signal.REJECTED, now=now))
+            if await may_write_signal(self._consent, brand_id):
+                await repo.add_signal(build_signal(decided, Signal.REJECTED, now=now))
             return decided
 
         decided = await self._independent.run(_reject)

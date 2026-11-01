@@ -146,6 +146,7 @@ class MessageRow(Base):
         nullable=True,
     )
     platform_timestamp: Mapped[datetime | None] = _ts(nullable=True)
+    referral: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)  # C-7
     created_at: Mapped[datetime] = _ts()
 
 

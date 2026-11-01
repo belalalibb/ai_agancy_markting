@@ -39,6 +39,7 @@ from src.modules.ai_gateway.http_errors import budget_error_to_http
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.brand_brain.advisor import BrandAdvisor
+from src.modules.brand_brain.consent import BrandConsentReader
 from src.modules.brand_brain.domain.repository import BrandBrainRepository, EvidenceCursor
 from src.modules.brand_brain.exceptions import (
     BlockedPlatformHostError,
@@ -94,7 +95,7 @@ from src.modules.brand_brain.service import (
 from src.modules.content.router import get_content_service
 from src.modules.content.service import ContentService
 from src.modules.social_connect.meta_client import MetaGraphClient
-from src.modules.tenancy.dependencies import get_brand_access_resolver
+from src.modules.tenancy.dependencies import get_brand_access_resolver, get_brand_consent_reader
 from src.modules.tenancy.domain.access import (
     CONNECTION_WRITE_ROLES,
     GRANT_ROLES,
@@ -250,15 +251,20 @@ RecommendationStatusQuery = Annotated[
 ]
 
 
+Consent = Annotated[BrandConsentReader, Depends(get_brand_consent_reader)]  # C-6 (D-080)
+
+
 def get_brain_advisor(
     repo: Repo,
     gateway: BrainGateway,
     limiter: Limiter,
     content: Content,
+    consent: Consent,
 ) -> BrandAdvisor:
     """B-3: the same request session for recommendations + content drafts; the gateway is
-    the ``BudgetGuard``-wrapped one (platform or ``X-AI-Key``) — SPRINT-11 B-4."""
-    return BrandAdvisor(repo, gateway=gateway, limiter=limiter, content=content)
+    the ``BudgetGuard``-wrapped one (platform or ``X-AI-Key``) — SPRINT-11 B-4. C-6: the
+    consent reader gates ``learning_signals`` writes (D-080)."""
+    return BrandAdvisor(repo, gateway=gateway, limiter=limiter, content=content, consent=consent)
 
 
 Advisor = Annotated[BrandAdvisor, Depends(get_brain_advisor)]

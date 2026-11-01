@@ -877,6 +877,8 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
     # ``prompt_tokens`` / ``completion_tokens`` / ``prompt_hash`` (SPRINT-07 A-4): the explicit
     # ``GenerationLogEntry`` model — LLM usage counters and a sha256 digest of the prompt,
     # OWNER/MANAGER only (D-066); not credentials.
+    # ``daily_tokens`` (SPRINT-11 C-1, D-073): the plan's daily LLM-token ceiling on
+    # ``PlanLimits`` — an integer quota named by the directive, not a credential.
     allowed = {
         "access_token",
         "token_type",
@@ -885,6 +887,7 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
         "prompt_tokens",
         "completion_tokens",
         "prompt_hash",
+        "daily_tokens",
     }
     structural = {"required", "properties", "title", "description", "type", "format"}
 
