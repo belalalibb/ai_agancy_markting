@@ -10,17 +10,29 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.core.http import HttpClient
+from src.modules.ai_gateway.cost_logging import CostLoggingGateway, PriceTable
+from src.modules.ai_gateway.dependencies import get_ai_gateway
+from src.modules.ai_gateway.exceptions import AIProviderNotConfiguredError
+from src.modules.ai_gateway.facades import HttpOpenAICompatibleProvider
+from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
-from src.modules.brand_brain.domain.repository import BrandBrainRepository, EvidenceCursor
+from src.modules.brand_brain.domain.repository import (
+    BrandBrainRepository,
+    CostLogWriter,
+    EvidenceCursor,
+)
 from src.modules.brand_brain.exceptions import (
     BlockedPlatformHostError,
     BrandBrainError,
@@ -35,8 +47,10 @@ from src.modules.brand_brain.exceptions import (
 )
 from src.modules.brand_brain.infrastructure.internal_metrics import PgInternalMetricsReader
 from src.modules.brand_brain.infrastructure.postgres_repository import (
+    PgCostLogWriter,
     PostgresBrandBrainRepository,
 )
+from src.modules.brand_brain.public_fetch import PublicPageFetcher
 from src.modules.brand_brain.schemas import (
     CompetitorCreate,
     CompetitorPublic,
@@ -53,9 +67,13 @@ from src.modules.brand_brain.schemas import (
 )
 from src.modules.brand_brain.service import (
     BrandBrainService,
+    CompetitorRefresher,
     EvidenceCollector,
+    GraphPageSource,
     InternalMetricsReader,
+    PublicPageSource,
 )
+from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.tenancy.dependencies import get_brand_access_resolver
 from src.modules.tenancy.domain.access import (
     CONNECTION_WRITE_ROLES,
@@ -87,20 +105,109 @@ def get_internal_metrics_reader(
     return PgInternalMetricsReader(session)
 
 
+def get_graph_page_source(
+    settings: Annotated[Settings, Depends(get_settings)], http_client: HttpClient
+) -> GraphPageSource | None:
+    """B-2: the Graph app token (``app_id|app_secret``) — ``None`` when Meta is not
+    configured, so a competitor refresh records ``unavailable`` instead of failing."""
+    if not settings.meta_app_id or not settings.meta_app_secret.get_secret_value():
+        return None
+    return MetaGraphClient(settings=settings, http_client=http_client)
+
+
+def get_public_page_source(http_client: HttpClient) -> PublicPageSource:
+    return PublicPageFetcher(http_client)
+
+
+def get_cost_log_writer() -> CostLogWriter:
+    return PgCostLogWriter()
+
+
 Repo = Annotated[BrandBrainRepository, Depends(get_brain_repository)]
 MetricsReader = Annotated[InternalMetricsReader, Depends(get_internal_metrics_reader)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
 Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
+GraphSource = Annotated[GraphPageSource | None, Depends(get_graph_page_source)]
+WebSource = Annotated[PublicPageSource, Depends(get_public_page_source)]
+CostWriter = Annotated[CostLogWriter, Depends(get_cost_log_writer)]
 LimitQuery = Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)]
 CursorQuery = Annotated[str | None, Query(max_length=128)]
 IfMatch = Annotated[str | None, Header(alias="If-Match")]
+# B-2 (§2-0 هـ): the optional BYOK header. The value is never bound to a model, never logged
+# and never stored — it lives in this request's locals and is handed to the provider only.
+AIKeyHeader = Annotated[str | None, Header(alias="X-AI-Key", min_length=16, max_length=512)]
 
 
-def get_brain_service(repo: Repo, reader: MetricsReader, limiter: Limiter) -> BrandBrainService:
-    return BrandBrainService(repo, limiter=limiter, collector=EvidenceCollector(repo, reader))
+def get_brain_service(
+    repo: Repo, reader: MetricsReader, limiter: Limiter, graph: GraphSource, web: WebSource
+) -> BrandBrainService:
+    return BrandBrainService(
+        repo,
+        limiter=limiter,
+        collector=EvidenceCollector(repo, reader),
+        refresher=CompetitorRefresher(repo, graph=graph, web=web),
+    )
 
 
 Service = Annotated[BrandBrainService, Depends(get_brain_service)]
+
+
+class _NoPlatformGateway:
+    """Placeholder used when a user key is present — the platform key is never touched."""
+
+    name = "none"
+    model = "none"
+
+    async def complete(self, req: CompletionRequest) -> CompletionResult:  # pragma: no cover
+        raise AIProviderNotConfiguredError()
+
+
+_NO_PLATFORM: AIGateway = _NoPlatformGateway()
+
+
+def build_brain_gateway(
+    settings: Settings,
+    *,
+    platform: AIGateway,
+    writer: CostLogWriter,
+    user_key: str | None,
+    http_client: object | None,
+) -> AIGateway:
+    """B-2: ``X-AI-Key`` ⇒ a per-request ``openai_compatible`` provider on the **user's** key
+    (``credential_mode=user_key``, memory only); otherwise the platform gateway. Either way
+    the call is wrapped by :class:`CostLoggingGateway`. **No fallback** from ``user_key`` to
+    ``platform``: a failure is returned as is, with ``credential_mode=user_key``."""
+    if user_key is None:
+        inner = platform
+    else:
+        inner = HttpOpenAICompatibleProvider(
+            base_url=settings.ai_provider_base_url,
+            api_key=SecretStr(user_key),
+            model=settings.ai_default_model,
+            http_client=http_client,  # type: ignore[arg-type]
+            timeout_seconds=settings.ai_http_timeout_seconds,
+        )
+    return CostLoggingGateway(
+        inner, writer, price_table=PriceTable.from_json(settings.ai_price_table_json)
+    )
+
+
+def get_brain_gateway(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    writer: CostWriter,
+    x_ai_key: AIKeyHeader = None,
+) -> AIGateway:
+    """``X-AI-Key`` present ⇒ the platform gateway is **not even built**; absent ⇒ the
+    configured platform gateway (503 ``ai_provider_not_configured`` when none)."""
+    http_client = getattr(request.app.state, "http_client", None)
+    platform = _NO_PLATFORM if x_ai_key is not None else get_ai_gateway(request, settings)
+    return build_brain_gateway(
+        settings, platform=platform, writer=writer, user_key=x_ai_key, http_client=http_client
+    )
+
+
+BrainGateway = Annotated[AIGateway, Depends(get_brain_gateway)]
 
 
 async def _authorise(
@@ -285,6 +392,36 @@ async def delete_competitor(
     except BrandBrainError as exc:
         raise to_http(exc) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    f"{BRAIN_PREFIX}/competitors/{{competitor_id}}/refresh",
+    response_model=RefreshResult,
+    summary="Refresh a competitor from legal public sources (10/hour/brand) — OWNER/MANAGER",
+    responses={
+        404: {"description": "competitor_not_found"},
+        429: {"description": "refresh_rate_limited (Retry-After)"},
+    },
+)
+async def refresh_competitor(
+    brand_id: UUID,
+    competitor_id: UUID,
+    actor: CurrentUser,
+    resolver: Resolver,
+    service: Service,
+) -> RefreshResult:
+    """B-2 (D-074): Graph app token (public fields, no ``/posts``) + the allow-listed public
+    page (robots first, 512 KiB, GET only) ⇒ ``estimated`` evidence; refusals are recorded
+    as ``{"unavailable": reason}``; ``competitor_refreshed_at`` is bumped."""
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        rows = await service.refresh_competitor(brand_id, competitor_id)
+    except BrandBrainError as exc:
+        raise to_http(exc) from exc
+    observed = rows[0].observed_at if rows else datetime.now(tz=UTC)
+    return RefreshResult(
+        collected=len(rows), metrics=[r.metric for r in rows], observed_at=observed
+    )
 
 
 # ------------------------------------------------------------------ evidence --

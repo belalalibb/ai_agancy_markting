@@ -41,6 +41,7 @@ from src.modules.social_connect.exceptions import (
 from src.modules.social_connect.schemas import (
     MetaDebugTokenInfo,
     MetaPageInfo,
+    MetaPublicPageInfo,
     MetaPublishResult,
     MetaTokenResponse,
     MetaUserInfo,
@@ -54,6 +55,8 @@ PAGE_FIELDS = (
 # F8: hard upper bound on cursor-pagination hops for ``/me/accounts`` (100 Pages per
 # hop → 5 000 Pages). A ``paging.next`` that never ends must not loop forever.
 MAX_PAGINATION_REQUESTS: int = 50
+# SPRINT-10 B-2: public fields of a competitor Page (app token; no posts).
+PUBLIC_PAGE_FIELDS = "name,about,category,fan_count,followers_count,website,link"
 
 # H2: query parameters that must never be sent (Meta echoes them in ``paging.next``).
 # SPRINT-05 A-0/B5: ``input_token`` / ``method`` belong to the ``/debug_token`` form body only.
@@ -226,6 +229,34 @@ class MetaGraphClient:
             scopes=[str(s) for s in scopes],
             expires_at=int(data["expires_at"]) if data.get("expires_at") is not None else None,
             error_code=_as_optional_int(error.get("code")),
+        )
+
+    async def get_public_page(self, page_id: str) -> MetaPublicPageInfo:
+        """``GET /{page_id}?fields=…`` with the **app** token (SPRINT-10 B-2, D-074).
+
+        Reads only the public fields of a Page we do not own (``name, about, category,
+        fan_count, followers_count, website, link``) — never ``/posts``, never a user or page
+        token. Graph errors are classified by :func:`map_graph_error` like every other call.
+        """
+        if not page_id.isdigit():
+            raise MetaGraphError("page_id must be numeric", http_status=None)
+        app_secret = self._settings.meta_app_secret.get_secret_value()
+        app_token = f"{self._settings.meta_app_id}|{app_secret}"
+        payload = await self._request(
+            "GET",
+            f"/{page_id}",
+            params={"fields": PUBLIC_PAGE_FIELDS},
+            headers=_bearer(app_token),
+        )
+        return MetaPublicPageInfo(
+            id=str(payload.get("id") or page_id),
+            name=payload.get("name"),
+            about=payload.get("about"),
+            category=payload.get("category"),
+            fan_count=_as_optional_int(payload.get("fan_count")),
+            followers_count=_as_optional_int(payload.get("followers_count")),
+            website=payload.get("website"),
+            link=payload.get("link"),
         )
 
     async def get_me(self, user_access_token: str) -> MetaUserInfo:

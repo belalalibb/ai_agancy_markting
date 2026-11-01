@@ -4,7 +4,7 @@ Covers: role matrix + D-066 projections (VIEWER without ``banned_phrases`` / ``c
 ``source_ref``), ``If-Match`` CAS (428 / 412 / ETag), revisions, competitors (≤3, UNIQUE name,
 host validation, blocked platforms, 204 delete), evidence keyset + filters + unknown metric,
 ``evidence/refresh`` (five ``measured/internal_db`` rows, 60/h limiter), OWNER-only cost, the
-domain guards of ``Evidence`` and the metric dictionary, and the route count (47 + 9 = 56).
+domain guards of ``Evidence`` and the metric dictionary, and the route count (47 + 10 = 57).
 """
 
 from __future__ import annotations
@@ -540,7 +540,7 @@ def test_brain_routes_are_protected_and_counted() -> None:
     from tests.test_auth_guard import PROTECTED
 
     brain = sorted(op for op in PROTECTED if "/brain/" in op[1])
-    assert len(brain) == 9
+    assert len(brain) == 10  # B-1: 9 + B-2: competitors/{id}/refresh
     assert brain == [
         ("DELETE", "/api/v1/brands/{brand_id}/brain/competitors/{competitor_id}"),
         ("GET", "/api/v1/brands/{brand_id}/brain/competitors"),
@@ -549,6 +549,7 @@ def test_brain_routes_are_protected_and_counted() -> None:
         ("GET", "/api/v1/brands/{brand_id}/brain/profile"),
         ("GET", "/api/v1/brands/{brand_id}/brain/profile/revisions"),
         ("POST", "/api/v1/brands/{brand_id}/brain/competitors"),
+        ("POST", "/api/v1/brands/{brand_id}/brain/competitors/{competitor_id}/refresh"),
         ("POST", "/api/v1/brands/{brand_id}/brain/evidence/refresh"),
         ("PUT", "/api/v1/brands/{brand_id}/brain/profile"),
     ]

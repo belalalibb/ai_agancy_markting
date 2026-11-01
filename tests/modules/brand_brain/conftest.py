@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 from src.modules.tenancy.domain.models import GrantRole
 
 from tests.conftest import AGENCY_ID, BRAND_ID, OWNER_ID, STRANGER_ID, grant
-from tests.fakes import FakeBrandBrainRepository, FakeInternalMetricsReader, FakeStore
+from tests.fakes import (
+    FakeBrandBrainRepository,
+    FakeCostLogWriter,
+    FakeInternalMetricsReader,
+    FakeStore,
+)
 
 BRAIN = f"/api/v1/brands/{BRAND_ID}/brain"
 
@@ -41,6 +46,12 @@ def brain_app(
     app.state.brain_repo = brain_repo
     app.dependency_overrides[router.get_brain_repository] = lambda: brain_repo
     app.dependency_overrides[router.get_internal_metrics_reader] = lambda: metrics_reader
+    # B-2: the unit app has no lifespan (no ``app.state.http_client``); competitor sources
+    # are "not configured" unless a test overrides them (``test_b2_competitor_refresh``).
+    app.dependency_overrides[router.get_graph_page_source] = lambda: None
+    app.dependency_overrides[router.get_public_page_source] = lambda: None
+    app.state.cost_writer = FakeCostLogWriter(brain_repo)
+    app.dependency_overrides[router.get_cost_log_writer] = lambda: app.state.cost_writer
     return app
 
 

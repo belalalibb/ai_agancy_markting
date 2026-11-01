@@ -1,4 +1,5 @@
-"""Gateway contract (SPRINT-06 B4; SPRINT-07 B-0 adds ``Usage`` + ``credential_mode``)."""
+"""Gateway contract (SPRINT-06 B4; SPRINT-07 B-0 adds ``Usage`` + ``credential_mode``;
+SPRINT-10 B-2 adds the four Brand Brain purposes, ``json_mode`` and ``prompt_version``)."""
 
 from __future__ import annotations
 
@@ -9,7 +10,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.modules.ai_gateway.contract import CredentialMode, Operation, Usage
 
-Purpose = Literal["content_draft", "reply_suggestion"]  # SPRINT-09 B-3 adds reply_suggestion
+# SPRINT-09 B-3 adds ``reply_suggestion``; SPRINT-10 B-2 adds the four Brand Brain purposes
+# (directive §2-0: a Literal, not a new layer).
+Purpose = Literal[
+    "content_draft",
+    "reply_suggestion",
+    "brand_diagnosis",
+    "competitor_gap",
+    "content_plan",
+    "tone_profile",
+]
 
 
 class CompletionRequest(BaseModel):
@@ -24,8 +34,14 @@ class CompletionRequest(BaseModel):
     tenant_id: UUID
     operation: Operation = "generate_text"
     # B-0 (D-067): ``platform`` = the platform's own key (today's only mode); ``user_key`` is
-    # reserved for BYOK (M7) and never selected in SPRINT-07.
+    # reserved for BYOK (M7) and never selected in SPRINT-07. SPRINT-10 B-2: ``user_key`` is
+    # selected by the ``X-AI-Key`` header on Brand Brain routes (memory only, no fallback).
     credential_mode: CredentialMode = "platform"
+    # SPRINT-10 B-2: ``json_mode`` ⇒ ``response_format={"type": "json_object"}`` on the
+    # OpenAI-compatible facade and a strict JSON parse of the completion; ``prompt_version``
+    # is metadata for ``ai_cost_log`` (never the prompt text).
+    json_mode: bool = False
+    prompt_version: str = Field(default="", max_length=32)
 
 
 class CompletionResult(BaseModel):

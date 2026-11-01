@@ -23,6 +23,7 @@ import respx
 from alembic import command
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -50,7 +51,10 @@ from tests.conftest import (
     AGENCY_ID,
     BRAND2_ID,
     BRAND_ID,
+    FAKE_APP_ID,
+    FAKE_APP_SECRET,
     FAKE_STATE_SECRET,
+    GRAPH_BASE,
     OWNER_ID,
     STRANGER_ID,
     USER_BY_TENANT,
@@ -4306,14 +4310,19 @@ def test_b1_i2_competitor_limit_race_is_201_201_201_409_on_pg(integration_app: F
                 transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
             ) as c2,
         ):
-            responses = await asyncio.gather(
-                *[
-                    (c1 if i % 2 else c2).post(
-                        f"{BRAIN_PG}/competitors", json={"name": f"Rival {i}"}, headers=owner
-                    )
-                    for i in range(4)
-                ]
-            )
+            # B-2: ``get_brain_service`` now resolves ``HttpClient`` (Graph + public web
+            # sources); raw ``create_app`` instances have no lifespan, so attach one client.
+            async with httpx.AsyncClient() as http:
+                for a in apps:
+                    a.state.http_client = http
+                responses = await asyncio.gather(
+                    *[
+                        (c1 if i % 2 else c2).post(
+                            f"{BRAIN_PG}/competitors", json={"name": f"Rival {i}"}, headers=owner
+                        )
+                        for i in range(4)
+                    ]
+                )
         return sorted(r.status_code for r in responses)
 
     assert asyncio.run(_race()) == [201, 201, 201, 409]
@@ -4477,3 +4486,227 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
     } <= constraints
     indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
     assert {"ix_brand_evidence_lookup", "ix_ai_cost_log_brand_created"} <= indexes
+
+
+# ============================================================================
+# SPRINT-10 B-2 — competitor refresh (Graph app token + robots) and cost logging
+# ============================================================================
+_SECRET_SHAPES = re.compile(r"EAA|sk-|Bearer")
+_RIVAL_HTML = (
+    "<html><head><title>Rival Roasters</title>"
+    '<meta name="description" content="Specialty coffee in Zamalek"></head>'
+    "<body><h1>Rival Roasters</h1><p>Beans roasted daily.</p></body></html>"
+)
+
+
+def test_b2_i1_competitor_refresh_writes_estimated_rows_and_timestamp_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B2-I1 — ``POST /competitors/{id}/refresh`` on real tables: Graph is read with the
+    **app** token only (no ``/posts``), the public page with our UA after ``robots.txt``;
+    every row is ``estimated``; a Graph error / robots refusal becomes
+    ``{"unavailable": …}``; ``source_ref`` never carries a token; the timestamp is set."""
+    from src.modules.brand_brain.public_fetch import USER_AGENT, PublicPageFetcher, _RobotsCache
+    from src.modules.brand_brain.router import get_public_page_source
+
+    owner = _brain_owner(integration_app)
+    # Fresh robots cache per call ⇒ the second refresh re-reads the (now closed) robots.txt.
+    integration_app.dependency_overrides[get_public_page_source] = lambda: PublicPageFetcher(
+        httpx.AsyncClient(), robots_cache=_RobotsCache()
+    )
+    page_json = {
+        "id": "777000",
+        "name": "Rival Roasters",
+        "category": "Coffee shop",
+        "fan_count": 900,
+        "followers_count": 950,
+        "website": "https://rival.example/menu",
+        "link": "https://www.facebook.com/rival",
+    }
+    with TestClient(integration_app) as client, respx.mock(assert_all_called=False) as router:
+        created = client.post(
+            f"{BRAIN_PG}/competitors",
+            json={
+                "name": "Rival Roasters",
+                "facebook_page_id": "777000",
+                "website_host": "rival.example",
+                "allowed_hosts": ["rival.example"],
+            },
+            headers=owner,
+        )
+        assert created.status_code == 201, created.text
+        competitor_id = created.json()["id"]
+
+        graph = router.get(f"{GRAPH_BASE}/777000").mock(
+            return_value=httpx.Response(200, json=page_json)
+        )
+        posts = router.get(url__regex=r".*/777000/posts.*")
+        robots = router.get("https://rival.example/robots.txt").mock(
+            return_value=httpx.Response(404)
+        )
+        page = router.get("https://rival.example/").mock(
+            return_value=httpx.Response(
+                200, text=_RIVAL_HTML, headers={"content-type": "text/html; charset=utf-8"}
+            )
+        )
+        first = client.post(f"{BRAIN_PG}/competitors/{competitor_id}/refresh", headers=owner)
+        assert first.status_code == 200, first.text
+        assert first.json()["collected"] == 5
+        assert set(first.json()["metrics"]) == {
+            "followers_count",
+            "fan_count",
+            "page_category",
+            "website_host",
+            "public_page_summary",
+        }
+        assert graph.call_count == 1 and posts.call_count == 0
+        graph_request = graph.calls.last.request
+        assert graph_request.headers["Authorization"] == f"Bearer {FAKE_APP_ID}|{FAKE_APP_SECRET}"
+        assert "fields=name" in str(graph_request.url)
+        assert robots.call_count == 1 and page.call_count == 1
+        assert page.calls.last.request.headers["User-Agent"] == USER_AGENT
+        assert robots.calls.last.request.headers["User-Agent"] == USER_AGENT
+
+        # Second refresh: Graph refuses (code 100) and robots.txt closes the site.
+        graph.mock(
+            return_value=httpx.Response(
+                400, json={"error": {"code": 100, "type": "GraphMethodException", "message": "x"}}
+            )
+        )
+        robots.mock(return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n"))
+        page.reset()
+        second = client.post(f"{BRAIN_PG}/competitors/{competitor_id}/refresh", headers=owner)
+        assert second.status_code == 200, second.text
+        assert second.json()["collected"] == 2
+        assert page.call_count == 0  # robots said no ⇒ no page request at all
+        assert posts.call_count == 0
+
+        listed = client.get(f"{BRAIN_PG}/evidence?subject_kind=competitor", headers=owner)
+        assert listed.status_code == 200, listed.text
+
+    rows = _rows(
+        "SELECT evidence_kind, metric, value::text, source_kind, source_ref, confidence "
+        "FROM brand_evidence WHERE subject_kind = 'competitor' AND subject_id = :c "
+        "ORDER BY created_at, metric",
+        {"c": UUID(competitor_id)},
+    )
+    assert len(rows) == 7
+    assert {r[0] for r in rows} == {"estimated"}
+    assert {r[3] for r in rows} == {"graph_api", "public_web"}
+    values = [json.loads(r[2]) for r in rows]
+    assert {"count": 950} in values and {"count": 900} in values
+    assert {"label": "Coffee shop"} in values and {"host": "rival.example"} in values
+    assert {"unavailable": "graph_error", "graph_code": 100} in values
+    assert {"unavailable": "robots_disallow"} in values
+    assert any(v.get("title") == "Rival Roasters" for v in values)
+    for row in rows:
+        assert row[4] in {"graph_api:page:777000", "public_web:rival.example"}
+        assert not _SECRET_SHAPES.search(row[4] or "")
+        assert FAKE_APP_SECRET not in (row[4] or "")
+    unavailable_conf = [r[5] for r in rows if "unavailable" in json.loads(r[2])]
+    assert unavailable_conf and all(float(c) == 0.0 for c in unavailable_conf)
+    refreshed_at = _run(
+        "SELECT competitor_refreshed_at FROM brand_competitors WHERE id = :c",
+        {"c": UUID(competitor_id)},
+        scalar=True,
+    )
+    assert refreshed_at is not None
+    reset_db_caches()
+
+
+def test_b2_i2_cost_logging_gateway_commits_independently_on_pg(integration_app: FastAPI) -> None:
+    """B2-I2 — ``CostLoggingGateway`` + ``PgCostLogWriter`` (D-072): one row per call, the
+    failed ``user_key`` call included (``outcome='error'`` + category), priced from the
+    table; no text column holds the user key or any secret shape; ``GET /brain/cost`` sees
+    both rows."""
+    from src.modules.ai_gateway.contract import AIError
+    from src.modules.ai_gateway.cost_logging import CostLoggingGateway, PriceTable
+    from src.modules.ai_gateway.facades import FakeProvider, HttpOpenAICompatibleProvider
+    from src.modules.ai_gateway.gateway import CompletionRequest
+    from src.modules.brand_brain.infrastructure.postgres_repository import PgCostLogWriter
+    from tests.conftest import OWNER_USER_ID
+
+    owner = _brain_owner(integration_app)
+    user_key = "".join(("PGUSERKEY", "-", "0123456789abcdef"))
+    price_table = PriceTable.from_json(
+        '{"fake-1": {"prompt_per_1k": "0.001", "completion_per_1k": "0.002"}}'
+    )
+
+    async def _calls() -> None:
+        writer = PgCostLogWriter()
+        ok_gateway = CostLoggingGateway(FakeProvider(), writer, price_table=price_table)
+        ok = await ok_gateway.complete(
+            CompletionRequest(
+                purpose="content_plan",
+                system="s",
+                user="u",
+                brand_id=BRAND_ID,
+                tenant_id=OWNER_ID,
+                prompt_version="content_plan_v1",
+            )
+        )
+        assert ok.provider == "fake"
+        with respx.mock(assert_all_called=True) as router:
+            router.post("https://llm.pg.example/v1/chat/completions").mock(
+                return_value=httpx.Response(401, json={"error": {"message": "bad key"}})
+            )
+            provider = HttpOpenAICompatibleProvider(
+                base_url="https://llm.pg.example/v1", api_key=SecretStr(user_key), model="gpt-x"
+            )
+            user_gateway = CostLoggingGateway(provider, writer, price_table=price_table)
+            with pytest.raises(AIError):
+                await user_gateway.complete(
+                    CompletionRequest(
+                        purpose="brand_diagnosis",
+                        system="s",
+                        user="u",
+                        brand_id=BRAND_ID,
+                        tenant_id=OWNER_ID,
+                        credential_mode="user_key",
+                        json_mode=True,
+                        prompt_version="brand_diagnosis_v1",
+                    )
+                )
+            sent = router.calls.last.request
+            assert sent.headers["Authorization"] == f"Bearer {user_key}"
+
+    reset_db_caches()
+    asyncio.run(_calls())
+    reset_db_caches()
+    assert OWNER_USER_ID  # the seeded owner exists; cost rows are brand-scoped, not user-scoped
+
+    rows = _rows(
+        "SELECT purpose, provider, model, credential_mode, outcome, error_category, "
+        "prompt_version, prompt_tokens, estimated_cost_usd FROM ai_cost_log "
+        "WHERE brand_id = :b ORDER BY created_at",
+        {"b": BRAND_ID},
+    )
+    assert len(rows) == 2
+    ok_row, err_row = rows
+    assert ok_row[0:5] == ("content_plan", "fake", "fake-1", "platform", "ok")
+    assert ok_row[5] is None and ok_row[6] == "content_plan_v1"
+    assert ok_row[7] is not None and ok_row[8] is not None and ok_row[8] > 0
+    assert err_row[0:5] == ("brand_diagnosis", "openai_compatible", "gpt-x", "user_key", "error")
+    assert err_row[5] is not None and err_row[6] == "brand_diagnosis_v1"
+    assert err_row[8] is None
+
+    text_columns = [
+        c
+        for (c,) in _rows(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'ai_cost_log' "
+            "AND data_type IN ('text', 'character varying')"
+        )
+    ]
+    assert text_columns
+    for column in text_columns:
+        for (value,) in _rows(f"SELECT {column} FROM ai_cost_log"):  # noqa: S608 - schema names
+            assert value is None or not _SECRET_SHAPES.search(str(value))
+            assert value is None or user_key not in str(value)
+
+    with TestClient(integration_app) as client:
+        report = client.get(f"{BRAIN_PG}/cost", headers=owner)
+        assert report.status_code == 200, report.text
+        body = report.json()
+        assert body["total_calls"] == 2
+        assert sum(item["errors"] for item in body["items"]) == 1
+    reset_db_caches()

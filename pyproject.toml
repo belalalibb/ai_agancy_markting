@@ -88,6 +88,13 @@ ignore = [
 "httpx".msg = "Use AIGateway (D-068)"
 "openai".msg = "Use AIGateway (D-068)"
 "anthropic".msg = "Use AIGateway (D-068)"
+"beautifulsoup4".msg = "No scraping libraries (D-074) — stdlib html.parser in brand_brain/public_fetch.py"
+"bs4".msg = "No scraping libraries (D-074) — stdlib html.parser in brand_brain/public_fetch.py"
+"scrapy".msg = "No scraping frameworks (D-074)"
+"playwright".msg = "No headless browsers (D-074)"
+"selenium".msg = "No headless browsers (D-074)"
+"instaloader".msg = "No Instagram scraping (D-074)"
+"lxml".msg = "No scraping parsers (D-074) — stdlib html.parser only"
 "litellm".msg = "Use AIGateway (D-068)"
 "google.generativeai".msg = "Use AIGateway (D-068)"
 # SPRINT-08 §2-0 (د): no platform SDK / ad-hoc HTTP client for the structural channels either —
@@ -105,6 +112,7 @@ ignore = [
 "src/modules/ai_gateway/**" = ["TID251"]
 "src/modules/social_connect/meta_client.py" = ["TID251"]
 "src/modules/whatsapp/client.py" = ["TID251"]
+"src/modules/brand_brain/public_fetch.py" = ["TID251"]  # SPRINT-10 B-2: legal public fetch only
 "src/core/**" = ["TID251"]
 
 [tool.ruff.format]

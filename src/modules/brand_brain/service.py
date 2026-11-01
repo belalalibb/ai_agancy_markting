@@ -40,7 +40,10 @@ from src.modules.brand_brain.exceptions import (
     RefreshRateLimitedError,
     UnknownMetricError,
 )
+from src.modules.brand_brain.public_fetch import PublicFetchRefused, PublicPage
 from src.modules.brand_brain.schemas import CompetitorCreate, ProfileUpdate
+from src.modules.social_connect.exceptions import MetaGraphError
+from src.modules.social_connect.schemas import MetaPublicPageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,13 @@ EVIDENCE_REFRESH_BUCKET = "brain:evidence-refresh"
 EVIDENCE_REFRESH_LIMIT = 60
 EVIDENCE_REFRESH_WINDOW_SECONDS = 3600
 INTERNAL_CONFIDENCE = Decimal("0.95")
+# B-2: competitor refresh (Graph app token + legal public page) — 10/hour/brand.
+COMPETITOR_REFRESH_BUCKET = "brain:competitor-refresh"
+COMPETITOR_REFRESH_LIMIT = 10
+COMPETITOR_REFRESH_WINDOW_SECONDS = 3600
+GRAPH_PUBLIC_CONFIDENCE = Decimal("0.70")  # public counters of a page we do not own
+PUBLIC_WEB_CONFIDENCE = Decimal("0.40")  # a page excerpt — what they *say*, not what they do
+PUBLIC_SUMMARY_CHARS = 600
 
 
 @dataclass(frozen=True)
@@ -128,6 +138,170 @@ def _ratio(rate: float | None, samples: int, window_days: int) -> dict[str, Any]
     return {"ratio": round(rate, 3), "samples": samples, "window_days": window_days}
 
 
+class GraphPageSource(Protocol):
+    """``MetaGraphClient.get_public_page`` — app token, public fields, no ``/posts``."""
+
+    async def get_public_page(self, page_id: str) -> MetaPublicPageInfo: ...
+
+
+class PublicPageSource(Protocol):
+    """``PublicPageFetcher.fetch`` — allow-listed host, robots first, 512 KiB, GET only."""
+
+    async def fetch(self, url: str, *, allowed_hosts: list[str]) -> PublicPage: ...
+
+
+class CompetitorRefresher:
+    """``POST /competitors/{id}/refresh`` (B-2, D-074): every row is ``estimated`` — a
+    counter published by a page we do not own (``graph_api``) or an excerpt of what a public
+    page says about itself (``public_web``). A refusal or a Graph error is recorded as
+    ``{"unavailable": <reason>}`` so the diagnosis can say "we could not look".
+    ``source_ref`` names the page id / host only — never a token."""
+
+    def __init__(
+        self,
+        repo: BrandBrainRepository,
+        *,
+        graph: GraphPageSource | None,
+        web: PublicPageSource | None,
+    ) -> None:
+        self._repo = repo
+        self._graph = graph
+        self._web = web
+
+    async def refresh(
+        self, competitor: Competitor, *, now: datetime | None = None
+    ) -> list[Evidence]:
+        now = now or datetime.now(tz=UTC)
+        rows: list[Evidence] = []
+        if competitor.facebook_page_id and self._graph is not None:
+            rows.extend(await self._graph_rows(competitor, now))
+        if competitor.website_host and self._web is not None:
+            rows.append(await self._web_row(competitor, now))
+        saved = await self._repo.add_evidence(rows)
+        await self._repo.touch_competitor_refreshed(competitor.id, at=now)
+        return saved
+
+    async def _graph_rows(self, competitor: Competitor, now: datetime) -> list[Evidence]:
+        page_id = competitor.facebook_page_id or ""
+        ref = f"graph_api:page:{page_id}"
+        assert self._graph is not None  # noqa: S101 - guarded by the caller
+        try:
+            page = await self._graph.get_public_page(page_id)
+        except MetaGraphError as exc:
+            # Only the Graph *code* travels (an int); never the message, never the token.
+            value: dict[str, Any] = {"unavailable": "graph_error"}
+            if exc.code is not None:
+                value["graph_code"] = exc.code
+            logger.info(
+                "brain competitor graph unavailable: competitor=%s code=%s",
+                competitor.id,
+                exc.code,
+            )
+            return [self._row(competitor, "followers_count", value, "graph_api", ref, now)]
+        rows = [
+            self._row(
+                competitor,
+                "followers_count",
+                {"count": page.followers_count}
+                if page.followers_count is not None
+                else {"unavailable": "not_public"},
+                "graph_api",
+                ref,
+                now,
+            ),
+            self._row(
+                competitor,
+                "fan_count",
+                {"count": page.fan_count}
+                if page.fan_count is not None
+                else {"unavailable": "not_public"},
+                "graph_api",
+                ref,
+                now,
+            ),
+            self._row(
+                competitor,
+                "page_category",
+                {"label": page.category[:120]} if page.category else {"unavailable": "not_public"},
+                "graph_api",
+                ref,
+                now,
+            ),
+        ]
+        host = normalize_host(_host_of(page.website)) if page.website else None
+        if host is not None:
+            rows.append(
+                self._row(competitor, "website_host", {"host": host}, "graph_api", ref, now)
+            )
+        return rows
+
+    async def _web_row(self, competitor: Competitor, now: datetime) -> Evidence:
+        host = competitor.website_host or ""
+        ref = f"public_web:{host}"
+        assert self._web is not None  # noqa: S101 - guarded by the caller
+        try:
+            page = await self._web.fetch(
+                f"https://{host}/", allowed_hosts=competitor.allowed_hosts
+            )
+        except PublicFetchRefused as exc:
+            logger.info(
+                "brain competitor public fetch refused: competitor=%s reason=%s",
+                competitor.id,
+                exc.reason,
+            )
+            return self._row(
+                competitor,
+                "public_page_summary",
+                {"unavailable": exc.reason},
+                "public_web",
+                ref,
+                now,
+            )
+        value = {
+            "status": page.status,
+            "title": page.title,
+            "meta_description": page.meta_description,
+            "excerpt": page.text_excerpt[:PUBLIC_SUMMARY_CHARS],
+        }
+        return self._row(competitor, "public_page_summary", value, "public_web", ref, now)
+
+    @staticmethod
+    def _row(
+        competitor: Competitor,
+        metric: str,
+        value: dict[str, Any],
+        source_kind: str,
+        source_ref: str,
+        now: datetime,
+    ) -> Evidence:
+        confidence = (
+            GRAPH_PUBLIC_CONFIDENCE if source_kind == "graph_api" else PUBLIC_WEB_CONFIDENCE
+        )
+        if "unavailable" in value:
+            confidence = Decimal("0.00")
+        return Evidence(
+            brand_id=competitor.brand_id,
+            subject_kind="competitor",
+            subject_id=competitor.id,
+            evidence_kind="estimated",
+            metric=metric,
+            value=value,
+            confidence=confidence,
+            source_kind=source_kind,  # type: ignore[arg-type]
+            source_ref=source_ref,
+            observed_at=now,
+            created_at=now,
+        )
+
+
+def _host_of(url: str) -> str:
+    """``https://www.shop.example/path`` ⇒ ``www.shop.example`` (bare host passes through)."""
+    stripped = url.strip()
+    if "://" in stripped:
+        stripped = stripped.split("://", 1)[1]
+    return stripped.split("/", 1)[0].split("?", 1)[0]
+
+
 class BrandBrainService:
     def __init__(
         self,
@@ -135,10 +309,12 @@ class BrandBrainService:
         *,
         limiter: RateLimiter,
         collector: EvidenceCollector,
+        refresher: CompetitorRefresher | None = None,
     ) -> None:
         self._repo = repo
         self._limiter = limiter
         self._collector = collector
+        self._refresher = refresher
 
     # --------------------------------------------------------------- profile ----
     async def get_profile(self, brand_id: UUID) -> BrandProfile:
@@ -228,6 +404,22 @@ class BrandBrainService:
         if competitor is None:
             raise CompetitorNotFoundError()
         return competitor
+
+    async def refresh_competitor(self, brand_id: UUID, competitor_id: UUID) -> list[Evidence]:
+        """B-2: Graph (app token) + legal public page ⇒ ``estimated`` rows; 10/h/brand.
+        The limiter is hit *after* the 404 check so probing ids does not burn the quota."""
+        competitor = await self.get_competitor(brand_id, competitor_id)
+        if self._refresher is None:  # pragma: no cover - wiring guard
+            raise CompetitorNotFoundError()
+        retry = self._limiter.hit(
+            COMPETITOR_REFRESH_BUCKET,
+            str(brand_id),
+            COMPETITOR_REFRESH_LIMIT,
+            COMPETITOR_REFRESH_WINDOW_SECONDS,
+        )
+        if retry is not None:
+            raise RefreshRateLimitedError(retry)
+        return await self._refresher.refresh(competitor)
 
     # -------------------------------------------------------------- evidence ----
     async def list_evidence(
