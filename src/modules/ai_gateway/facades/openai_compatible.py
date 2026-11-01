@@ -16,10 +16,20 @@ Classification (D-067, B0-U3)::
     200 without choices / refusal /   ⇒ quota_exceeded  (lesson D-01 of general_ai_core —
         finish_reason ∈ quota words      some proxies answer 200 with "insufficient credit")
     200 with an unparsable body       ⇒ non_retryable_error
+    json_mode + completion not a      ⇒ non_retryable_error, provider_code ``invalid_output``
+        JSON object                      (SPRINT-10 B-2 — the directive names
+                                          ``ErrorCategory.invalid_output``, which is **not**
+                                          one of the twelve frozen categories (B0-U2); the
+                                          closest frozen category carries the stable code)
+
+SPRINT-10 B-2: ``req.json_mode`` adds ``response_format={"type": "json_object"}`` to the body
+and the completion text is parsed strictly (one JSON *object*, nothing else) before it is
+returned; the caller then validates the object with pydantic.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -39,6 +49,7 @@ PROMPT_LOG_CHARS = 200
 _IMMEDIATE_RETRY = frozenset({ErrorCategory.TIMEOUT, ErrorCategory.RETRYABLE_SERVER_ERROR})
 _QUOTA_WORDS = ("quota", "credit", "billing", "balance", "insufficient_funds")
 _CONTENT_WORDS = ("content", "safety", "moderation", "policy")
+INVALID_OUTPUT_CODE = "invalid_output"
 
 
 def _preview(text: str) -> str:
@@ -119,6 +130,28 @@ def classify_success_body(payload: Any) -> AIError | None:
     return None
 
 
+def _invalid_output() -> AIError:
+    return AIError(ErrorCategory.NON_RETRYABLE_ERROR, provider_code=INVALID_OUTPUT_CODE)
+
+
+def strict_json_object(text: str) -> str:
+    """``json_mode`` contract (B-2): the completion must be exactly one JSON object (a
+    ```` ```json ```` fence is tolerated and stripped). Returns the canonical text; anything
+    else ⇒ :class:`AIError` ``non_retryable_error`` / ``invalid_output``."""
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`").strip()
+        if candidate[:4].lower() == "json":
+            candidate = candidate[4:].strip()
+    try:
+        parsed = json.loads(candidate)
+    except ValueError as exc:
+        raise _invalid_output() from exc
+    if not isinstance(parsed, dict):
+        raise _invalid_output()
+    return json.dumps(parsed, ensure_ascii=False)
+
+
 class HttpOpenAICompatibleProvider:
     name = "openai_compatible"
 
@@ -155,6 +188,8 @@ class HttpOpenAICompatibleProvider:
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
         }
+        if req.json_mode:
+            body["response_format"] = {"type": "json_object"}
         logger.debug(
             "ai request purpose=%s model=%s user_preview=%r",
             req.purpose,
@@ -188,8 +223,19 @@ class HttpOpenAICompatibleProvider:
             raise failure
         choice = payload["choices"][0]
         usage = payload.get("usage") or {}
+        text = choice["message"]["content"]
+        if req.json_mode:
+            try:
+                text = strict_json_object(text)
+            except AIError:
+                logger.warning(
+                    "ai upstream completion is not a JSON object purpose=%s model=%s",
+                    req.purpose,
+                    self.model,
+                )
+                raise
         return CompletionResult(
-            text=choice["message"]["content"],
+            text=text,
             provider=self.name,
             model=str(payload.get("model") or self.model),
             usage=Usage(

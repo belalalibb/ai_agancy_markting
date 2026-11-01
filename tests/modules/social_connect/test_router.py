@@ -946,8 +946,12 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
         "WhatsAppAccountCreate/properties/system_token",
         "WhatsAppAccountCreate/properties/app_secret",
         "WhatsAppAccountCreate/properties/verify_token",
+        # SPRINT-10 A-2: rotation carries the new secrets in the request body only.
+        "WhatsAppAccountRotate/properties/system_token",
+        "WhatsAppAccountRotate/properties/app_secret",
     }
     assert "WhatsAppAccountCreate" not in reachable
+    assert "WhatsAppAccountRotate" not in reachable
     assert "WhatsAppAccountPublic" in reachable
     request_hits = [
         h

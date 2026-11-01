@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
 from src.modules.ai_gateway.contract import AIError, ErrorCategory
-from src.modules.ai_gateway.dependencies import Gateway
+from src.modules.ai_gateway.dependencies import BudgetReader, Gateway
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import Action
@@ -109,6 +109,7 @@ def get_content_service(
     connections: Annotated[ConnectedAccountRepository, Depends(get_connection_repository)],
     publish_jobs: Annotated[PublishJobRepository, Depends(get_publish_job_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
+    budget_reader: BudgetReader,
 ) -> ContentService:
     return ContentService(
         repository,
@@ -116,6 +117,7 @@ def get_content_service(
         publish_jobs,
         daily_token_budget=settings.ai_daily_token_budget_per_brand,
         publish_max_attempts=settings.publish_max_attempts,  # SPRINT-08 A-3
+        budget_reader=budget_reader,  # SPRINT-10 A-4 (N4)
     )
 
 

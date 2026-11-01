@@ -60,6 +60,15 @@ class WhatsAppAccountCreate(BaseModel):
     verify_token: str = Field(min_length=8, max_length=256, repr=False)
 
 
+class WhatsAppAccountRotate(BaseModel):
+    """A-2 ``POST /account/rotate`` — request-only secrets (never echoed, never stored raw)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    system_token: str = Field(min_length=16, max_length=512, repr=False)
+    app_secret: str = Field(min_length=8, max_length=256, repr=False)
+
+
 class WhatsAppAccountPublic(BaseModel):
     """OWNER/MANAGER view — no secret, no hash."""
 
@@ -148,6 +157,9 @@ class ConversationStatePublic(BaseModel):
 
 # ------------------------------------------------------------------ messages -----
 class MessagePublic(BaseModel):
+    """``wamid`` (A-6) is a Meta identifier: present for OWNER/MANAGER (``private=True``),
+    omitted (``None``) for VIEWER."""
+
     id: UUID
     direction: Direction
     kind: MessageKind
@@ -160,9 +172,10 @@ class MessagePublic(BaseModel):
     reply_draft_id: UUID | None
     platform_timestamp: datetime | None
     created_at: datetime
+    wamid: str | None = None
 
     @classmethod
-    def from_domain(cls, message: Message) -> MessagePublic:
+    def from_domain(cls, message: Message, *, private: bool) -> MessagePublic:
         return cls(
             id=message.id,
             direction=message.direction,
@@ -176,6 +189,7 @@ class MessagePublic(BaseModel):
             reply_draft_id=message.reply_draft_id,
             platform_timestamp=message.platform_timestamp,
             created_at=message.created_at,
+            wamid=message.wamid if private else None,
         )
 
 

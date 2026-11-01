@@ -23,6 +23,7 @@ import respx
 from alembic import command
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -50,7 +51,10 @@ from tests.conftest import (
     AGENCY_ID,
     BRAND2_ID,
     BRAND_ID,
+    FAKE_APP_ID,
+    FAKE_APP_SECRET,
     FAKE_STATE_SECRET,
+    GRAPH_BASE,
     OWNER_ID,
     STRANGER_ID,
     USER_BY_TENANT,
@@ -519,7 +523,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -924,7 +928,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1945,7 +1949,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2015,7 +2019,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2323,9 +2327,10 @@ def test_a4_i1_list_of_25_items_uses_at_most_two_queries_on_pg(integration_app: 
 def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
     integration_app: FastAPI,
 ) -> None:
-    """A5-I1 — ``ai_token_usage_since`` sums ``prompt_tokens + completion_tokens`` from the
-    JSONB provenance of ``ai_generated`` revisions only; ``human`` rows (even with stray
-    token keys) and rows outside the window are not counted; the 429 fires on PG."""
+    """A5-I1 — the shared budget reader (SPRINT-10 A-4 ``PgBudgetUsageReader``) sums
+    ``prompt_tokens + completion_tokens`` from the JSONB provenance of ``ai_generated``
+    revisions only; ``human`` rows (even with stray token keys) and rows outside the window
+    are not counted; the 429 fires on PG."""
     from src.core.config import Settings
 
     _seed_fresh()
@@ -2356,15 +2361,13 @@ def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
         )
 
     async def _usage() -> int:
-        from src.modules.content.infrastructure.postgres_repository import (
-            PostgresContentRepository,
-        )
+        from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
 
         eng = create_async_engine(TEST_DATABASE_URL)
         try:
             async with AsyncSession(eng) as session:
-                repo = PostgresContentRepository(session)
-                return await repo.ai_token_usage_since(BRAND_ID, now - timedelta(hours=24))
+                reader = PgBudgetUsageReader(session)
+                return await reader.combined_usage_since(BRAND_ID, now - timedelta(hours=24))
         finally:
             await eng.dispose()
 
@@ -2436,7 +2439,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2565,7 +2568,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2712,7 +2715,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2762,7 +2765,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2920,7 +2923,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -2967,7 +2970,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -3133,7 +3136,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
     at 0008 and come back; no other table is touched."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     wa_tables = {
@@ -3238,7 +3241,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert wa_tables <= present
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
@@ -3448,7 +3451,8 @@ def test_b2_i2_send_text_persists_outbound_with_actor_and_replays_idempotently_o
         body = sent.json()
         assert body["delivery_status"] == "sent" and body["duplicate"] is False
         assert body["message"]["sent_by_user_id"] == str(USER_BY_TENANT[OWNER_ID])
-        assert "wamid" not in body["message"]  # platform ids stay server-side
+        # SPRINT-10 A-6: ``wamid`` is private — visible to OWNER/MANAGER, ``None`` for VIEWER.
+        assert body["message"]["wamid"] == "wamid.PGOUT1"
         assert len(route.calls) == 1
         request = route.calls[0].request
         assert request.headers["Authorization"] == f"Bearer {WA_SYSTEM_TOKEN}"
@@ -3506,19 +3510,17 @@ def test_b2_i2_send_text_persists_outbound_with_actor_and_replays_idempotently_o
 
 # ================================================================ SPRINT-09 B-3 (M6) ===
 def _wa_combined_usage(brand_id: UUID) -> int:
-    """The one ``UNION ALL`` budget query, run through the real PG repository."""
+    """The one ``UNION ALL`` budget query (SPRINT-10 A-4 shared reader) on the real PG."""
 
     async def _go() -> int:
-        from src.modules.whatsapp.infrastructure.postgres_repository import (
-            PostgresWhatsAppRepository,
-        )
+        from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
 
         eng = create_async_engine(TEST_DATABASE_URL)
         try:
             async with AsyncSession(eng) as session:
-                repo = PostgresWhatsAppRepository(session)
+                reader = PgBudgetUsageReader(session)
                 since = datetime.now(tz=UTC) - timedelta(hours=24)
-                return await repo.ai_token_usage_combined_since(brand_id, since)
+                return await reader.combined_usage_since(brand_id, since)
         finally:
             await eng.dispose()
 
@@ -3671,3 +3673,1414 @@ def test_b3_i2_budget_of_one_token_makes_suggest_reply_429_on_pg(
     assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 1
     assert _wa_combined_usage(BRAND_ID) >= 1
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ================================================================ SPRINT-10 Part A (PG) ===
+# D-072 «ثبّت ثم أبلغ»: every test below checks the **rows after the response** — the fake
+# repositories cannot see transactions (SPRINT-09 review, lesson 22).
+
+
+def _wa_override_budget(integration_app: FastAPI, budget: int):  # noqa: ANN202
+    from src.core.config import get_settings
+
+    settings = integration_app.state.settings
+    integration_app.state.settings = settings.model_copy(
+        update={"ai_daily_token_budget_per_brand": budget}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
+    return settings
+
+
+def _wa_restore_budget(integration_app: FastAPI, settings) -> None:  # noqa: ANN001
+    from src.core.config import get_settings
+
+    integration_app.dependency_overrides.pop(get_settings, None)
+    integration_app.state.settings = settings
+
+
+def _wa_draft_row(conv_id: UUID, *, status: str = "suggested", prompt_tokens: int = 0) -> UUID:
+    (msg_id,) = _rows(
+        "SELECT id FROM wa_messages WHERE conversation_id = :c AND direction = 'inbound' "
+        "ORDER BY created_at DESC LIMIT 1",
+        {"c": conv_id},
+    )[0]
+    draft_id = uuid4()
+    _run(
+        "INSERT INTO wa_reply_drafts (id, conversation_id, brand_id, in_reply_to_message_id, "
+        "suggested_body, status, provenance, created_at) VALUES (:id, :c, :b, :m, 'مرحباً', "
+        ":st, CAST(:prov AS JSONB), now())",
+        {
+            "id": draft_id,
+            "c": conv_id,
+            "b": BRAND_ID,
+            "m": msg_id,
+            "st": status,
+            "prov": json.dumps(
+                {"kind": "ai_suggested", "prompt_tokens": prompt_tokens, "completion_tokens": 0}
+            ),
+        },
+    )
+    return draft_id
+
+
+def test_a1_i1_approve_on_closed_window_keeps_decision_and_signal_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A1-I1 — approve on a closed window ⇒ 422 ``whatsapp_window_closed`` + ``draft_status``;
+    **after** the response the draft row is ``approved`` and one ``approved_unchanged``
+    signal exists (committed independently — D-072); approving again ⇒ 409
+    ``draft_not_pending``."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(hours=30)
+    )
+    draft_id = _wa_draft_row(conv)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        res = client.post(f"{WA_BRAND}/reply-drafts/{draft_id}/approve", json={}, headers=owner)
+        assert res.status_code == 422, res.text
+        assert res.json()["detail"] == {
+            "error": "whatsapp_window_closed",
+            "template_required": True,
+            "draft_status": "approved",
+        }
+        again = client.post(f"{WA_BRAND}/reply-drafts/{draft_id}/approve", json={}, headers=owner)
+        assert again.status_code == 409, again.text
+        assert again.json()["detail"] == {
+            "error": "draft_not_pending",
+            "current_status": "approved",
+        }
+    assert (
+        _run("SELECT status FROM wa_reply_drafts WHERE id = :id", {"id": draft_id}, scalar=True)
+        == "approved"
+    )
+    assert _run("SELECT COUNT(*) FROM wa_learning_signals", scalar=True) == 1
+    assert _run("SELECT signal FROM wa_learning_signals", scalar=True) == "approved_unchanged"
+    assert _run("SELECT COUNT(*) FROM wa_messages WHERE direction = 'outbound'", scalar=True) == 0
+
+
+def test_a1_i2_graph_190_disables_account_persistently_and_next_send_skips_graph_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+) -> None:
+    """A1-I2 — Meta 401/190 ⇒ 409 ``whatsapp_reauth_required`` **and** the row is
+    ``disabled`` after the response; the next send ⇒ 409 with **no** Graph call
+    (``len(route.calls)`` unchanged); the failed outbound row survives too."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(hours=1)
+    )
+    route = graph_mock.post(WA_MESSAGES_PATH).mock(
+        return_value=httpx.Response(
+            401, json={"error": {"message": "x", "code": 190, "fbtrace_id": "t"}}
+        )
+    )
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        first = client.post(
+            f"{WA_BRAND}/conversations/{conv}/messages", json={"body": "hi"}, headers=owner
+        )
+        assert first.status_code == 409, first.text
+        assert first.json()["detail"]["error"] == "whatsapp_reauth_required"
+        assert len(route.calls) == 1
+        assert (
+            _run(
+                "SELECT status FROM whatsapp_accounts WHERE id = :id",
+                {"id": account_id},
+                scalar=True,
+            )
+            == "disabled"
+        )
+        second = client.post(
+            f"{WA_BRAND}/conversations/{conv}/messages", json={"body": "hi again"}, headers=owner
+        )
+        assert second.status_code == 409, second.text
+        assert second.json()["detail"]["error"] == "whatsapp_reauth_required"
+        assert len(route.calls) == 1  # no second Graph call with a dead token
+    rows = _rows(
+        "SELECT delivery_status, error_code FROM wa_messages WHERE direction = 'outbound' "
+        "ORDER BY created_at"
+    )
+    assert rows == [("failed", 190), ("failed", None)]
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "expected_status", "expected_row", "expected_code"),
+    [
+        (httpx.ConnectError("refused"), 503, "failed", None),
+        (
+            httpx.Response(
+                429, json={"error": {"message": "x", "code": 130429, "fbtrace_id": "t"}}
+            ),
+            429,
+            "failed",
+            130429,
+        ),
+        (httpx.ReadTimeout("slow"), 202, "ambiguous", None),
+    ],
+    ids=["connect-error-503", "rate-limit-429", "read-timeout-202-ambiguous"],
+)
+def test_a1_i3_failure_rows_survive_the_error_response_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+    side_effect,  # noqa: ANN001
+    expected_status: int,
+    expected_row: str,
+    expected_code: int | None,
+) -> None:
+    """A1-I3 — ``ConnectError`` ⇒ 503 + row ``failed``; 429 ⇒ row ``failed`` with
+    ``error_code=130429``; ``ReadTimeout`` after the send ⇒ 202 + row ``ambiguous`` — every
+    row is read **after** the response (independent transaction, D-072)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(hours=1)
+    )
+    if isinstance(side_effect, httpx.Response):
+        graph_mock.post(WA_MESSAGES_PATH).mock(return_value=side_effect)
+    else:
+        graph_mock.post(WA_MESSAGES_PATH).mock(side_effect=side_effect)
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        res = client.post(
+            f"{WA_BRAND}/conversations/{conv}/messages", json={"body": "hi"}, headers=owner
+        )
+        assert res.status_code == expected_status, res.text
+    rows = _rows(
+        "SELECT delivery_status, error_code FROM wa_messages WHERE direction = 'outbound'"
+    )
+    assert rows == [(expected_row, expected_code)]
+    assert (
+        _run(
+            "SELECT status FROM whatsapp_accounts WHERE id = :id", {"id": account_id}, scalar=True
+        )
+        == "active"
+    )
+
+
+def test_a2_i1_delete_then_post_reconnects_the_same_row_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+) -> None:
+    """A2-I1 — ``DELETE /account`` ⇒ ``POST /account`` for the same brand ⇒ **200** (not 201),
+    ``status='active'`` and the **same** ``id``; one ``whatsapp_accounts`` row in total."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    graph_mock.get(f"/{WA_PHONE_NUMBER_ID}").mock(
+        return_value=httpx.Response(200, json={"display_phone_number": "+1 555 000 2222"})
+    )
+    owner = integration_headers(integration_app.state.settings, OWNER_ID)
+    body = {
+        "phone_number_id": WA_PHONE_NUMBER_ID,
+        "waba_id": "WABA_PG",
+        "display_phone": "",
+        "system_token": "EAARotatedSystemTokenPG",
+        "app_secret": "rotated-app-secret",
+        "verify_token": "rotated-verify-token",
+    }
+    with TestClient(integration_app) as client:
+        deleted = client.delete(f"{WA_BRAND}/account", headers=owner)
+        assert deleted.status_code == 200 and deleted.json()["status"] == "disabled"
+        again = client.post(f"{WA_BRAND}/account", json=body, headers=owner)
+        assert again.status_code == 200, again.text
+        assert again.json()["id"] == str(account_id)
+        assert again.json()["status"] == "active"
+        assert again.json()["display_phone"] == "+1 555 000 2222"
+        third = client.post(f"{WA_BRAND}/account", json=body, headers=owner)
+        assert third.status_code == 409 and third.json()["detail"]["error"] == (
+            "whatsapp_account_exists"
+        )
+    assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 1
+    (status, token_cipher) = _rows(
+        "SELECT status, encrypted_system_token FROM whatsapp_accounts WHERE id = :id",
+        {"id": account_id},
+    )[0]
+    assert status == "active"
+    assert integration_encryption.decrypt_token(token_cipher) == "EAARotatedSystemTokenPG"
+
+
+def test_a2_i2_two_brands_connecting_one_phone_number_concurrently_is_201_409_on_pg(
+    integration_app: FastAPI, graph_mock: respx.MockRouter
+) -> None:
+    """A2-I2 — two brands race on one ``phone_number_id`` through two ASGI apps ⇒
+    deterministically ``[201, 409]`` (``whatsapp_phone_number_in_use`` — the unique
+    constraint is caught, never a 500) and exactly one row."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    settings = integration_app.state.settings
+    graph_mock.get("/PNID_RACE").mock(
+        return_value=httpx.Response(200, json={"display_phone_number": "+1 555 000 3333"})
+    )
+    owner = integration_headers(settings, OWNER_ID)
+    body = {
+        "phone_number_id": "PNID_RACE",
+        "waba_id": "WABA_PG",
+        "display_phone": "",
+        "system_token": "EAARaceSystemTokenPG",
+        "app_secret": "race-app-secret",
+        "verify_token": "race-verify-token",
+    }
+    from src.main import create_app
+
+    async def _race() -> list[tuple[int, str]]:
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            async with httpx.AsyncClient() as http:
+                for a in apps:
+                    a.state.http_client = http
+                responses = await asyncio.gather(
+                    c1.post(f"{API}/brands/{BRAND_ID}/whatsapp/account", json=body, headers=owner),
+                    c2.post(
+                        f"{API}/brands/{BRAND2_ID}/whatsapp/account", json=body, headers=owner
+                    ),
+                )
+        return [(r.status_code, r.json().get("detail", {}).get("error", "")) for r in responses]
+
+    results = asyncio.run(_race())
+    assert sorted(code for code, _ in results) == [201, 409], results
+    assert [err for code, err in results if code == 409] == ["whatsapp_phone_number_in_use"]
+    assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 1
+
+
+def test_a3_i1_status_signed_by_brand_a_cannot_touch_brand_b_row_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A3-I1 — a status payload signed with brand A's secret for a wamid owned by brand B ⇒
+    200 with ``status_updates: 0`` and ``ignored_status_updates: 1``; B's row is unchanged."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_a = _wa_account_row(integration_encryption)
+    account_b = _wa_account_row(
+        integration_encryption, brand_id=BRAND2_ID, phone_number_id="PNID_PG_2002"
+    )
+    assert account_a != account_b
+    now = datetime.now(tz=UTC)
+    conv_b = uuid4()
+    _run(
+        "INSERT INTO wa_conversations (id, brand_id, account_id, wa_id, last_inbound_at, "
+        "window_expires_at, unread_count, status, created_at, updated_at) VALUES "
+        "(:id, :b, :a, :w, :at, :exp, 0, 'open', :at, :at)",
+        {
+            "id": conv_b,
+            "b": BRAND2_ID,
+            "a": account_b,
+            "w": "201999999999",
+            "at": now,
+            "exp": now + timedelta(hours=24),
+        },
+    )
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, body, "
+        "delivery_status, sent_by_user_id, created_at) VALUES (:id, :c, :b, 'outbound', "
+        "'wamid.B.OUT1', 'text', 'x', 'sent', :u, :at)",
+        {"id": uuid4(), "c": conv_b, "b": BRAND2_ID, "u": USER_BY_TENANT[OWNER_ID], "at": now},
+    )
+    payload = _wa_payload("unused")
+    payload["entry"][0]["changes"][0]["value"].pop("messages")
+    payload["entry"][0]["changes"][0]["value"].pop("contacts")
+    payload["entry"][0]["changes"][0]["value"]["statuses"] = [
+        {"id": "wamid.B.OUT1", "status": "delivered", "timestamp": str(int(now.timestamp()))}
+    ]
+    with TestClient(integration_app) as client:
+        res = _wa_post(client, payload)  # signed with brand A's secret, A's phone_number_id
+        assert res.status_code == 200, res.text
+        assert res.json()["status_updates"] == 0
+        assert res.json()["ignored_status_updates"] == 1
+    assert (
+        _run("SELECT delivery_status FROM wa_messages WHERE wamid = 'wamid.B.OUT1'", scalar=True)
+        == "sent"
+    )
+
+
+def test_a3_i2_read_then_sent_stays_read_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A3-I2 — ``sent ⇒ read`` is applied, a late ``sent`` (and ``delivered``) afterwards is
+    ignored: the row stays ``read`` (monotonic ranks)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(account_id, wa_id=WA_CUSTOMER, last_inbound_at=now)
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, body, "
+        "delivery_status, sent_by_user_id, created_at) VALUES (:id, :c, :b, 'outbound', "
+        "'wamid.A.OUT1', 'text', 'x', 'sent', :u, :at)",
+        {"id": uuid4(), "c": conv, "b": BRAND_ID, "u": USER_BY_TENANT[OWNER_ID], "at": now},
+    )
+
+    def _status(label: str) -> dict:
+        payload = _wa_payload("unused")
+        value = payload["entry"][0]["changes"][0]["value"]
+        value.pop("messages")
+        value.pop("contacts")
+        value["statuses"] = [{"id": "wamid.A.OUT1", "status": label, "timestamp": "1"}]
+        return payload
+
+    with TestClient(integration_app) as client:
+        assert _wa_post(client, _status("read")).json()["status_updates"] == 1
+        late = _wa_post(client, _status("sent")).json()
+        assert late["status_updates"] == 0 and late["ignored_status_updates"] == 1
+        late = _wa_post(client, _status("delivered")).json()
+        assert late["status_updates"] == 0 and late["ignored_status_updates"] == 1
+    assert (
+        _run("SELECT delivery_status FROM wa_messages WHERE wamid = 'wamid.A.OUT1'", scalar=True)
+        == "read"
+    )
+
+
+def test_a4_i1_whatsapp_draft_tokens_block_content_generate_with_same_retry_after_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A4-I1 — one WhatsApp draft holding ``budget + 1`` tokens ⇒ ``/generate`` **429** and
+    ``suggest-reply`` 429 with the same ``Retry-After`` (±1s) — one shared reader (N4)."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv_a = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(minutes=5)
+    )
+    conv_b = _wa_conversation_row(
+        account_id, wa_id="201111111111", last_inbound_at=now - timedelta(minutes=4)
+    )
+    budget = 1_000
+    _wa_draft_row(conv_a, status="expired", prompt_tokens=budget + 1)
+    settings = _wa_override_budget(integration_app, budget)
+    owner = integration_headers(settings, OWNER_ID)
+    try:
+        with TestClient(integration_app) as client:
+            item_id = _content_create(client, owner)["id"]
+            gen = client.post(
+                f"{CONTENT}/items/{item_id}/generate",
+                json={"brief": "اكتب منشوراً قصيراً عن العرض الجديد"},
+                headers=owner,
+            )
+            assert gen.status_code == 429, gen.text
+            assert gen.json()["detail"]["error"] == "generation_budget_exceeded"
+            assert gen.json()["detail"]["used"] == budget + 1
+            sug = client.post(
+                f"{WA_BRAND}/conversations/{conv_b}/suggest-reply", json={}, headers=owner
+            )
+            assert sug.status_code == 429, sug.text
+            assert abs(int(gen.headers["Retry-After"]) - int(sug.headers["Retry-After"])) <= 1
+    finally:
+        _wa_restore_budget(integration_app, settings)
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 1
+
+
+def test_a4_i2_content_revision_tokens_block_whatsapp_suggest_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A4-I2 — the reverse: one ``ai_generated`` content revision with ``budget + 1`` tokens
+    ⇒ ``suggest-reply`` 429 (and ``/generate`` 429) through the same reader."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(minutes=5)
+    )
+    budget = 1_000
+    settings = _wa_override_budget(integration_app, budget)
+    owner = integration_headers(settings, OWNER_ID)
+    try:
+        with TestClient(integration_app) as client:
+            item_id = _content_create(client, owner)["id"]
+            _run(
+                "INSERT INTO content_revisions (id, item_id, revision_no, body, media_refs, "
+                "provenance, created_by_tenant_id, created_at) VALUES (:id, :item, 2, 'x', "
+                "CAST('[]' AS JSONB), CAST(:prov AS JSONB), :tenant, now())",
+                {
+                    "id": uuid4(),
+                    "item": UUID(item_id),
+                    "prov": json.dumps(
+                        {
+                            "kind": "ai_generated",
+                            "prompt_tokens": budget + 1,
+                            "completion_tokens": 0,
+                        }
+                    ),
+                    "tenant": OWNER_ID,
+                },
+            )
+            sug = client.post(
+                f"{WA_BRAND}/conversations/{conv}/suggest-reply", json={}, headers=owner
+            )
+            assert sug.status_code == 429, sug.text
+            assert sug.json()["detail"]["error"] == "generation_budget_exceeded"
+            assert sug.json()["detail"]["used"] == budget + 1
+            gen = client.post(
+                f"{CONTENT}/items/{item_id}/generate",
+                json={"brief": "اكتب منشوراً قصيراً عن العرض الجديد"},
+                headers=owner,
+            )
+            assert gen.status_code == 429, gen.text
+    finally:
+        _wa_restore_budget(integration_app, settings)
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 0
+
+
+def test_a5_i1_concurrent_suggest_reply_is_201_409_with_one_pending_row_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A5-I1 — two concurrent ``suggest-reply`` on one conversation through two engines ⇒
+    ``[201, 409]`` (``draft_pending`` from the partial unique index) and exactly one
+    ``suggested`` row."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=now - timedelta(minutes=5)
+    )
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    from src.main import create_app
+
+    async def _race() -> list[tuple[int, str]]:
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            async with httpx.AsyncClient() as http:
+                for a in apps:
+                    a.state.http_client = http
+                url = f"{API}/brands/{BRAND_ID}/whatsapp/conversations/{conv}/suggest-reply"
+                responses = await asyncio.gather(
+                    c1.post(url, json={}, headers=owner), c2.post(url, json={}, headers=owner)
+                )
+        return [(r.status_code, r.json().get("detail", {}).get("error", "")) for r in responses]
+
+    results = asyncio.run(_race())
+    assert sorted(code for code, _ in results) == [201, 409], results
+    assert [err for code, err in results if code == 409] == ["draft_pending"]
+    assert (
+        _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 1
+    )
+
+
+def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
+    integration_encryption: TokenEncryptionService,
+) -> None:
+    """A5-M1 — ``head ⇒ 0009 ⇒ head`` with **two** ``suggested`` drafts on one conversation:
+    the pre-cleanup marks the **older** one ``expired`` and the partial unique index
+    ``uq_wa_reply_drafts_one_pending`` then rejects a second pending draft."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    command.downgrade(cfg, "0009")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0009"
+    indexes = {
+        r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
+    }
+    assert "uq_wa_reply_drafts_one_pending" not in indexes
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(account_id, wa_id=WA_CUSTOMER, last_inbound_at=now)
+    older = _wa_draft_row(conv)
+    _run(
+        "UPDATE wa_reply_drafts SET created_at = now() - interval '10 minutes' WHERE id = :id",
+        {"id": older},
+    )
+    newer = _wa_draft_row(conv)
+    assert (
+        _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 2
+    )
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    statuses = dict(_rows("SELECT id, status FROM wa_reply_drafts"))
+    assert statuses[older] == "expired" and statuses[newer] == "suggested"
+    assert (
+        _run(
+            "SELECT decided_at IS NOT NULL FROM wa_reply_drafts WHERE id = :id",
+            {"id": older},
+            scalar=True,
+        )
+        is True
+    )
+    with pytest.raises(IntegrityError, match="uq_wa_reply_drafts_one_pending"):
+        _wa_draft_row(conv)
+    # Other tables untouched by the round-trip.
+    assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 1
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ============================================================================
+# SPRINT-10 B-1 — Brand Brain on PostgreSQL (migration 0011)
+# ============================================================================
+BRAIN_PG = f"{API}/brands/{BRAND_ID}/brain"
+BRAIN_PROFILE_BODY = {
+    "products": [{"name": "Cold brew"}],
+    "audience": {"segments": ["students"]},
+    "tone": {"voice": "warm", "formality": "casual", "banned_phrases": ["cheap"]},
+    "goals": [{"kind": "sales", "target": "+20%", "horizon_days": 90}],
+}
+
+
+def _brain_owner(integration_app: FastAPI) -> dict[str, str]:
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    reset_db_caches()
+    return integration_headers(integration_app.state.settings, OWNER_ID)
+
+
+def test_b1_i1_profile_if_match_cas_and_revisions_on_pg(integration_app: FastAPI) -> None:
+    """B1-I1 — ``PUT /profile`` with ``If-Match`` ⇒ version bump + revision row (UNIQUE
+    brand/version); stale ``If-Match`` ⇒ 412 and nothing written; reads never create rows."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        assert client.get(f"{BRAIN_PG}/profile", headers=owner).json()["version"] == 1
+        first = client.put(
+            f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+        )
+        assert first.status_code == 200, first.text
+        second = client.put(
+            f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+        )
+        assert second.status_code == 200 and second.json()["version"] == 2
+        stale = client.put(
+            f"{BRAIN_PG}/profile", json=BRAIN_PROFILE_BODY, headers={**owner, "If-Match": "1"}
+        )
+        assert stale.status_code == 412
+        assert stale.json()["detail"]["current_version"] == 2
+        revisions = client.get(f"{BRAIN_PG}/profile/revisions", headers=owner).json()
+        assert [r["version"] for r in revisions["items"]] == [2, 1]
+    reset_db_caches()
+    assert (
+        _run(
+            "SELECT version FROM brand_profiles WHERE brand_id = :b", {"b": BRAND_ID}, scalar=True
+        )
+        == 2
+    )
+    assert [
+        v for (v,) in _rows("SELECT version FROM brand_profile_revisions ORDER BY version")
+    ] == [1, 2]
+    assert _run("SELECT tone->'banned_phrases' FROM brand_profiles", scalar=True) == ["cheap"]
+    with pytest.raises(IntegrityError, match="uq_brand_profile_revisions_brand_version"):
+        _run(
+            "INSERT INTO brand_profile_revisions (id, brand_id, version, snapshot, source, "
+            "created_at) VALUES (:id, :b, 2, '{}'::jsonb, 'human', now())",
+            {"id": uuid4(), "b": BRAND_ID},
+        )
+
+
+def test_b1_i2_competitor_limit_race_is_201_201_201_409_on_pg(integration_app: FastAPI) -> None:
+    """B1-I2 — four concurrent ``POST /competitors`` through two ASGI apps ⇒ exactly three
+    rows and ``[201, 201, 201, 409]`` (brand row lock serialises count-then-insert)."""
+    owner = _brain_owner(integration_app)
+    settings = integration_app.state.settings
+    from src.main import create_app
+
+    async def _race() -> list[int]:
+        reset_db_caches()
+        apps = [create_app(settings), create_app(settings)]
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="http://t"
+            ) as c1,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[1]), base_url="http://t"
+            ) as c2,
+        ):
+            # B-2: ``get_brain_service`` now resolves ``HttpClient`` (Graph + public web
+            # sources); raw ``create_app`` instances have no lifespan, so attach one client.
+            async with httpx.AsyncClient() as http:
+                for a in apps:
+                    a.state.http_client = http
+                responses = await asyncio.gather(
+                    *[
+                        (c1 if i % 2 else c2).post(
+                            f"{BRAIN_PG}/competitors", json={"name": f"Rival {i}"}, headers=owner
+                        )
+                        for i in range(4)
+                    ]
+                )
+        return sorted(r.status_code for r in responses)
+
+    assert asyncio.run(_race()) == [201, 201, 201, 409]
+    assert _run("SELECT COUNT(*) FROM brand_competitors", scalar=True) == 3
+
+
+def test_b1_i3_evidence_checks_keyset_and_refresh_from_real_tables_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """B1-I3 — ``ck_brand_evidence_kind_source`` rejects ``measured/public_web``;
+    ``POST /evidence/refresh`` measures the five internal metrics from the real
+    ``wa_conversations`` / ``wa_messages`` / ``publish_jobs`` tables; keyset paging holds."""
+    owner = _brain_owner(integration_app)
+    with pytest.raises(IntegrityError, match="ck_brand_evidence_kind_source"):
+        _run(
+            "INSERT INTO brand_evidence (id, brand_id, subject_kind, subject_id, evidence_kind, "
+            "metric, value, confidence, source_kind, observed_at, created_at) VALUES (:id, :b, "
+            "'brand', :b, 'measured', 'followers_count', '{}'::jsonb, 0.5, 'public_web', now(), "
+            "now())",
+            {"id": uuid4(), "b": BRAND_ID},
+        )
+    account_id = _wa_account_row(integration_encryption)
+    now = datetime.now(tz=UTC)
+    conv = _wa_conversation_row(account_id, wa_id=WA_CUSTOMER, last_inbound_at=now)
+    _run(
+        "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, kind, body, "
+        "delivery_status, sent_by_user_id, created_at) VALUES (:id, :c, :b, 'outbound', 'text', "
+        "'hi', 'sent', :u, :at)",
+        {
+            "id": uuid4(),
+            "c": conv,
+            "b": BRAND_ID,
+            "u": USER_BY_TENANT[OWNER_ID],
+            "at": now + timedelta(seconds=90),
+        },
+    )
+
+    with TestClient(integration_app) as client:
+        refreshed = client.post(f"{BRAIN_PG}/evidence/refresh", headers=owner)
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["collected"] == 5
+        page1 = client.get(f"{BRAIN_PG}/evidence", params={"limit": 2}, headers=owner).json()
+        assert len(page1["items"]) == 2 and page1["next_cursor"]
+        seen = [i["id"] for i in page1["items"]]
+        page2 = client.get(
+            f"{BRAIN_PG}/evidence",
+            params={"limit": 2, "cursor": page1["next_cursor"]},
+            headers=owner,
+        ).json()
+        seen += [i["id"] for i in page2["items"]]
+        page3 = client.get(
+            f"{BRAIN_PG}/evidence",
+            params={"limit": 2, "cursor": page2["next_cursor"]},
+            headers=owner,
+        ).json()
+        seen += [i["id"] for i in page3["items"]]
+        assert len(set(seen)) == 5 and page3["next_cursor"] is None
+    reset_db_caches()
+    by_metric = dict(
+        _rows("SELECT metric, value FROM brand_evidence WHERE brand_id = :b", {"b": BRAND_ID})
+    )
+    assert by_metric["wa_conversations_7d"] == {"count": 1, "window_days": 7}
+    assert by_metric["posting_frequency_7d"] == {"count": 0, "window_days": 7}
+    assert by_metric["wa_approval_rate_30d"] == {"unavailable": "no_data", "window_days": 30}
+    assert by_metric["avg_reply_latency_s"]["samples"] == 1
+    assert 85.0 <= by_metric["avg_reply_latency_s"]["seconds"] <= 95.0
+    assert all(
+        k == "measured" and s == "internal_db"
+        for k, s in _rows("SELECT evidence_kind, source_kind FROM brand_evidence")
+    )
+
+
+def test_b1_i4_cost_log_feeds_budget_union_and_daily_report_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B1-I4 — ``ai_cost_log`` rows count in the shared daily budget (``UNION ALL``) and in
+    ``GET /brain/cost`` (OWNER only); the error-iff-category CHECK holds; no text column."""
+    owner = _brain_owner(integration_app)
+    from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
+
+    def _cost(outcome: str, category: str | None, *, days_ago: int = 0) -> None:
+        _run(
+            "INSERT INTO ai_cost_log (id, brand_id, purpose, provider, model, credential_mode, "
+            "prompt_tokens, completion_tokens, estimated_cost_usd, latency_ms, prompt_version, "
+            "outcome, error_category, created_at) VALUES (:id, :b, 'brand_diagnosis', 'fake', "
+            "'fake-1', 'platform', 100, 50, 0.0003, 10, 'brand_diagnosis_v1', :o, :cat, "
+            "now() - make_interval(days => :d))",
+            {"id": uuid4(), "b": BRAND_ID, "o": outcome, "cat": category, "d": days_ago},
+        )
+
+    _cost("ok", None)
+    _cost("error", "timeout")
+    _cost("ok", None, days_ago=2)
+    with pytest.raises(IntegrityError, match="ck_ai_cost_log_error_iff_category"):
+        _cost("error", None)
+    columns = {
+        c
+        for (c,) in _rows(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'ai_cost_log'"
+        )
+    }
+    assert not columns & {"prompt", "output", "text", "body"}
+
+    async def _usage() -> int:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            async with AsyncSession(eng) as session:
+                return await PgBudgetUsageReader(session).combined_usage_since(
+                    BRAND_ID, datetime.now(tz=UTC) - timedelta(hours=24)
+                )
+        finally:
+            await eng.dispose()
+
+    assert asyncio.run(_usage()) == 300  # two rows of 150 tokens inside 24 h
+
+    manager = integration_headers(integration_app.state.settings, AGENCY_ID)
+    with TestClient(integration_app) as client:
+        report = client.get(f"{BRAIN_PG}/cost", headers=owner)
+        assert report.status_code == 200, report.text
+        body = report.json()
+        assert body["total_calls"] == 3 and body["items"][0]["errors"] == 1
+        assert body["prompt_tokens"] == 300
+        assert client.get(f"{BRAIN_PG}/cost", headers=manager).status_code in (403, 404)
+    reset_db_caches()
+
+
+def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
+    """B1-M1 — ``head ⇒ 0010 ⇒ head``: the five 0011 tables disappear and come back with
+    their named constraints; 0010's partial index survives the round-trip."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    tables_0011 = {
+        "brand_profiles",
+        "brand_profile_revisions",
+        "brand_competitors",
+        "brand_evidence",
+        "ai_cost_log",
+    }
+
+    def _public_tables() -> set[str]:
+        return {t for (t,) in _rows("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+
+    assert tables_0011 <= _public_tables()
+    command.downgrade(cfg, "0010")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0010"
+    assert not tables_0011 & _public_tables()
+    assert "uq_wa_reply_drafts_one_pending" in {
+        r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
+    }
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert tables_0011 <= _public_tables()
+    constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
+    assert {
+        "uq_brand_competitors_brand_name",
+        "uq_brand_profile_revisions_brand_version",
+        "ck_brand_evidence_kind_source",
+        "ck_ai_cost_log_error_iff_category",
+        "ck_brand_competitors_allowed_hosts",
+    } <= constraints
+    indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
+    assert {"ix_brand_evidence_lookup", "ix_ai_cost_log_brand_created"} <= indexes
+
+
+# ============================================================================
+# SPRINT-10 B-2 — competitor refresh (Graph app token + robots) and cost logging
+# ============================================================================
+_SECRET_SHAPES = re.compile(r"EAA|sk-|Bearer")
+_RIVAL_HTML = (
+    "<html><head><title>Rival Roasters</title>"
+    '<meta name="description" content="Specialty coffee in Zamalek"></head>'
+    "<body><h1>Rival Roasters</h1><p>Beans roasted daily.</p></body></html>"
+)
+
+
+def test_b2_i1_competitor_refresh_writes_estimated_rows_and_timestamp_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B2-I1 — ``POST /competitors/{id}/refresh`` on real tables: Graph is read with the
+    **app** token only (no ``/posts``), the public page with our UA after ``robots.txt``;
+    every row is ``estimated``; a Graph error / robots refusal becomes
+    ``{"unavailable": …}``; ``source_ref`` never carries a token; the timestamp is set."""
+    from src.modules.brand_brain.public_fetch import USER_AGENT, PublicPageFetcher, _RobotsCache
+    from src.modules.brand_brain.router import get_public_page_source
+
+    owner = _brain_owner(integration_app)
+    # Fresh robots cache per call ⇒ the second refresh re-reads the (now closed) robots.txt.
+    integration_app.dependency_overrides[get_public_page_source] = lambda: PublicPageFetcher(
+        httpx.AsyncClient(), robots_cache=_RobotsCache()
+    )
+    page_json = {
+        "id": "777000",
+        "name": "Rival Roasters",
+        "category": "Coffee shop",
+        "fan_count": 900,
+        "followers_count": 950,
+        "website": "https://rival.example/menu",
+        "link": "https://www.facebook.com/rival",
+    }
+    with TestClient(integration_app) as client, respx.mock(assert_all_called=False) as router:
+        created = client.post(
+            f"{BRAIN_PG}/competitors",
+            json={
+                "name": "Rival Roasters",
+                "facebook_page_id": "777000",
+                "website_host": "rival.example",
+                "allowed_hosts": ["rival.example"],
+            },
+            headers=owner,
+        )
+        assert created.status_code == 201, created.text
+        competitor_id = created.json()["id"]
+
+        graph = router.get(f"{GRAPH_BASE}/777000").mock(
+            return_value=httpx.Response(200, json=page_json)
+        )
+        posts = router.get(url__regex=r".*/777000/posts.*")
+        robots = router.get("https://rival.example/robots.txt").mock(
+            return_value=httpx.Response(404)
+        )
+        page = router.get("https://rival.example/").mock(
+            return_value=httpx.Response(
+                200, text=_RIVAL_HTML, headers={"content-type": "text/html; charset=utf-8"}
+            )
+        )
+        first = client.post(f"{BRAIN_PG}/competitors/{competitor_id}/refresh", headers=owner)
+        assert first.status_code == 200, first.text
+        assert first.json()["collected"] == 5
+        assert set(first.json()["metrics"]) == {
+            "followers_count",
+            "fan_count",
+            "page_category",
+            "website_host",
+            "public_page_summary",
+        }
+        assert graph.call_count == 1 and posts.call_count == 0
+        graph_request = graph.calls.last.request
+        assert graph_request.headers["Authorization"] == f"Bearer {FAKE_APP_ID}|{FAKE_APP_SECRET}"
+        assert "fields=name" in str(graph_request.url)
+        assert robots.call_count == 1 and page.call_count == 1
+        assert page.calls.last.request.headers["User-Agent"] == USER_AGENT
+        assert robots.calls.last.request.headers["User-Agent"] == USER_AGENT
+
+        # Second refresh: Graph refuses (code 100) and robots.txt closes the site.
+        graph.mock(
+            return_value=httpx.Response(
+                400, json={"error": {"code": 100, "type": "GraphMethodException", "message": "x"}}
+            )
+        )
+        robots.mock(return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n"))
+        page.reset()
+        second = client.post(f"{BRAIN_PG}/competitors/{competitor_id}/refresh", headers=owner)
+        assert second.status_code == 200, second.text
+        assert second.json()["collected"] == 2
+        assert page.call_count == 0  # robots said no ⇒ no page request at all
+        assert posts.call_count == 0
+
+        listed = client.get(f"{BRAIN_PG}/evidence?subject_kind=competitor", headers=owner)
+        assert listed.status_code == 200, listed.text
+
+    rows = _rows(
+        "SELECT evidence_kind, metric, value::text, source_kind, source_ref, confidence "
+        "FROM brand_evidence WHERE subject_kind = 'competitor' AND subject_id = :c "
+        "ORDER BY created_at, metric",
+        {"c": UUID(competitor_id)},
+    )
+    assert len(rows) == 7
+    assert {r[0] for r in rows} == {"estimated"}
+    assert {r[3] for r in rows} == {"graph_api", "public_web"}
+    values = [json.loads(r[2]) for r in rows]
+    assert {"count": 950} in values and {"count": 900} in values
+    assert {"label": "Coffee shop"} in values and {"host": "rival.example"} in values
+    assert {"unavailable": "graph_error", "graph_code": 100} in values
+    assert {"unavailable": "robots_disallow"} in values
+    assert any(v.get("title") == "Rival Roasters" for v in values)
+    for row in rows:
+        assert row[4] in {"graph_api:page:777000", "public_web:rival.example"}
+        assert not _SECRET_SHAPES.search(row[4] or "")
+        assert FAKE_APP_SECRET not in (row[4] or "")
+    unavailable_conf = [r[5] for r in rows if "unavailable" in json.loads(r[2])]
+    assert unavailable_conf and all(float(c) == 0.0 for c in unavailable_conf)
+    refreshed_at = _run(
+        "SELECT competitor_refreshed_at FROM brand_competitors WHERE id = :c",
+        {"c": UUID(competitor_id)},
+        scalar=True,
+    )
+    assert refreshed_at is not None
+    reset_db_caches()
+
+
+def test_b2_i2_cost_logging_gateway_commits_independently_on_pg(integration_app: FastAPI) -> None:
+    """B2-I2 — ``CostLoggingGateway`` + ``PgCostLogWriter`` (D-072): one row per call, the
+    failed ``user_key`` call included (``outcome='error'`` + category), priced from the
+    table; no text column holds the user key or any secret shape; ``GET /brain/cost`` sees
+    both rows."""
+    from src.modules.ai_gateway.contract import AIError
+    from src.modules.ai_gateway.cost_logging import CostLoggingGateway, PriceTable
+    from src.modules.ai_gateway.facades import FakeProvider, HttpOpenAICompatibleProvider
+    from src.modules.ai_gateway.gateway import CompletionRequest
+    from src.modules.brand_brain.infrastructure.postgres_repository import PgCostLogWriter
+    from tests.conftest import OWNER_USER_ID
+
+    owner = _brain_owner(integration_app)
+    user_key = "".join(("PGUSERKEY", "-", "0123456789abcdef"))
+    price_table = PriceTable.from_json(
+        '{"fake-1": {"prompt_per_1k": "0.001", "completion_per_1k": "0.002"}}'
+    )
+
+    async def _calls() -> None:
+        writer = PgCostLogWriter()
+        ok_gateway = CostLoggingGateway(FakeProvider(), writer, price_table=price_table)
+        ok = await ok_gateway.complete(
+            CompletionRequest(
+                purpose="content_plan",
+                system="s",
+                user="u",
+                brand_id=BRAND_ID,
+                tenant_id=OWNER_ID,
+                prompt_version="content_plan_v1",
+            )
+        )
+        assert ok.provider == "fake"
+        with respx.mock(assert_all_called=True) as router:
+            router.post("https://llm.pg.example/v1/chat/completions").mock(
+                return_value=httpx.Response(401, json={"error": {"message": "bad key"}})
+            )
+            provider = HttpOpenAICompatibleProvider(
+                base_url="https://llm.pg.example/v1", api_key=SecretStr(user_key), model="gpt-x"
+            )
+            user_gateway = CostLoggingGateway(provider, writer, price_table=price_table)
+            with pytest.raises(AIError):
+                await user_gateway.complete(
+                    CompletionRequest(
+                        purpose="brand_diagnosis",
+                        system="s",
+                        user="u",
+                        brand_id=BRAND_ID,
+                        tenant_id=OWNER_ID,
+                        credential_mode="user_key",
+                        json_mode=True,
+                        prompt_version="brand_diagnosis_v1",
+                    )
+                )
+            sent = router.calls.last.request
+            assert sent.headers["Authorization"] == f"Bearer {user_key}"
+
+    reset_db_caches()
+    asyncio.run(_calls())
+    reset_db_caches()
+    assert OWNER_USER_ID  # the seeded owner exists; cost rows are brand-scoped, not user-scoped
+
+    rows = _rows(
+        "SELECT purpose, provider, model, credential_mode, outcome, error_category, "
+        "prompt_version, prompt_tokens, estimated_cost_usd FROM ai_cost_log "
+        "WHERE brand_id = :b ORDER BY created_at",
+        {"b": BRAND_ID},
+    )
+    assert len(rows) == 2
+    ok_row, err_row = rows
+    assert ok_row[0:5] == ("content_plan", "fake", "fake-1", "platform", "ok")
+    assert ok_row[5] is None and ok_row[6] == "content_plan_v1"
+    assert ok_row[7] is not None and ok_row[8] is not None and ok_row[8] > 0
+    assert err_row[0:5] == ("brand_diagnosis", "openai_compatible", "gpt-x", "user_key", "error")
+    assert err_row[5] is not None and err_row[6] == "brand_diagnosis_v1"
+    assert err_row[8] is None
+
+    text_columns = [
+        c
+        for (c,) in _rows(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'ai_cost_log' "
+            "AND data_type IN ('text', 'character varying')"
+        )
+    ]
+    assert text_columns
+    for column in text_columns:
+        for (value,) in _rows(f"SELECT {column} FROM ai_cost_log"):  # noqa: S608 - schema names
+            assert value is None or not _SECRET_SHAPES.search(str(value))
+            assert value is None or user_key not in str(value)
+
+    with TestClient(integration_app) as client:
+        report = client.get(f"{BRAIN_PG}/cost", headers=owner)
+        assert report.status_code == 200, report.text
+        body = report.json()
+        assert body["total_calls"] == 2
+        assert sum(item["errors"] for item in body["items"]) == 1
+    reset_db_caches()
+
+
+# ============================================================================
+# SPRINT-10 B-3 — diagnosis + recommendations ⇒ drafts under approval (migration 0012)
+# ============================================================================
+def _brain_scripted_gateway(integration_app: FastAPI, payload: dict) -> list:
+    """Override the brain gateway with a scripted model answer; returns the call log."""
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+    from src.modules.brand_brain.router import get_brain_gateway
+
+    calls: list = []
+
+    class Scripted:
+        name = "scripted"
+        model = "scripted-pg"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            calls.append(req)
+            return CompletionResult(
+                text=json.dumps(payload, ensure_ascii=False),
+                provider="scripted",
+                model="scripted-pg",
+                usage=Usage(prompt_tokens=100, completion_tokens=50),
+                credential_mode=req.credential_mode,
+                latency_ms=3,
+            )
+
+    integration_app.dependency_overrides[get_brain_gateway] = Scripted
+    return calls
+
+
+def _brain_evidence_rows(client: TestClient, owner: dict[str, str]) -> list[dict]:
+    refreshed = client.post(f"{BRAIN_PG}/evidence/refresh", headers=owner)
+    assert refreshed.status_code == 200, refreshed.text
+    listed = client.get(f"{BRAIN_PG}/evidence", headers=owner)
+    assert listed.status_code == 200, listed.text
+    return listed.json()["items"]
+
+
+def test_b3_i1_diagnose_stores_proposed_rows_with_server_tags_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B3-I1 — ``POST /brain/diagnose`` on real tables: ≤10 ``proposed`` rows whose
+    ``rationale`` ends with the **server** grade tag, ``evidence_ids`` all resolve to
+    ``brand_evidence`` rows of this brand, a recommendation with a foreign evidence id is
+    dropped, provenance carries the prompt hash but never prompt text, no learning signal."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        rows = _brain_evidence_rows(client, owner)
+        measured = [r["id"] for r in rows if r["evidence_kind"] == "measured"]
+        assert len(measured) == 5
+        payload = {
+            "summary": "تشخيص [مُقاس] أولي",
+            "strengths": [{"text": "نشاط واتساب جيد [estimated]", "evidence_ids": measured[:1]}],
+            "gaps": [{"text": "بلا دليل", "evidence_ids": []}],
+            "recommendations": [
+                {
+                    "kind": "gap_action",
+                    "title": "زد وتيرة النشر",
+                    "rationale": "الوتيرة منخفضة [مُقدَّر]",
+                    "evidence_ids": measured[:2],
+                },
+                {
+                    "kind": "reply_template",
+                    "title": "قالب ترحيب",
+                    "rationale": "زمن الرد طويل",
+                    "evidence_ids": measured[2:3],
+                    "template": "أهلاً! استلمنا رسالتك وسنرد خلال ساعة.",
+                },
+                {
+                    "kind": "tone_adjustment",
+                    "title": "دليل من علامة أخرى",
+                    "rationale": "x",
+                    "evidence_ids": [str(uuid4())],
+                },
+            ],
+        }
+        calls = _brain_scripted_gateway(integration_app, payload)
+        res = client.post(f"{BRAIN_PG}/diagnose", headers=owner)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["recommendations_dropped"] == 1 and len(body["recommendations"]) == 2
+        assert body["summary"] == "تشخيص أولي"
+        assert body["strengths"][0]["text"] == "نشاط واتساب جيد [مُقاس]"
+        assert body["gaps"] == []
+        assert calls[0].json_mode is True and calls[0].prompt_version == "brand_diagnosis_v1"
+        # VIEWER-less brand: MANAGER sees the same rows through the list route
+        manager = integration_headers(integration_app.state.settings, AGENCY_ID)
+        assert client.get(f"{BRAIN_PG}/recommendations", headers=manager).status_code in (
+            200,
+            403,
+            404,
+        )
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+
+    stored = _rows(
+        "SELECT kind, status, rationale, evidence_ids::text, evidence_kinds_summary::text, "
+        "decided_by_user_id, decided_at, materialized_item_id, provenance::text "
+        "FROM brand_recommendations WHERE brand_id = :b ORDER BY created_at, kind",
+        {"b": BRAND_ID},
+    )
+    assert len(stored) == 2
+    assert {r[0] for r in stored} == {"gap_action", "reply_template"}
+    assert all(
+        r[1] == "proposed" and r[5] is None and r[6] is None and r[7] is None for r in stored
+    )
+    assert all(r[2].endswith("[مُقاس]") and "[مُقدَّر]" not in r[2] for r in stored)
+    cited = {e for r in stored for e in json.loads(r[3])}
+    assert cited <= set(measured) and len(cited) == 3
+    assert json.loads(stored[0][4]) in (
+        {"measured": 2, "inferred": 0, "estimated": 0},
+        {"measured": 1, "inferred": 0, "estimated": 0},
+    )
+    for r in stored:
+        provenance = json.loads(r[8])
+        assert provenance["kind"] == "ai_generated" and provenance["model"] == "scripted-pg"
+        assert provenance["prompt_version"] == "brand_diagnosis_v1" and "prompt_hash" in provenance
+        assert "system" not in provenance and "أنت محلّل" not in r[8]
+    assert _run("SELECT COUNT(*) FROM learning_signals", scalar=True) == 0
+    # the DB enforces what the service enforces
+    with pytest.raises(IntegrityError, match="ck_brand_recommendations_evidence_ids"):
+        _run(
+            "INSERT INTO brand_recommendations (id, brand_id, kind, title, rationale, "
+            "evidence_ids, status, provenance, created_at) VALUES (:id, :b, 'gap_action', 't', "
+            "'r', '[]'::jsonb, 'proposed', '{}'::jsonb, now())",
+            {"id": uuid4(), "b": BRAND_ID},
+        )
+    with pytest.raises(IntegrityError, match="ck_brand_recommendations_decision_actor"):
+        _run(
+            "INSERT INTO brand_recommendations (id, brand_id, kind, title, rationale, "
+            "evidence_ids, status, provenance, created_at) VALUES (:id, :b, 'gap_action', 't', "
+            "'r', :ev, 'accepted', '{}'::jsonb, now())",
+            {"id": uuid4(), "b": BRAND_ID, "ev": json.dumps(list(cited)[:1])},
+        )
+    reset_db_caches()
+
+
+def test_b3_i2_content_plan_creates_drafts_only_on_pg(integration_app: FastAPI) -> None:
+    """B3-I2 — ``POST /brain/content-plan`` ⇒ real ``content_items`` rows, every one
+    ``status='draft'`` with ``provenance.kind='ai_generated'`` and ``recommendation_id``;
+    ``approval_events`` stays **0**; the recommendation rows are ``materialized`` and point
+    at the item; one ``learning_signals`` row per item with no text."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        rows = _brain_evidence_rows(client, owner)
+        ev = rows[0]["id"]
+        payload = {
+            "items": [
+                {
+                    "title": f"منشور {i} [مُقاس]",
+                    "channel": "facebook" if i % 2 else "instagram",
+                    "body": f"نص المنشور رقم {i} [estimated] — زورونا اليوم.",
+                    "rationale": "الجمهور نشط صباحاً",
+                    "evidence_ids": [ev],
+                }
+                for i in range(8)
+            ]
+            + [{"title": "بلا دليل", "channel": "facebook", "body": "b", "evidence_ids": []}]
+        }
+        _brain_scripted_gateway(integration_app, payload)
+        res = client.post(f"{BRAIN_PG}/content-plan", headers=owner)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert len(body["items"]) == 7 and body["items_dropped"] == 2
+        assert all(i["status"] == "draft" for i in body["items"])
+        # the drafts are visible through the content API as plain drafts
+        listed = client.get(f"{API}/brands/{BRAND_ID}/content/items?status=draft", headers=owner)
+        assert listed.status_code == 200, listed.text
+        assert len(listed.json()["items"]) == 7
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+
+    items = _rows(
+        "SELECT id, status, channel FROM content_items WHERE brand_id = :b", {"b": BRAND_ID}
+    )
+    assert len(items) == 7 and {r[1] for r in items} == {"draft"}
+    assert {r[2] for r in items} == {"facebook_page", "instagram"}
+    assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
+    assert _run("SELECT COUNT(*) FROM publish_jobs", scalar=True) == 0
+    revisions = _rows(
+        "SELECT r.item_id, r.body, r.provenance::text FROM content_revisions r "
+        "JOIN content_items i ON i.id = r.item_id WHERE i.brand_id = :b "
+        "AND r.id = i.current_revision_id",
+        {"b": BRAND_ID},
+    )
+    assert len(revisions) == 7
+    recs = _rows(
+        "SELECT id, status, materialized_item_id, decided_by_user_id FROM brand_recommendations "
+        "WHERE brand_id = :b AND kind = 'content_plan_item'",
+        {"b": BRAND_ID},
+    )
+    assert len(recs) == 7 and {r[1] for r in recs} == {"materialized"}
+    assert {r[2] for r in recs} == {r[0] for r in items}
+    assert all(r[3] is not None for r in recs)
+    rec_ids = {str(r[0]) for r in recs}
+    for _, body_text, provenance_text in revisions:
+        provenance = json.loads(provenance_text)
+        assert provenance["kind"] == "ai_generated"
+        assert provenance["recommendation_id"] in rec_ids
+        assert provenance["prompt_version"] == "content_plan_v1"
+        assert "[estimated]" not in body_text
+    signals = _rows(
+        "SELECT purpose, signal, subject_id, features::text, prompt_version, model, "
+        "credential_mode FROM learning_signals WHERE brand_id = :b",
+        {"b": BRAND_ID},
+    )
+    assert len(signals) == 7 and {s[1] for s in signals} == {"materialized"}
+    assert {str(s[2]) for s in signals} == rec_ids
+    assert all(s[0] == "content_plan" and s[4] == "content_plan_v1" for s in signals)
+    assert all(s[5] == "scripted-pg" and s[6] == "platform" for s in signals)
+    for s in signals:
+        features = json.loads(s[3])
+        assert set(features) == {
+            "kind",
+            "evidence_count",
+            "measured",
+            "inferred",
+            "estimated",
+            "rationale_chars",
+            "channel",
+        }
+        assert "منشور" not in s[3]
+    columns = {
+        c
+        for (c,) in _rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'learning_signals'"
+        )
+    }
+    assert not columns & {"text", "body", "title", "rationale", "prompt", "output"}
+    reset_db_caches()
+
+
+def test_b3_i3_accept_dismiss_decisions_signals_and_reply_templates_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B3-I3 — accept/dismiss on real rows: ``FOR UPDATE`` + CAS ⇒ exactly one decision,
+    actor + time stored (CHECK), a second decision ⇒ 409; ``reply_template`` accepted ⇒
+    ``brand_profiles.tone.reply_templates`` + an ``ai_suggested`` revision; one
+    ``learning_signals`` row per decision; VIEWER-visible provenance is the public subset."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        rows = _brain_evidence_rows(client, owner)
+        ev = rows[0]["id"]
+        payload = {
+            "summary": "s",
+            "strengths": [],
+            "gaps": [],
+            "recommendations": [
+                {"kind": "gap_action", "title": "a", "rationale": "r", "evidence_ids": [ev]},
+                {"kind": "gap_action", "title": "d", "rationale": "r", "evidence_ids": [ev]},
+                {
+                    "kind": "reply_template",
+                    "title": "t",
+                    "rationale": "r",
+                    "evidence_ids": [ev],
+                    "template": "أهلاً بك في نايل كوفي! كيف نساعدك؟",
+                },
+            ],
+        }
+        _brain_scripted_gateway(integration_app, payload)
+        created = client.post(f"{BRAIN_PG}/diagnose", headers=owner).json()["recommendations"]
+        by_title = {r["title"]: r["id"] for r in created}
+        accept = client.post(f"{BRAIN_PG}/recommendations/{by_title['a']}/accept", headers=owner)
+        assert accept.status_code == 200, accept.text
+        assert accept.json()["status"] == "accepted"
+        dismiss = client.post(f"{BRAIN_PG}/recommendations/{by_title['d']}/dismiss", headers=owner)
+        assert dismiss.status_code == 200 and dismiss.json()["status"] == "dismissed"
+        again = client.post(f"{BRAIN_PG}/recommendations/{by_title['a']}/dismiss", headers=owner)
+        assert again.status_code == 409 and again.json()["detail"]["status"] == "accepted"
+        missing = client.post(f"{BRAIN_PG}/recommendations/{uuid4()}/accept", headers=owner)
+        assert missing.status_code == 404
+        # reply template: nothing in the profile before accept …
+        before = client.get(f"{BRAIN_PG}/profile", headers=owner).json()
+        assert before["tone"]["reply_templates"] == [] and before["version"] == 1
+        tpl = client.post(f"{BRAIN_PG}/recommendations/{by_title['t']}/accept", headers=owner)
+        assert tpl.status_code == 200, tpl.text
+        after = client.get(f"{BRAIN_PG}/profile", headers=owner).json()
+        assert after["tone"]["reply_templates"] == ["أهلاً بك في نايل كوفي! كيف نساعدك؟"]
+        revisions = client.get(f"{BRAIN_PG}/profile/revisions", headers=owner).json()["items"]
+        assert revisions[0]["source"] == "ai_suggested"
+        # the list route: status filter + the MANAGER projection still carries provenance
+        proposed = client.get(f"{BRAIN_PG}/recommendations?status=proposed", headers=owner)
+        assert proposed.status_code == 200 and proposed.json()["items"] == []
+        everything = client.get(f"{BRAIN_PG}/recommendations", headers=owner).json()["items"]
+        assert {r["status"] for r in everything} == {"accepted", "dismissed"}
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+
+    decided = _rows(
+        "SELECT status, decided_by_user_id, decided_at FROM brand_recommendations "
+        "WHERE brand_id = :b",
+        {"b": BRAND_ID},
+    )
+    assert sorted(r[0] for r in decided) == ["accepted", "accepted", "dismissed"]
+    assert all(r[1] is not None and r[2] is not None for r in decided)
+    signals = _rows(
+        "SELECT signal, purpose, prompt_version, model, credential_mode FROM learning_signals "
+        "WHERE brand_id = :b ORDER BY created_at",
+        {"b": BRAND_ID},
+    )
+    assert [s[0] for s in signals] == ["accepted", "dismissed", "accepted"]
+    assert all(
+        s[1:] == ("brand_diagnosis", "brand_diagnosis_v1", "scripted-pg", "platform")
+        for s in signals
+    )
+    profile_rows = _rows(
+        "SELECT version, tone::text FROM brand_profiles WHERE brand_id = :b", {"b": BRAND_ID}
+    )
+    assert len(profile_rows) == 1 and profile_rows[0][0] == 1
+    assert json.loads(profile_rows[0][1])["reply_templates"] == [
+        "أهلاً بك في نايل كوفي! كيف نساعدك؟"
+    ]
+    assert (
+        _run(
+            "SELECT source FROM brand_profile_revisions WHERE brand_id = :b ORDER BY version DESC "
+            "LIMIT 1",
+            {"b": BRAND_ID},
+            scalar=True,
+        )
+        == "ai_suggested"
+    )
+    with pytest.raises(IntegrityError, match="ck_learning_signals_signal"):
+        _run(
+            "INSERT INTO learning_signals (id, brand_id, purpose, subject_id, signal, features, "
+            "prompt_version, model, credential_mode, created_at) VALUES (:id, :b, 'x', :s, "
+            "'liked', '{}'::jsonb, 'v', 'm', 'platform', now())",
+            {"id": uuid4(), "b": BRAND_ID, "s": uuid4()},
+        )
+    reset_db_caches()
+
+
+def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
+    """B3-M1 — ``head ⇒ 0011 ⇒ head``: the two 0012 tables disappear and come back with
+    their named constraints and indexes; 0011's tables survive the round-trip."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    tables_0012 = {"brand_recommendations", "learning_signals"}
+
+    def _public_tables() -> set[str]:
+        return {t for (t,) in _rows("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+
+    assert tables_0012 <= _public_tables()
+    command.downgrade(cfg, "0011")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert not tables_0012 & _public_tables()
+    assert {"brand_profiles", "brand_evidence", "ai_cost_log"} <= _public_tables()
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert tables_0012 <= _public_tables()
+    constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
+    assert {
+        "ck_brand_recommendations_kind",
+        "ck_brand_recommendations_status",
+        "ck_brand_recommendations_rationale_len",
+        "ck_brand_recommendations_evidence_ids",
+        "ck_brand_recommendations_decision_actor",
+        "ck_brand_recommendations_materialized_iff",
+        "fk_brand_recommendations_item",
+        "ck_learning_signals_signal",
+        "ck_learning_signals_credential_mode",
+        "ck_learning_signals_features",
+    } <= constraints
+    indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
+    assert {
+        "ix_brand_recommendations_brand_status_created",
+        "ix_learning_signals_brand_purpose_created",
+    } <= indexes

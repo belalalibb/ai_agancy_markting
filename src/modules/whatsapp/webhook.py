@@ -13,12 +13,17 @@ Rules
 * ``GET`` — Meta's subscription handshake: ``hub.mode=subscribe`` + ``hub.verify_token``
   matching an *active* account's ``verify_token_hash`` ⇒ ``200 text/plain hub.challenge``;
   otherwise 403.
-* ``POST`` — the raw body is read **once** and verified with
-  ``hmac.compare_digest(sha256=HMAC_SHA256(app_secret, raw_body), X-Hub-Signature-256)``
-  against the app secret of the account whose ``phone_number_id`` appears in the payload;
-  no header / unknown number / mismatch ⇒ 401 (``counters["wa_webhook_rejected"]``). Once
-  verified the response is **always 200** — unparsed payloads only increment
-  ``counters["wa_webhook_unparsed"]`` so Meta never retries a poison message forever.
+* ``POST`` — SPRINT-10 A-5 order: body streamed with a **1 MiB cap** (over ⇒ 413
+  ``payload_too_large`` before the rest is read) ⇒ ``X-Hub-Signature-256`` present and shaped
+  ``^sha256=[0-9a-f]{64}$`` else 401 **before any ``json.loads`` or DB query** ⇒ narrow
+  extraction of ``entry[*].changes[*].value.metadata.phone_number_id`` ⇒ accounts loaded ⇒
+  ``hmac.compare_digest(sha256=HMAC_SHA256(app_secret, raw_body), header)``; unknown number /
+  mismatch ⇒ 401 (``counters["wa_webhook_rejected"]``). Once verified the response is
+  **always 200** — unparsed payloads only increment ``counters["wa_webhook_unparsed"]`` so
+  Meta never retries a poison message forever.
+* A-3 isolation: every status update is scoped to the ``brand_id`` of the account whose
+  signature verified, and must move the delivery status **forward** (``queued < sent <
+  delivered < read``); anything else is counted in ``ignored_status_updates``.
 * Inbound ``messages[]`` ⇒ ``INSERT … ON CONFLICT (wamid) DO NOTHING`` (dup ⇒ 200,
   ``wa_duplicate``), conversation upsert (``last_inbound_at``, ``window_expires_at = ts +
   24h``, ``unread_count + 1``, archived ⇒ reopen), pending ``suggested`` drafts ⇒
@@ -32,6 +37,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -68,6 +74,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["WhatsApp — webhook (public, signed)"])
 
 SIGNATURE_HEADER = "X-Hub-Signature-256"
+SIGNATURE_PATTERN = re.compile(r"^sha256=[0-9a-f]{64}$")
+MAX_BODY_BYTES = 1024 * 1024  # A-5: 1 MiB — Meta's real payloads are a few KiB
 _STATUS_MAP: dict[str, DeliveryStatus] = {
     "sent": DeliveryStatus.SENT,
     "delivered": DeliveryStatus.DELIVERED,
@@ -124,6 +132,7 @@ class WebhookOutcome:
     inbound: int = 0
     duplicates: int = 0
     status_updates: int = 0
+    ignored_status_updates: int = 0  # A-3: other brand / unknown wamid / backwards move
     unparsed: int = 0
     expired_drafts: list[UUID] = field(default_factory=list)
 
@@ -209,7 +218,7 @@ class WebhookProcessor:
             if not isinstance(raw, dict):
                 outcome.unparsed += 1
                 continue
-            await self._handle_status(raw, outcome)
+            await self._handle_status(raw, outcome, account=account)
 
     async def _handle_inbound(
         self,
@@ -268,7 +277,9 @@ class WebhookProcessor:
             len(body or ""),
         )
 
-    async def _handle_status(self, raw: dict[str, Any], outcome: WebhookOutcome) -> None:
+    async def _handle_status(
+        self, raw: dict[str, Any], outcome: WebhookOutcome, *, account: WhatsAppAccount
+    ) -> None:
         wamid = raw.get("id")
         new = _STATUS_MAP.get(str(raw.get("status", "")))
         if not isinstance(wamid, str) or new is None:
@@ -279,12 +290,39 @@ class WebhookProcessor:
         if isinstance(errors, list) and errors and isinstance(errors[0], dict):
             code = errors[0].get("code")
             error_code = code if isinstance(code, int) else None
-        if await self._repo.update_status_by_wamid(wamid, new, error_code=error_code):
+        if await self._repo.update_status_by_wamid(
+            wamid, new, brand_id=account.brand_id, error_code=error_code
+        ):
             outcome.status_updates += 1
             counters.increment("wa_status_updates")
+        else:
+            outcome.ignored_status_updates += 1
+            counters.increment("wa_status_ignored")
 
 
 # ----------------------------------------------------------------------- routes ---
+async def read_body_capped(request: Request, *, limit: int = MAX_BODY_BYTES) -> bytes:
+    """A-5: ``Content-Length`` over the cap ⇒ 413 immediately; otherwise the body is streamed
+    with a byte counter and the read **stops** at the first chunk crossing the cap."""
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        counters.increment("wa_webhook_rejected")
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE, detail={"error": "payload_too_large"}
+        )
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            counters.increment("wa_webhook_rejected")
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE, detail={"error": "payload_too_large"}
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _repo(session: Annotated[AsyncSession, Depends(get_db_session)]) -> WhatsAppRepository:
     return PostgresWhatsAppRepository(session)
 
@@ -336,8 +374,12 @@ async def verify_webhook(
 async def receive_webhook(
     request: Request, repo: Repo, encryption: Encryption
 ) -> dict[str, int | list[str]]:
-    raw_body = await request.body()  # read exactly once, before any JSON parsing
+    raw_body = await read_body_capped(request)  # A-5 (1): 1 MiB cap, streamed
     header = request.headers.get(SIGNATURE_HEADER)
+    if header is None or SIGNATURE_PATTERN.fullmatch(header) is None:
+        # A-5 (2): shape check before any json.loads / DB round-trip.
+        counters.increment("wa_webhook_rejected")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"error": "webhook_unverified"})
     try:
         payload = json.loads(raw_body or b"null")
     except ValueError:
@@ -371,6 +413,7 @@ async def receive_webhook(
         "inbound": outcome.inbound,
         "duplicates": outcome.duplicates,
         "status_updates": outcome.status_updates,
+        "ignored_status_updates": outcome.ignored_status_updates,  # A-3
         "unparsed": outcome.unparsed,
         "expired_drafts": [str(d) for d in outcome.expired_drafts],  # B-3
     }

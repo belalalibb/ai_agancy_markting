@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     # SPRINT-07 A-5: daily token budget per brand (sum of prompt+completion tokens of the
     # ``ai_generated`` revisions in the last 24 h) ⇒ 429 ``generation_budget_exceeded``.
     ai_daily_token_budget_per_brand: int = 200_000
+    # SPRINT-10 B-2: optional fixed price table for ``ai_cost_log.estimated_cost_usd`` —
+    # ``{"<model>": {"prompt_per_1k": 0.00015, "completion_per_1k": 0.0006}}``; an empty
+    # string or an unknown model ⇒ NULL (the call is still logged, only the estimate is absent).
+    ai_price_table_json: str = Field(
+        default="", description="JSON price table per model for cost estimates (optional)."
+    )
 
     # --- Scheduler / publishing (SPRINT-07 B3) ------------------------------------------
     # Off by default (tests, dev). The worker loop is started in ``lifespan`` only when on.

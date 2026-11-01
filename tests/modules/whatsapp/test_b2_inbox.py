@@ -395,8 +395,9 @@ async def test_b2_u3_auth_error_disables_account_and_409_reauth(
             json={"body": "hi"},
             headers=auth_headers(OWNER_ID),
         )
-        assert again.status_code == 404
-        assert again.json()["detail"]["error"] == "whatsapp_account_not_found"
+        # SPRINT-10 A-1: a disabled account answers 409 reauth_required, never calls Graph.
+        assert again.status_code == 409
+        assert again.json()["detail"]["error"] == "whatsapp_reauth_required"
 
 
 # ---------------------------------------------------------------------- B2-U4 ---

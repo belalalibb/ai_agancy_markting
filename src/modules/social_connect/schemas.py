@@ -186,6 +186,23 @@ class MetaDebugTokenInfo(BaseModel):
     error_code: int | None = None
 
 
+class MetaPublicPageInfo(BaseModel):
+    """Public fields of a Page we do **not** own (SPRINT-10 B-2, Brand Brain competitor):
+    ``GET /{page_id}?fields=name,about,category,fan_count,followers_count,website,link``
+    with the *app* token. Everything here is public on facebook.com; no ``/posts``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str | None = None
+    about: str | None = None
+    category: str | None = None
+    fan_count: int | None = None
+    followers_count: int | None = None
+    website: str | None = None
+    link: str | None = None
+
+
 # ------------------------------------------------------------ public views ---
 # Zero-Secret: these are the ONLY shapes returned by the API. They have no
 # ``*_token`` / ``encrypted_*`` fields at all — not masked, simply absent.

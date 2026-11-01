@@ -7,6 +7,7 @@ application and the isolated test-suite boot without a live database.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from sqlalchemy.ext.asyncio import (
@@ -60,3 +61,18 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
         except BaseException:
             await session.rollback()
             raise
+
+
+@asynccontextmanager
+async def independent_session(
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> AsyncIterator[AsyncSession]:
+    """D-072 «ثبّت ثم أبلغ»: one **independent** transaction, committed on normal exit.
+
+    Extracted from the ``PostgresStatusMarker`` pattern (SPRINT-07 H3). Anything written
+    inside survives a later failure of the request transaction (human decisions, account
+    disabling, failure rows, cost rows). Rolls back only if the block itself raises.
+    """
+    factory = session_factory or get_session_factory()
+    async with factory() as session, session.begin():
+        yield session

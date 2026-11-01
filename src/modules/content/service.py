@@ -18,6 +18,7 @@ from typing import Any
 from uuid import UUID
 
 from src.core.metrics import counters
+from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget, NullBudgetUsageReader
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import (
@@ -92,7 +93,6 @@ GENERATION_LIMIT_PER_HOUR = 20
 GENERATION_WINDOW_SECONDS = 3600
 GENERATION_STATES = frozenset({ContentStatus.DRAFT, ContentStatus.REJECTED})
 # A-5: daily token budget window (per brand; summed from revision provenance).
-TOKEN_BUDGET_WINDOW = timedelta(hours=24)
 # Actions that take the item out of ``scheduled`` by hand (the job must be cancelled).
 _CANCELLING_ACTIONS = frozenset({Action.UNSCHEDULE, Action.ARCHIVE})
 
@@ -128,11 +128,14 @@ class ContentService:
         *,
         daily_token_budget: int = 200_000,
         publish_max_attempts: int = 3,
+        budget_reader: BudgetUsageReader | None = None,
     ) -> None:
         self._repo = repository
         self._connections = connections
         self._jobs = publish_jobs
-        self._daily_token_budget = daily_token_budget
+        # SPRINT-10 A-4: one shared budget reader for every AI feature (N4).
+        self._budget = DailyBudget(daily_token_budget)
+        self._budget_reader: BudgetUsageReader = budget_reader or NullBudgetUsageReader()
         # SPRINT-08 A-3: written into every new job's ``max_attempts`` (policy at creation).
         self._publish_max_attempts = publish_max_attempts
 
@@ -585,19 +588,13 @@ class ContentService:
         return await self.get_item(brand_id, item_id)
 
     async def _check_token_budget(self, brand_id: UUID) -> None:
-        """A-5: one JSONB aggregate per generation; ``used >= budget`` ⇒ 429."""
-        now = datetime.now(tz=UTC)
-        since = now - TOKEN_BUDGET_WINDOW
-        used = await self._repo.ai_token_usage_since(brand_id, since)
-        if used < self._daily_token_budget:
-            return
-        oldest = await self._repo.oldest_ai_generation_at(brand_id, since)
-        resets_in = (
-            max(int((oldest + TOKEN_BUDGET_WINDOW - now).total_seconds()), 1)
-            if oldest is not None
-            else int(TOKEN_BUDGET_WINDOW.total_seconds())
-        )
-        raise GenerationBudgetExceededError(self._daily_token_budget, used, resets_in)
+        """A-5 / SPRINT-10 A-4: the **shared** daily budget (content + WhatsApp + Brand
+        Brain) through :class:`DailyBudget`; ``used >= budget`` ⇒ 429."""
+        verdict = await self._budget.check(brand_id, usage_reader=self._budget_reader)
+        if not verdict.allowed:
+            raise GenerationBudgetExceededError(
+                verdict.budget, verdict.used, verdict.resets_in_seconds
+            )
 
     async def _validate_schedule(
         self,

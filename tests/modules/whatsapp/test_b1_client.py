@@ -49,15 +49,6 @@ pytestmark = pytest.mark.contract
 MESSAGES = f"/{PHONE_NUMBER_ID}/messages"
 
 
-@pytest.fixture
-async def wa_client(settings: Settings):  # noqa: ANN201
-    async def _no_sleep(_: float) -> None:
-        return None
-
-    async with httpx.AsyncClient() as http:
-        yield WhatsAppCloudClient(settings=settings, http_client=http, sleep=_no_sleep)
-
-
 def _ok(wamid: str = "wamid.OUT0001") -> httpx.Response:
     return httpx.Response(
         200,
@@ -318,6 +309,8 @@ async def test_b1_u7_connect_account_verifies_token_then_encrypts_and_stores(
         verify_token=VERIFY_TOKEN,
     )
     assert len(probe.calls) == 1
+    assert account.reconnected is False  # SPRINT-10 A-2: ``ConnectOutcome``
+    account = account.account
     assert account.display_phone == "+1 555 000 1111"  # filled from Graph when empty
     stored = repo.accounts[account.id]
     assert stored.encrypted_system_token != SYSTEM_TOKEN

@@ -51,6 +51,33 @@ class DeliveryStatus(StrEnum):
     AMBIGUOUS = "ambiguous"
 
 
+DELIVERY_RANK: dict[DeliveryStatus, int] = {
+    DeliveryStatus.QUEUED: 1,
+    DeliveryStatus.SENT: 2,
+    DeliveryStatus.DELIVERED: 3,
+    DeliveryStatus.READ: 4,
+}
+
+
+def delivery_transition_allowed(current: DeliveryStatus, new: DeliveryStatus) -> bool:
+    """SPRINT-10 A-3 monotonic status machine for **outbound** rows.
+
+    ``queued(1) < sent(2) < delivered(3) < read(4)`` — only forward moves; ``failed`` /
+    ``ambiguous`` are accepted only from ``queued`` / ``ambiguous``; ``failed`` is final;
+    ``ambiguous`` may still be confirmed forward by Meta (``sent``/``delivered``/``read``).
+    Inbound ``received`` rows never change.
+    """
+    if current is DeliveryStatus.FAILED or current is DeliveryStatus.RECEIVED:
+        return False
+    if new in (DeliveryStatus.FAILED, DeliveryStatus.AMBIGUOUS):
+        return current in (DeliveryStatus.QUEUED, DeliveryStatus.AMBIGUOUS)
+    if new not in DELIVERY_RANK:
+        return False
+    if current is DeliveryStatus.AMBIGUOUS:
+        return DELIVERY_RANK[new] >= DELIVERY_RANK[DeliveryStatus.SENT]  # Meta confirmed it
+    return DELIVERY_RANK[current] < DELIVERY_RANK[new]
+
+
 class DraftStatus(StrEnum):
     SUGGESTED = "suggested"
     APPROVED = "approved"

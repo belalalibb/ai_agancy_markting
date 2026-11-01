@@ -7,7 +7,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.core.database import get_session_factory
+from src.core.database import get_session_factory, independent_session
 from src.modules.social_connect.domain.models import AccountStatus
 from src.modules.social_connect.infrastructure.postgres_repository import (
     PostgresConnectedAccountRepository,
@@ -23,7 +23,7 @@ class PostgresStatusMarker:
     async def mark_out_of_band(
         self, brand_id: UUID, account_id: UUID, status: AccountStatus
     ) -> bool:
-        async with self._session_factory()() as session, session.begin():
+        async with independent_session(self._session_factory()) as session:  # D-072
             return await PostgresConnectedAccountRepository(session).set_status(
                 brand_id, account_id, status
             )

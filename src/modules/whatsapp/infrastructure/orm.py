@@ -153,6 +153,13 @@ class ReplyDraftRow(Base):
     __tablename__ = "wa_reply_drafts"
     __table_args__ = (
         Index("ix_wa_reply_drafts_conversation_status", "conversation_id", "status"),
+        # SPRINT-10 A-5 (migration 0010): one ``suggested`` draft per conversation.
+        Index(
+            "uq_wa_reply_drafts_one_pending",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status = 'suggested'"),
+        ),
         CheckConstraint(
             "status IN ('suggested', 'approved', 'edited', 'rejected', 'expired')",
             name="ck_wa_reply_drafts_status",

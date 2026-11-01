@@ -34,11 +34,23 @@ BANNED_PLATFORM_MODULES = (
     "requests",
     "pywa",  # SPRINT-09 D-071: read-only reference
 )
+# SPRINT-10 B-2 (D-074): scraping libraries / headless browsers are banned too — the only
+# public fetch is ``brand_brain/public_fetch.py`` on ``httpx`` + stdlib ``html.parser``.
+BANNED_SCRAPING_MODULES = (
+    "beautifulsoup4",
+    "bs4",
+    "scrapy",
+    "playwright",
+    "selenium",
+    "instaloader",
+    "lxml",
+)
 # Must mirror ``[tool.ruff.lint.per-file-ignores]`` for TID251 in pyproject.toml.
 ALLOWED_PREFIXES = ("modules/ai_gateway/", "core/")
 ALLOWED_FILES = (
     "modules/social_connect/meta_client.py",
     "modules/whatsapp/client.py",  # SPRINT-09 B-1 (§2-0 هـ)
+    "modules/brand_brain/public_fetch.py",  # SPRINT-10 B-2 (D-074 ج)
 )
 
 
@@ -67,7 +79,10 @@ def test_b0_u1_no_bypass_imports() -> None:
         banned = {
             name
             for name in _imports_of(path)
-            if any(name == b or name.startswith(b + ".") for b in BANNED_MODULES)
+            if any(
+                name == b or name.startswith(b + ".")
+                for b in BANNED_MODULES + BANNED_SCRAPING_MODULES
+            )
         }
         if not banned:
             continue
@@ -76,7 +91,11 @@ def test_b0_u1_no_bypass_imports() -> None:
         else:
             offenders.extend((rel, b) for b in sorted(banned))
     assert offenders == []
-    assert {"core/http.py", "modules/social_connect/meta_client.py"} <= allowed_hits
+    assert {
+        "core/http.py",
+        "modules/social_connect/meta_client.py",
+        "modules/brand_brain/public_fetch.py",
+    } <= allowed_hits
     assert any(hit.startswith("modules/ai_gateway/") for hit in allowed_hits)
 
 
@@ -87,13 +106,17 @@ def test_b0_u1_pyproject_bans_the_same_modules() -> None:
     lint = cfg["tool"]["ruff"]["lint"]
     assert "TID" in lint["select"]
     banned = lint["flake8-tidy-imports"]["banned-api"]
-    assert set(banned) == set(BANNED_MODULES) | set(BANNED_PLATFORM_MODULES)
+    assert set(banned) == (
+        set(BANNED_MODULES) | set(BANNED_PLATFORM_MODULES) | set(BANNED_SCRAPING_MODULES)
+    )
+    assert all("D-074" in banned[m]["msg"] for m in BANNED_SCRAPING_MODULES)
     assert all(banned[m]["msg"] == "Use AIGateway (D-068)" for m in BANNED_MODULES)
     assert banned["requests"]["msg"] == "Use src.core.http shared client"
     ignores = lint["per-file-ignores"]
     assert "TID251" in ignores["src/modules/ai_gateway/**"]
     assert "TID251" in ignores["src/modules/social_connect/meta_client.py"]
     assert "TID251" in ignores["src/modules/whatsapp/client.py"]  # SPRINT-09
+    assert "TID251" in ignores["src/modules/brand_brain/public_fetch.py"]  # SPRINT-10 B-2
     assert banned["pywa"]["msg"] == "Read-only reference — D-071; use src.modules.whatsapp.client"
     assert "TID251" in ignores["src/core/**"]
     assert "TID251" in ignores["tests/**"]

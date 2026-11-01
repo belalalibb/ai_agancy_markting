@@ -26,12 +26,10 @@ from src.core.security import (
     TokenEncryptionService,
     get_token_encryption_service,
 )
-from src.modules.ai_gateway.dependencies import Gateway
+from src.modules.ai_gateway.dependencies import BudgetReader, Gateway
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
-from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.exceptions import ContentError
-from src.modules.content.router import get_content_repository
 from src.modules.content.router import to_http as content_to_http
 from src.modules.tenancy.dependencies import get_brand_access_resolver, get_brand_repository
 from src.modules.tenancy.domain.access import (
@@ -46,7 +44,7 @@ from src.modules.tenancy.exceptions import BrandNotFoundError, InsufficientRoleE
 from src.modules.tenancy.router import to_http as tenancy_to_http
 from src.modules.whatsapp.client import WhatsAppCloudClient
 from src.modules.whatsapp.domain.models import Conversation, ConversationStatus, Message
-from src.modules.whatsapp.domain.repository import Cursor, WhatsAppRepository
+from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, WhatsAppRepository
 from src.modules.whatsapp.exceptions import (
     AccountAlreadyExistsError,
     AccountNotFoundError,
@@ -57,6 +55,7 @@ from src.modules.whatsapp.exceptions import (
     DraftPendingError,
     NoInboundToReplyError,
     PermanentSendError,
+    PhoneNumberInUseError,
     RateLimitedSendError,
     ReauthRequiredError,
     RecipientRejectedError,
@@ -65,7 +64,10 @@ from src.modules.whatsapp.exceptions import (
     WindowClosedError,
 )
 from src.modules.whatsapp.inbox import WhatsAppInboxService
-from src.modules.whatsapp.infrastructure.postgres_repository import PostgresWhatsAppRepository
+from src.modules.whatsapp.infrastructure.postgres_repository import (
+    PgIndependentWrites,
+    PostgresWhatsAppRepository,
+)
 from src.modules.whatsapp.schemas import (
     ApproveDraftRequest,
     ApproveResultPublic,
@@ -82,6 +84,7 @@ from src.modules.whatsapp.schemas import (
     SuggestReplyRequest,
     WhatsAppAccountCreate,
     WhatsAppAccountPublic,
+    WhatsAppAccountRotate,
 )
 from src.modules.whatsapp.service import PostgresWhatsAppTokenProvider, WhatsAppAccountService
 from src.modules.whatsapp.suggestions import ReplySuggestionService
@@ -98,6 +101,11 @@ def get_whatsapp_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> WhatsAppRepository:
     return PostgresWhatsAppRepository(session)
+
+
+def get_independent_writes() -> IndependentWrites:
+    """SPRINT-10 A-1 (D-072): writes that must survive the request transaction."""
+    return PgIndependentWrites()
 
 
 def get_whatsapp_client(
@@ -117,6 +125,7 @@ def get_encryption(settings: Annotated[Settings, Depends(get_settings)]) -> Toke
 
 
 Repo = Annotated[WhatsAppRepository, Depends(get_whatsapp_repository)]
+Independent = Annotated[IndependentWrites, Depends(get_independent_writes)]
 Client = Annotated[WhatsAppCloudClient, Depends(get_whatsapp_client)]
 Encryption = Annotated[TokenEncryptionService, Depends(get_encryption)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
@@ -132,30 +141,35 @@ def get_account_service(
     return WhatsAppAccountService(repo, client, encryption)
 
 
-def get_inbox_service(repo: Repo, client: Client, encryption: Encryption) -> WhatsAppInboxService:
-    return WhatsAppInboxService(repo, client, PostgresWhatsAppTokenProvider(repo, encryption))
+def get_inbox_service(
+    repo: Repo, client: Client, encryption: Encryption, independent: Independent
+) -> WhatsAppInboxService:
+    return WhatsAppInboxService(
+        repo, client, PostgresWhatsAppTokenProvider(repo, encryption), independent
+    )
 
 
 Accounts = Annotated[WhatsAppAccountService, Depends(get_account_service)]
 Inbox = Annotated[WhatsAppInboxService, Depends(get_inbox_service)]
-ContentRepo = Annotated[ContentRepository, Depends(get_content_repository)]
 BrandRepo = Annotated[BrandRepository, Depends(get_brand_repository)]
 
 
 def get_suggestion_service(
     repo: Repo,
-    content_repo: ContentRepo,
+    budget_reader: BudgetReader,
     gateway: Gateway,
     inbox: Inbox,
     limiter: Limiter,
+    independent: Independent,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ReplySuggestionService:
     return ReplySuggestionService(
         repo,
-        content_repo,
+        budget_reader,
         gateway,
         inbox,
         limiter,
+        independent,
         daily_token_budget=settings.ai_daily_token_budget_per_brand,
     )
 
@@ -183,13 +197,15 @@ def to_http(exc: WhatsAppError) -> HTTPException:
     headers: dict[str, str] | None = None
     if isinstance(exc, AccountNotFoundError | ConversationNotFoundError):
         code = status.HTTP_404_NOT_FOUND
-    elif isinstance(exc, AccountAlreadyExistsError):
+    elif isinstance(exc, AccountAlreadyExistsError | PhoneNumberInUseError):
         code = status.HTTP_409_CONFLICT
     elif isinstance(exc, CredentialsInvalidError):
         code = status.HTTP_422_UNPROCESSABLE_CONTENT
     elif isinstance(exc, WindowClosedError):
         code = status.HTTP_422_UNPROCESSABLE_CONTENT
         detail["template_required"] = True
+        if exc.draft_status is not None:  # A-1: the decision that was persisted
+            detail["draft_status"] = exc.draft_status
     elif isinstance(exc, RecipientRejectedError):
         code = status.HTTP_422_UNPROCESSABLE_CONTENT
         detail["code"] = exc.code
@@ -243,6 +259,10 @@ def decode_cursor(cursor: str | None) -> Cursor | None:
     response_model=WhatsAppAccountPublic,
     status_code=status.HTTP_201_CREATED,
     summary="Connect the brand's Cloud API number (BYOK) — OWNER",
+    responses={
+        200: {"description": "A-2: the brand's disabled account was reconnected in place"},
+        409: {"description": "whatsapp_account_exists / whatsapp_phone_number_in_use"},
+    },
 )
 async def connect_account(
     brand_id: UUID,
@@ -250,10 +270,11 @@ async def connect_account(
     actor: CurrentUserFresh,
     resolver: Resolver,
     service: Accounts,
+    response: Response,
 ) -> WhatsAppAccountPublic:
     await _authorise(resolver, actor.tenant_id, brand_id, GRANT_ROLES)
     try:
-        account = await service.connect_account(
+        outcome = await service.connect_account(
             brand_id,
             actor.user_id,
             phone_number_id=payload.phone_number_id,
@@ -262,6 +283,31 @@ async def connect_account(
             system_token=payload.system_token,
             app_secret=payload.app_secret,
             verify_token=payload.verify_token,
+        )
+    except WhatsAppError as exc:
+        raise to_http(exc) from exc
+    if outcome.reconnected:
+        response.status_code = status.HTTP_200_OK
+    return WhatsAppAccountPublic.from_domain(outcome.account)
+
+
+@router.post(
+    f"{BRAND_PREFIX}/account/rotate",
+    response_model=WhatsAppAccountPublic,
+    summary="Rotate system token / app secret of the active account — OWNER",
+    responses={422: {"description": "whatsapp_credentials_invalid — nothing changed"}},
+)
+async def rotate_account_credentials(
+    brand_id: UUID,
+    payload: WhatsAppAccountRotate,
+    actor: CurrentUserFresh,
+    resolver: Resolver,
+    service: Accounts,
+) -> WhatsAppAccountPublic:
+    await _authorise(resolver, actor.tenant_id, brand_id, GRANT_ROLES)
+    try:
+        account = await service.rotate_credentials(
+            brand_id, system_token=payload.system_token, app_secret=payload.app_secret
         )
     except WhatsAppError as exc:
         raise to_http(exc) from exc
@@ -362,7 +408,7 @@ async def list_messages(
     private = role is not BrandRole.VIEWER
     return MessagesPage(
         conversation=ConversationStatePublic.from_domain(conv),
-        items=[MessagePublic.from_domain(m) for m in page],
+        items=[MessagePublic.from_domain(m, private=private) for m in page],
         reply_drafts=[ReplyDraftPublic.from_domain(d, private=private) for d in drafts],
         next_cursor=encode_cursor(page[-1].created_at, page[-1].id) if rest and page else None,
     )
@@ -400,8 +446,9 @@ async def archive_conversation(
 
 
 def _send_response(result_message: Message, *, duplicate: bool) -> SendResultPublic:
+    # Send routes are OWNER/MANAGER only ⇒ the private view (wamid) is always allowed.
     return SendResultPublic(
-        message=MessagePublic.from_domain(result_message),
+        message=MessagePublic.from_domain(result_message, private=True),
         delivery_status=result_message.delivery_status,
         duplicate=duplicate,
     )
@@ -542,7 +589,10 @@ async def suggest_reply(
     responses={
         202: {"description": "sent once, outcome ambiguous (D-070)"},
         409: {"description": "draft_not_pending"},
-        422: {"description": "whatsapp_window_closed — draft stays approved, nothing sent"},
+        422: {
+            "description": "whatsapp_window_closed + draft_status — the decision is persisted "
+            "(D-072), nothing sent"
+        },
     },
 )
 async def approve_reply_draft(
@@ -572,7 +622,7 @@ async def approve_reply_draft(
         response.status_code = status.HTTP_202_ACCEPTED
     return ApproveResultPublic(
         draft=ReplyDraftPublic.from_domain(outcome.draft, private=True),
-        message=MessagePublic.from_domain(message) if message is not None else None,
+        message=MessagePublic.from_domain(message, private=True) if message is not None else None,
         delivery_status=message.delivery_status if message is not None else None,
     )
 

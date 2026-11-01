@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Integer, and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.modules.content.domain.models import (
@@ -221,41 +221,6 @@ class PostgresContentRepository:
     async def get_revision(self, revision_id: UUID) -> ContentRevision | None:
         row = await self._session.get(ContentRevisionRow, revision_id)
         return _revision_to_domain(row) if row is not None else None
-
-    # ------------------------------------------------------- A-5 budget ---
-    async def ai_token_usage_since(self, brand_id: UUID, since: datetime) -> int:
-        """``SUM((provenance->>'prompt_tokens')::int + (provenance->>'completion_tokens')::int)``
-        over ``ai_generated`` revisions of the brand in the window (one query on JSONB)."""
-        prompt = func.coalesce(
-            ContentRevisionRow.provenance["prompt_tokens"].astext.cast(Integer), 0
-        )
-        completion = func.coalesce(
-            ContentRevisionRow.provenance["completion_tokens"].astext.cast(Integer), 0
-        )
-        stmt = (
-            select(func.coalesce(func.sum(prompt + completion), 0))
-            .select_from(ContentRevisionRow)
-            .join(ContentItemRow, ContentItemRow.id == ContentRevisionRow.item_id)
-            .where(
-                ContentItemRow.brand_id == brand_id,
-                ContentRevisionRow.created_at >= since,
-                ContentRevisionRow.provenance["kind"].astext == "ai_generated",
-            )
-        )
-        return int(await self._session.scalar(stmt) or 0)
-
-    async def oldest_ai_generation_at(self, brand_id: UUID, since: datetime) -> datetime | None:
-        stmt = (
-            select(func.min(ContentRevisionRow.created_at))
-            .select_from(ContentRevisionRow)
-            .join(ContentItemRow, ContentItemRow.id == ContentRevisionRow.item_id)
-            .where(
-                ContentItemRow.brand_id == brand_id,
-                ContentRevisionRow.created_at >= since,
-                ContentRevisionRow.provenance["kind"].astext == "ai_generated",
-            )
-        )
-        return await self._session.scalar(stmt)
 
     # ----------------------------------------------------------- events ---
     async def add_event(self, event: ApprovalEvent) -> ApprovalEvent:

@@ -25,6 +25,7 @@ from src.core.config import Settings, get_settings
 from src.core.http import build_http_client
 from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
+from src.modules.brand_brain.router import router as brand_brain_router
 from src.modules.content import router as content_router
 from src.modules.content.domain.models import Channel
 from src.modules.publishing.channels import get_registry
@@ -139,6 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # SPRINT-09 B-1: public, signed Cloud API webhook (GET handshake + POST events).
     api_v1.include_router(whatsapp_webhook_router)
     api_v1.include_router(whatsapp_router)  # SPRINT-09 B-2/B-3: /brands/{id}/whatsapp/…
+    api_v1.include_router(brand_brain_router)  # SPRINT-10 B-1: /brands/{id}/brain/…
     app.include_router(api_v1)
 
     @app.get("/health", tags=["System"], summary="Liveness probe")
