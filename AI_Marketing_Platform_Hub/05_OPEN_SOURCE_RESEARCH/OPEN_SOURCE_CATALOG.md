@@ -17,21 +17,23 @@
 
 | المجال / المحرك | اسم المشروع المفتوح | المستودع الرسمي (GitHub) | الترخيص | التصنيف | الفائدة ودور الاستخدام في المنظومة |
 |---|---|---|---|---|---|
-| **الأتمتة والتنفيذ المتين** | **Temporal** | `temporalio/temporal` | MIT / Apache-2.0 | **INFRA** | المحرك الأساسي لتنفيذ المسارات الطويلة (Long-running campaigns) والموافقة البشرية وإعادة المحاولة التلقائية. |
+| **الأتمتة والتنفيذ المتين** | **Temporal** | `temporalio/temporal` | MIT / Apache-2.0 | **REJECTED (V1) — D-057 مُراجَع 2026-11-01** | المحرك الأساسي لتنفيذ المسارات الطويلة (Long-running campaigns) والموافقة البشرية وإعادة المحاولة التلقائية. |
 | **أطر عمل الوكلاء والذكاء** | **Pydantic AI** | `pydantic/pydantic-ai` | MIT | **BASE** | إطار وكلاء ذكاء اصطناعي بنماذج Pydantic v2 صارمة مع دعم أصيل مدمج للتكامل مع Temporal (`pydantic-ai[temporal]`). |
-| **بوابة مزودي النماذج** | **LiteLLM Proxy** | `BerriAI/litellm` | MIT (Core) | **INFRA** | بوابة موحدة ومفتوحة للاتصال بأكثر من 100 مزود ذكاء اصطناعي مع التوجيه الذكي وإدارة الحصص والتكاليف. |
+| **بوابة مزودي النماذج** | **LiteLLM Proxy** | `BerriAI/litellm` | MIT (Core) | **REJECTED (V1) — D-056 مُراجَع؛ `litellm` في `banned-api`** | بوابة موحدة ومفتوحة للاتصال بأكثر من 100 مزود ذكاء اصطناعي مع التوجيه الذكي وإدارة الحصص والتكاليف. |
 | **التحليلات وتتبع التحويلات** | **Umami** | `umami-software/umami` | MIT | **INFRA** | نظام تحليلات خفيف وسريع يعمل مباشرة على PostgreSQL لتتبع الزيارات، حملات UTM، والعائد المالي دون تعقيد ClickHouse. |
-| **إنتاج الفيديو القصير** | **MoneyPrinterTurbo** | `FujiwaraChoki/MoneyPrinterTurbo` | MIT | **COMPONENT** | توليد فيديوهات قصيرة مؤتمتة (Reels/Shorts) بدمج الصوت والترجمة ومقاطع الستوك. |
-| **ترجمة ودبلجة الفيديو** | **KrillinAI** | `KrillinAI/KrillinAI` | MIT / Apache-2.0 | **COMPONENT** | ترجمة الفيديوهات وتوليد نصوص الشرح (Subtitles) بدقة عالية باللغتين العربية والإنجليزية. |
-| **معالجة وتصغير الصور** | **imgproxy** | `imgproxy/imgproxy` | MIT | **INFRA** | حاوية خفيفة لمعالجة وتعديل أبعاد الصور المرفقة فورياً وفق متطلبات منصات التواصل الاجتماعي. |
+| **إنتاج الفيديو القصير** | **MoneyPrinterTurbo** | `harry0703/MoneyPrinterTurbo` (المالك الصحيح — تحقق GitHub API 2026-11-01) | MIT | **REFERENCE** (V1.1 `media_jobs` — D-017 مُراجَع) | توليد فيديوهات قصيرة مؤتمتة (Reels/Shorts) بدمج الصوت والترجمة ومقاطع الستوك. |
+| **ترجمة ودبلجة الفيديو** | **OpenCreator (كان KrillinAI)** | `krillinai/OpenCreator` (أُعيدت تسميته — تحقق GitHub API 2026-11-01) | Apache-2.0 | **REFERENCE** (V1.1 `media_jobs`) | ترجمة الفيديوهات وتوليد نصوص الشرح (Subtitles) بدقة عالية باللغتين العربية والإنجليزية. |
+| **معالجة وتصغير الصور** | **imgproxy** | `imgproxy/imgproxy` | **Apache-2.0** (صُحِّح من MIT — تحقق GitHub API 2026-11-01) | **INFRA** (V1.1، خدمة شبكية منفصلة) | حاوية خفيفة لمعالجة وتعديل أبعاد الصور المرفقة فورياً وفق متطلبات منصات التواصل الاجتماعي. |
 | **المحادثات الصوتية اللحظية** | **LiveKit Agents** | `livekit/agents` | Apache-2.0 | **BASE** | إطار عمل المحادثات الصوتية المتدفقة في الوقت الفعلي (WebRTC) للمكالمات التفاعلية بنموذج BYOK. |
 | **تحويل الصوت إلى نص** | **faster-whisper** | `SYSTRAN/faster-whisper` | MIT | **COMPONENT** | تحويل الصوت إلى نصوص بسرعة فائقة واستهلاك ذاكرة منخفض. |
 | **تحويل النص إلى صوت محلي** | **Piper** | `rhasspy/piper` | MIT | **COMPONENT** | توليد أصوات محلية خفيفة وسريعة جداً بتكلفة $0. |
-| **استخراج بيانات المواقع** | **Crawl4AI** | `unclecode/crawl4ai` | Apache-2.0 | **COMPONENT** | زاحف ويب متقدم وسريع ومخصص لتحويل صفحات المواقع إلى نصوص منسقة جاهزة لنماذج الـ LLM. |
+| **استخراج بيانات المواقع** | **Crawl4AI** | `unclecode/crawl4ai` | Apache-2.0 | **REJECTED — D-074** (لا كشط؛ يجرّ `playwright` المحظور في `banned-api`؛ الجلب العام يبقى `brand_brain/public_fetch.py` مع robots.txt) | زاحف ويب متقدم وسريع ومخصص لتحويل صفحات المواقع إلى نصوص منسقة جاهزة لنماذج الـ LLM. |
 | **خدمة العملاء والرسائل** | **Chatwoot** | `chatwoot/chatwoot` | MIT (Core) | **REFERENCE** | مرجع تصميمي لصندوق الوارد الموحد (Omnichannel Inbox) لرسائل التواصل والواتساب. |
-| **جدولة السوشيال ميديا** | **Postiz** | `gitroomhq/postiz-app` | AGPL-3.0 | **REFERENCE** | **مرجع تصميمي فقط:** لدراسة تفاصيل واجهات النشر والتكامل، ويُحظر تضمين كوده تجارياً. |
+| **جدولة السوشيال ميديا** | **Postiz** | `gitroomhq/postiz-app` | AGPL-3.0 (مؤكَّد — تحقق GitHub API 2026-11-01) | **REJECTED** (D-054 — المنطقة الحمراء؛ لا كود ولا تشغيل مشترك؛ قراءة UX فقط) | **مرجع تصميمي فقط:** لدراسة تفاصيل واجهات النشر والتكامل، ويُحظر تضمين كوده تجارياً. |
 | **جدولة خفيفة للسوشيال** | **Mixpost Lite** | `inovector/mixpost` | MIT (Lite) | **REFERENCE** | **مرجع فقط:** النسخة المجانية تغطي فيسبوك وإكس وماستودون فقط، بينما بقية المنصات في النسخة المدفوعة ($299). |
 | **رسائل WhatsApp Cloud API** | **PyWa** | `david-lev/pywa` | MIT | **COMPONENT** (M6) | Webhook موقَّع، قوالب، أزرار/قوائم، تكامل FastAPI — يختصر معظم كود M6؛ مشروط بتثبيت الإصدار واختبار توافق D-064 (`REPOSITORY_EVALUATIONS.md` 5-د). |
 | **تحسين البرومبت بالقياس** | **DSPy** | `stanfordnlp/dspy` | MIT | **WATCH** ⇒ COMPONENT مشروط | محسِّن خارج الطلب لحلقة التعلّم D-069 عند توفر ≥ 200 إشارة/قناة؛ يمرّ عبر `AIGateway` فقط (بند مؤجَّل 13). |
 | **قوالب أدوار الوكالة** | **agency-agents** | `msitarzewski/agency-agents` | MIT | **REFERENCE** | هيكل «دور = مهمة + حدود + معايير قبول» لبرومبتات المحركات (نسخة عربية-أولاً)؛ لا كود. |
 | **بوابة + ملاحظات + تقييم** | **TensorZero** | `tensorzero/tensorzero` | Apache-2.0 | **REFERENCE** | نمط `feedback(inference_id, metric)` و`variants` ⇒ `learning_signals`/`prompt_version`؛ لا تبنّي (ClickHouse + Rust ثقيلان لمرحلتنا). |
+
+> **مزامنة 2026-11-01 (Q1–Q17 / D-075–D-082):** الأحكام أعلاه مُحدَّثة: Temporal وLiteLLM **مرفوضان في V1** (D-056/D-057 مُراجَعان)؛ Crawl4AI وPostiz **مرفوضان**؛ تصحيح الرخص والمستودعات (imgproxy Apache-2.0، `harry0703/MoneyPrinterTurbo`، `krillinai/OpenCreator` Apache-2.0). كتالوج **مزوّدي النماذج المجانيين/الرخيصين** المسموح إضافتهم من لوحة الإدارة (D-077، بلا تبعيات كود): OpenAI، Groq (مجاني/مدفوع، `whisper-large-v3-turbo`)، DeepSeek، Together، faster-whisper/vLLM محلي بسعر 0.00 — كلهم عبر واجهة OpenAI-compatible الواحدة في `ai_gateway`.
