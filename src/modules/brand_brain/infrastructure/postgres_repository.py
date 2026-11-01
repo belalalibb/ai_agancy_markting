@@ -20,8 +20,11 @@ from src.modules.brand_brain.domain.models import (
     CostDay,
     CostEntry,
     Evidence,
+    EvidenceKindsSummary,
     Goal,
+    LearningSignal,
     Product,
+    Recommendation,
     Tone,
 )
 from src.modules.brand_brain.domain.repository import EvidenceCursor
@@ -31,6 +34,8 @@ from src.modules.brand_brain.infrastructure.orm import (
     BrandEvidenceRow,
     BrandProfileRevisionRow,
     BrandProfileRow,
+    BrandRecommendationRow,
+    LearningSignalRow,
 )
 from src.modules.tenancy.infrastructure.orm import BrandRow
 
@@ -93,6 +98,24 @@ def _evidence(row: BrandEvidenceRow) -> Evidence:
     )
 
 
+def _recommendation(row: BrandRecommendationRow) -> Recommendation:
+    return Recommendation(
+        id=row.id,
+        brand_id=row.brand_id,
+        kind=row.kind,  # type: ignore[arg-type]
+        title=row.title,
+        rationale=row.rationale,
+        evidence_ids=[UUID(str(e)) for e in row.evidence_ids],
+        evidence_kinds_summary=EvidenceKindsSummary(**dict(row.evidence_kinds_summary)),
+        status=row.status,  # type: ignore[arg-type]
+        decided_by_user_id=row.decided_by_user_id,
+        decided_at=row.decided_at,
+        materialized_item_id=row.materialized_item_id,
+        provenance=dict(row.provenance),
+        created_at=row.created_at,
+    )
+
+
 def _profile_values(profile: BrandProfile) -> dict[str, Any]:
     snap = profile.snapshot()
     return {
@@ -106,7 +129,103 @@ def _profile_values(profile: BrandProfile) -> dict[str, Any]:
     }
 
 
-class PostgresBrandBrainRepository:
+class _RecommendationMixin:
+    """B-3: ``brand_recommendations`` + ``learning_signals`` (same request session)."""
+
+    _session: AsyncSession
+
+    async def add_recommendations(self, rows: list[Recommendation]) -> list[Recommendation]:
+        for rec in rows:
+            self._session.add(
+                BrandRecommendationRow(
+                    id=rec.id,
+                    brand_id=rec.brand_id,
+                    kind=rec.kind,
+                    title=rec.title,
+                    rationale=rec.rationale,
+                    evidence_ids=[str(e) for e in rec.evidence_ids],
+                    evidence_kinds_summary=rec.evidence_kinds_summary.model_dump(),
+                    status=rec.status,
+                    decided_by_user_id=rec.decided_by_user_id,
+                    decided_at=rec.decided_at,
+                    materialized_item_id=rec.materialized_item_id,
+                    provenance=dict(rec.provenance),
+                    created_at=rec.created_at,
+                )
+            )
+        if rows:
+            await self._session.flush()
+        return rows
+
+    async def list_recommendations(
+        self, brand_id: UUID, *, status: str | None, limit: int
+    ) -> list[Recommendation]:
+        stmt = select(BrandRecommendationRow).where(BrandRecommendationRow.brand_id == brand_id)
+        if status is not None:
+            stmt = stmt.where(BrandRecommendationRow.status == status)
+        stmt = stmt.order_by(
+            BrandRecommendationRow.created_at.desc(), BrandRecommendationRow.id.desc()
+        ).limit(limit)
+        return [_recommendation(r) for r in await self._session.scalars(stmt)]
+
+    async def get_recommendation_for_update(
+        self, brand_id: UUID, recommendation_id: UUID
+    ) -> Recommendation | None:
+        row = await self._session.scalar(
+            select(BrandRecommendationRow)
+            .where(
+                BrandRecommendationRow.brand_id == brand_id,
+                BrandRecommendationRow.id == recommendation_id,
+            )
+            .with_for_update()
+        )
+        return _recommendation(row) if row is not None else None
+
+    async def decide_recommendation(
+        self,
+        recommendation_id: UUID,
+        *,
+        expected_status: str,
+        new_status: str,
+        actor_user_id: UUID,
+        decided_at: datetime,
+        materialized_item_id: UUID | None = None,
+    ) -> bool:
+        result = await self._session.execute(
+            update(BrandRecommendationRow)
+            .where(
+                BrandRecommendationRow.id == recommendation_id,
+                BrandRecommendationRow.status == expected_status,
+            )
+            .values(
+                status=new_status,
+                decided_by_user_id=actor_user_id,
+                decided_at=decided_at,
+                materialized_item_id=materialized_item_id,
+            )
+        )
+        return result.rowcount == 1
+
+    async def add_learning_signal(self, signal: LearningSignal) -> LearningSignal:
+        self._session.add(
+            LearningSignalRow(
+                id=signal.id,
+                brand_id=signal.brand_id,
+                purpose=signal.purpose,
+                subject_id=signal.subject_id,
+                signal=signal.signal,
+                features=dict(signal.features),
+                prompt_version=signal.prompt_version,
+                model=signal.model,
+                credential_mode=signal.credential_mode,
+                created_at=signal.created_at,
+            )
+        )
+        await self._session.flush()
+        return signal
+
+
+class PostgresBrandBrainRepository(_RecommendationMixin):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 

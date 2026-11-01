@@ -21,13 +21,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
 from src.core.http import HttpClient
+from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget
+from src.modules.ai_gateway.contract import AIError
 from src.modules.ai_gateway.cost_logging import CostLoggingGateway, PriceTable
-from src.modules.ai_gateway.dependencies import get_ai_gateway
+from src.modules.ai_gateway.dependencies import get_ai_gateway, get_budget_usage_reader
 from src.modules.ai_gateway.exceptions import AIProviderNotConfiguredError
 from src.modules.ai_gateway.facades import HttpOpenAICompatibleProvider
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
+from src.modules.brand_brain.advisor import BrandAdvisor
 from src.modules.brand_brain.domain.repository import (
     BrandBrainRepository,
     CostLogWriter,
@@ -35,13 +38,18 @@ from src.modules.brand_brain.domain.repository import (
 )
 from src.modules.brand_brain.exceptions import (
     BlockedPlatformHostError,
+    BrainBudgetExceededError,
+    BrainRateLimitedError,
     BrandBrainError,
     CompetitorExistsError,
     CompetitorLimitError,
     CompetitorNotFoundError,
     InvalidHostError,
     InvalidIfMatchError,
+    InvalidModelOutputError,
     ProfileVersionConflictError,
+    RecommendationAlreadyDecidedError,
+    RecommendationNotFoundError,
     RefreshRateLimitedError,
     UnknownMetricError,
 )
@@ -55,11 +63,18 @@ from src.modules.brand_brain.schemas import (
     CompetitorCreate,
     CompetitorPublic,
     CompetitorsPage,
+    ContentPlanItemPublic,
+    ContentPlanPublic,
     CostDayPublic,
     CostReport,
+    DiagnosisPointPublic,
+    DiagnosisPublic,
     EvidencePage,
+    EvidenceUsedPublic,
     ProfilePublic,
     ProfileUpdate,
+    RecommendationPublic,
+    RecommendationsPage,
     RefreshResult,
     RevisionPublic,
     RevisionsPage,
@@ -73,6 +88,8 @@ from src.modules.brand_brain.service import (
     InternalMetricsReader,
     PublicPageSource,
 )
+from src.modules.content.router import get_content_service
+from src.modules.content.service import ContentService
 from src.modules.social_connect.meta_client import MetaGraphClient
 from src.modules.tenancy.dependencies import get_brand_access_resolver
 from src.modules.tenancy.domain.access import (
@@ -208,6 +225,34 @@ def get_brain_gateway(
 
 
 BrainGateway = Annotated[AIGateway, Depends(get_brain_gateway)]
+BudgetReader = Annotated[BudgetUsageReader, Depends(get_budget_usage_reader)]
+Content = Annotated[ContentService, Depends(get_content_service)]
+RecommendationStatusQuery = Annotated[
+    Literal["proposed", "accepted", "dismissed", "materialized"] | None, Query(alias="status")
+]
+
+
+def get_brain_advisor(
+    repo: Repo,
+    gateway: BrainGateway,
+    limiter: Limiter,
+    budget_reader: BudgetReader,
+    content: Content,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> BrandAdvisor:
+    """B-3: the same request session for recommendations + content drafts; the gateway is
+    the B-2 cost-logging one (platform or ``X-AI-Key``); the budget is the shared A-4 one."""
+    return BrandAdvisor(
+        repo,
+        gateway=gateway,
+        limiter=limiter,
+        budget=DailyBudget(settings.ai_daily_token_budget_per_brand),
+        budget_reader=budget_reader,
+        content=content,
+    )
+
+
+Advisor = Annotated[BrandAdvisor, Depends(get_brain_advisor)]
 
 
 async def _authorise(
@@ -238,9 +283,21 @@ def to_http(exc: BrandBrainError) -> HTTPException:
         code = status.HTTP_404_NOT_FOUND
     elif isinstance(exc, InvalidHostError | BlockedPlatformHostError | UnknownMetricError):
         code = status.HTTP_422_UNPROCESSABLE_CONTENT
-    elif isinstance(exc, RefreshRateLimitedError):
+    elif isinstance(exc, RefreshRateLimitedError | BrainRateLimitedError):
         code = status.HTTP_429_TOO_MANY_REQUESTS
         headers = {"Retry-After": str(int(exc.retry_after_seconds))}
+    elif isinstance(exc, BrainBudgetExceededError):
+        code = status.HTTP_429_TOO_MANY_REQUESTS
+        detail.update(budget=exc.budget, used=exc.used, resets_in_seconds=exc.resets_in_seconds)
+        headers = {"Retry-After": str(int(exc.resets_in_seconds))}
+    elif isinstance(exc, InvalidModelOutputError):
+        code = status.HTTP_502_BAD_GATEWAY
+        detail["category"] = "invalid_output"
+    elif isinstance(exc, RecommendationNotFoundError):
+        code = status.HTTP_404_NOT_FOUND
+    elif isinstance(exc, RecommendationAlreadyDecidedError):
+        code = status.HTTP_409_CONFLICT
+        detail["status"] = exc.status
     else:
         code = status.HTTP_400_BAD_REQUEST
     return HTTPException(code, detail=detail, headers=headers)
@@ -503,3 +560,172 @@ async def get_cost(
         completion_tokens=sum(d.completion_tokens for d in summary.days),
         total_estimated_cost_usd=sum(costs) if costs else None,
     )
+
+
+# ------------------------------------------------------------ brain (B-3) --
+def _credential_mode(x_ai_key: str | None) -> str:
+    return "user_key" if x_ai_key is not None else "platform"
+
+
+def _ai_to_http(exc: AIError) -> HTTPException:
+    """Same table as ``content`` (D-067 twelve categories ⇒ HTTP)."""
+    from src.modules.content.router import _ai_error_to_http
+
+    return _ai_error_to_http(exc)
+
+
+@router.post(
+    f"{BRAIN_PREFIX}/diagnose",
+    response_model=DiagnosisPublic,
+    summary="Diagnose the brand from graded evidence ⇒ proposed recommendations (5/hour)",
+    responses={
+        429: {"description": "brain_rate_limited / generation_budget_exceeded (Retry-After)"},
+        502: {"description": "ai_invalid_output / ai_upstream_unavailable"},
+        503: {"description": "ai_provider_not_configured"},
+    },
+)
+async def diagnose(
+    brand_id: UUID,
+    actor: CurrentUser,
+    resolver: Resolver,
+    advisor: Advisor,
+    x_ai_key: AIKeyHeader = None,
+) -> DiagnosisPublic:
+    """B-3: ≤60 evidence rows + profile ⇒ ``brand_diagnosis_v1`` ⇒ ≤10 ``proposed``
+    recommendations. Grade tags are appended by the **server** per cited evidence row; a
+    recommendation without a valid evidence id is dropped (``recommendations_dropped``)."""
+    role = await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        result = await advisor.diagnose(
+            brand_id, tenant_id=actor.tenant_id, credential_mode=_credential_mode(x_ai_key)
+        )
+    except BrandBrainError as exc:
+        raise to_http(exc) from exc
+    except AIError as exc:
+        raise _ai_to_http(exc) from exc
+    private = role in PRIVATE_ROLES
+    return DiagnosisPublic(
+        summary=result.summary,
+        strengths=[DiagnosisPointPublic(text=t, evidence_ids=ids) for t, ids in result.strengths],
+        gaps=[DiagnosisPointPublic(text=t, evidence_ids=ids) for t, ids in result.gaps],
+        evidence_used=[
+            EvidenceUsedPublic(id=e.id, kind=e.evidence_kind) for e in result.evidence_used
+        ],
+        recommendations=[
+            RecommendationPublic.from_domain(r, private=private) for r in result.recommendations
+        ],
+        recommendations_dropped=result.recommendations_dropped,
+        prompt_version=result.prompt_version,
+    )
+
+
+@router.post(
+    f"{BRAIN_PREFIX}/content-plan",
+    response_model=ContentPlanPublic,
+    summary="Plan ≤7 posts ⇒ content_items(status=draft) under approval (5/hour)",
+    responses={
+        429: {"description": "brain_rate_limited / generation_budget_exceeded (Retry-After)"},
+        502: {"description": "ai_invalid_output / ai_upstream_unavailable"},
+    },
+)
+async def content_plan(
+    brand_id: UUID,
+    actor: CurrentUser,
+    resolver: Resolver,
+    advisor: Advisor,
+    x_ai_key: AIKeyHeader = None,
+) -> ContentPlanPublic:
+    """B-3: ``content_plan_v1`` ⇒ every item is a ``draft`` with
+    ``provenance.kind="ai_generated"`` + ``provenance.recommendation_id`` — never
+    ``pending_approval``, zero approval events."""
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        result = await advisor.content_plan(
+            brand_id,
+            tenant_id=actor.tenant_id,
+            actor_user_id=actor.user_id,
+            credential_mode=_credential_mode(x_ai_key),
+        )
+    except BrandBrainError as exc:
+        raise to_http(exc) from exc
+    except AIError as exc:
+        raise _ai_to_http(exc) from exc
+    return ContentPlanPublic(
+        items=[
+            ContentPlanItemPublic(
+                recommendation_id=rec.id,
+                item_id=item.id,
+                channel=item.channel.value,
+                title=rec.title,
+                status=item.status.value,
+            )
+            for rec, item in result.items
+        ],
+        items_dropped=result.items_dropped,
+        prompt_version=result.prompt_version,
+    )
+
+
+@router.get(
+    f"{BRAIN_PREFIX}/recommendations",
+    response_model=RecommendationsPage,
+    summary="Recommendations, newest first — all roles (VIEWER: public provenance only)",
+)
+async def list_recommendations(
+    brand_id: UUID,
+    actor: CurrentUser,
+    resolver: Resolver,
+    advisor: Advisor,
+    status_filter: RecommendationStatusQuery = None,
+    limit: LimitQuery = 50,
+) -> RecommendationsPage:
+    role = await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
+    rows = await advisor.list_recommendations(brand_id, status=status_filter, limit=limit)
+    private = role in PRIVATE_ROLES
+    return RecommendationsPage(
+        items=[RecommendationPublic.from_domain(r, private=private) for r in rows], limit=limit
+    )
+
+
+@router.post(
+    f"{BRAIN_PREFIX}/recommendations/{{recommendation_id}}/accept",
+    response_model=RecommendationPublic,
+    summary="Accept a proposed recommendation — OWNER/MANAGER, fresh session",
+    responses={404: {"description": "recommendation_not_found"}, 409: {"description": "decided"}},
+)
+async def accept_recommendation(
+    brand_id: UUID,
+    recommendation_id: UUID,
+    actor: CurrentUserFresh,
+    resolver: Resolver,
+    advisor: Advisor,
+) -> RecommendationPublic:
+    """``reply_template`` ⇒ stored in ``brand_profiles.tone.reply_templates[]`` (≤10) **only
+    now**; every decision writes a ``learning_signals`` row (no text)."""
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        decided = await advisor.accept(brand_id, recommendation_id, actor_user_id=actor.user_id)
+    except BrandBrainError as exc:
+        raise to_http(exc) from exc
+    return RecommendationPublic.from_domain(decided.recommendation, private=True)
+
+
+@router.post(
+    f"{BRAIN_PREFIX}/recommendations/{{recommendation_id}}/dismiss",
+    response_model=RecommendationPublic,
+    summary="Dismiss a proposed recommendation — OWNER/MANAGER, fresh session",
+    responses={404: {"description": "recommendation_not_found"}, 409: {"description": "decided"}},
+)
+async def dismiss_recommendation(
+    brand_id: UUID,
+    recommendation_id: UUID,
+    actor: CurrentUserFresh,
+    resolver: Resolver,
+    advisor: Advisor,
+) -> RecommendationPublic:
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        decided = await advisor.dismiss(brand_id, recommendation_id, actor_user_id=actor.user_id)
+    except BrandBrainError as exc:
+        raise to_http(exc) from exc
+    return RecommendationPublic.from_domain(decided.recommendation, private=True)

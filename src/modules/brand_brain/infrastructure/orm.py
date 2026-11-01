@@ -219,3 +219,104 @@ class AICostLogRow(Base):
     outcome: Mapped[str] = mapped_column(String(8), nullable=False)
     error_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = _ts()
+
+
+class BrandRecommendationRow(Base):
+    """B-3 (migration 0012): an AI proposal under human approval. ``evidence_ids`` ≥ 1,
+    a decision needs an actor, ``materialized_item_id`` only when ``materialized``."""
+
+    __tablename__ = "brand_recommendations"
+    __table_args__ = (
+        Index(
+            "ix_brand_recommendations_brand_status_created",
+            "brand_id",
+            "status",
+            text("created_at DESC"),
+        ),
+        CheckConstraint(
+            "kind IN ('content_plan_item', 'tone_adjustment', 'reply_template', 'gap_action')",
+            name="ck_brand_recommendations_kind",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'accepted', 'dismissed', 'materialized')",
+            name="ck_brand_recommendations_status",
+        ),
+        CheckConstraint(
+            "char_length(rationale) <= 1200", name="ck_brand_recommendations_rationale_len"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence_ids) = 'array' AND jsonb_array_length(evidence_ids) >= 1",
+            name="ck_brand_recommendations_evidence_ids",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence_kinds_summary) = 'object'",
+            name="ck_brand_recommendations_kinds_summary",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(provenance) = 'object'", name="ck_brand_recommendations_provenance"
+        ),
+        CheckConstraint(
+            "(status = 'proposed' AND decided_by_user_id IS NULL AND decided_at IS NULL) OR "
+            "(status <> 'proposed' AND decided_by_user_id IS NOT NULL AND decided_at IS NOT NULL)",
+            name="ck_brand_recommendations_decision_actor",
+        ),
+        CheckConstraint(
+            "materialized_item_id IS NULL OR status = 'materialized'",
+            name="ck_brand_recommendations_materialized_iff",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    brand_id: Mapped[uuid.UUID] = _brand_fk()
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    evidence_kinds_summary: Mapped[dict[str, Any]] = _jsonb(
+        '{"measured": 0, "inferred": 0, "estimated": 0}'
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="proposed")
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    decided_at: Mapped[datetime | None] = _ts(nullable=True)
+    materialized_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("content_items.id", ondelete="SET NULL"), nullable=True
+    )
+    provenance: Mapped[dict[str, Any]] = _jsonb("{}")
+    created_at: Mapped[datetime] = _ts()
+
+
+class LearningSignalRow(Base):
+    """B-3: the general learning signal — **no text column** (D-069)."""
+
+    __tablename__ = "learning_signals"
+    __table_args__ = (
+        Index(
+            "ix_learning_signals_brand_purpose_created",
+            "brand_id",
+            "purpose",
+            text("created_at DESC"),
+        ),
+        CheckConstraint(
+            "signal IN ('accepted', 'dismissed', 'materialized', 'approved_unchanged', "
+            "'approved_after_edit', 'rejected', 'expired')",
+            name="ck_learning_signals_signal",
+        ),
+        CheckConstraint(
+            "credential_mode IN ('platform', 'user_key')",
+            name="ck_learning_signals_credential_mode",
+        ),
+        CheckConstraint("jsonb_typeof(features) = 'object'", name="ck_learning_signals_features"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    brand_id: Mapped[uuid.UUID] = _brand_fk()
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    signal: Mapped[str] = mapped_column(String(24), nullable=False)
+    features: Mapped[dict[str, Any]] = _jsonb("{}")
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    credential_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = _ts()

@@ -540,7 +540,7 @@ def test_brain_routes_are_protected_and_counted() -> None:
     from tests.test_auth_guard import PROTECTED
 
     brain = sorted(op for op in PROTECTED if "/brain/" in op[1])
-    assert len(brain) == 10  # B-1: 9 + B-2: competitors/{id}/refresh
+    assert len(brain) == 15  # B-1: 9 + B-2: competitors/{id}/refresh + B-3: 5
     assert brain == [
         ("DELETE", "/api/v1/brands/{brand_id}/brain/competitors/{competitor_id}"),
         ("GET", "/api/v1/brands/{brand_id}/brain/competitors"),
@@ -548,9 +548,14 @@ def test_brain_routes_are_protected_and_counted() -> None:
         ("GET", "/api/v1/brands/{brand_id}/brain/evidence"),
         ("GET", "/api/v1/brands/{brand_id}/brain/profile"),
         ("GET", "/api/v1/brands/{brand_id}/brain/profile/revisions"),
+        ("GET", "/api/v1/brands/{brand_id}/brain/recommendations"),
         ("POST", "/api/v1/brands/{brand_id}/brain/competitors"),
         ("POST", "/api/v1/brands/{brand_id}/brain/competitors/{competitor_id}/refresh"),
+        ("POST", "/api/v1/brands/{brand_id}/brain/content-plan"),
+        ("POST", "/api/v1/brands/{brand_id}/brain/diagnose"),
         ("POST", "/api/v1/brands/{brand_id}/brain/evidence/refresh"),
+        ("POST", "/api/v1/brands/{brand_id}/brain/recommendations/{recommendation_id}/accept"),
+        ("POST", "/api/v1/brands/{brand_id}/brain/recommendations/{recommendation_id}/dismiss"),
         ("PUT", "/api/v1/brands/{brand_id}/brain/profile"),
     ]
 

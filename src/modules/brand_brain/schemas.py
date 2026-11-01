@@ -27,6 +27,7 @@ from src.modules.brand_brain.domain.models import (
     Evidence,
     Goal,
     Product,
+    Recommendation,
     Tone,
 )
 
@@ -232,3 +233,93 @@ class CostReport(_Strict):
     prompt_tokens: int
     completion_tokens: int
     total_estimated_cost_usd: Decimal | None
+
+
+# ----------------------------------------------------- recommendations (B-3) --
+class EvidenceUsedPublic(_Strict):
+    id: UUID
+    kind: Literal["measured", "inferred", "estimated"]
+
+
+class DiagnosisPointPublic(_Strict):
+    text: str
+    evidence_ids: list[UUID]
+
+
+class DiagnosisPublic(_Strict):
+    """``POST /brain/diagnose`` — the narrative plus what was stored as ``proposed``
+    recommendations. Grade tags in every text come from the **server**."""
+
+    summary: str
+    strengths: list[DiagnosisPointPublic]
+    gaps: list[DiagnosisPointPublic]
+    evidence_used: list[EvidenceUsedPublic]
+    recommendations: list[RecommendationPublic]
+    recommendations_dropped: int
+    prompt_version: str
+
+
+class RecommendationPublic(_Strict):
+    id: UUID
+    kind: str
+    title: str
+    rationale: str
+    evidence_ids: list[UUID]
+    evidence_kinds_summary: dict[str, int]
+    status: str
+    decided_by_user_id: UUID | None
+    decided_at: datetime | None
+    materialized_item_id: UUID | None
+    provenance: dict[str, Any]  # public keys only unless OWNER/MANAGER (D-066)
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, rec: Recommendation, *, private: bool) -> RecommendationPublic:
+        provenance = (
+            dict(rec.provenance)
+            if private
+            else {k: v for k, v in rec.provenance.items() if k in PUBLIC_RECOMMENDATION_KEYS}
+        )
+        return cls(
+            id=rec.id,
+            kind=rec.kind,
+            title=rec.title,
+            rationale=rec.rationale,
+            evidence_ids=list(rec.evidence_ids),
+            evidence_kinds_summary=rec.evidence_kinds_summary.model_dump(),
+            status=rec.status,
+            decided_by_user_id=rec.decided_by_user_id,
+            decided_at=rec.decided_at,
+            materialized_item_id=rec.materialized_item_id,
+            provenance=provenance,
+            created_at=rec.created_at,
+        )
+
+
+# D-066: the provenance keys every role may see; provider/model/tokens/latency/
+# credential_mode are private (OWNER/MANAGER).
+PUBLIC_RECOMMENDATION_KEYS = frozenset({"kind", "generated_at", "prompt_version"})
+
+
+class RecommendationsPage(_Strict):
+    items: list[RecommendationPublic]
+    limit: int
+
+
+class ContentPlanItemPublic(_Strict):
+    recommendation_id: UUID
+    item_id: UUID
+    channel: str
+    title: str
+    status: str  # always ``draft``
+
+
+class ContentPlanPublic(_Strict):
+    """``POST /brain/content-plan`` — ≤7 drafts, every one ``status=draft``."""
+
+    items: list[ContentPlanItemPublic]
+    items_dropped: int
+    prompt_version: str
+
+
+DiagnosisPublic.model_rebuild()

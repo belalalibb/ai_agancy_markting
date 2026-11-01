@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.modules.brand_brain.domain.metrics import (
     EvidenceKind,
@@ -202,3 +202,90 @@ class CostDay(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     estimated_cost_usd: Decimal | None
+
+
+# ---------------------------------------------------------- recommendations --
+# B-3 (migration 0012): every AI proposal is a ``proposed`` row until a human decides.
+RecommendationKind = Literal[
+    "content_plan_item", "tone_adjustment", "reply_template", "gap_action"
+]
+RecommendationStatus = Literal["proposed", "accepted", "dismissed", "materialized"]
+LearningSignalKind = Literal[
+    "accepted",
+    "dismissed",
+    "materialized",
+    "approved_unchanged",
+    "approved_after_edit",
+    "rejected",
+    "expired",
+]
+MAX_RATIONALE_CHARS = 1200
+MAX_RECOMMENDATION_TITLE = 120
+MAX_DIAGNOSIS_RECOMMENDATIONS = 10
+MAX_CONTENT_PLAN_ITEMS = 7
+
+
+class EvidenceKindsSummary(_Strict):
+    """``{measured: n, inferred: n, estimated: n}`` — how many cited rows of each grade."""
+
+    measured: int = Field(default=0, ge=0)
+    inferred: int = Field(default=0, ge=0)
+    estimated: int = Field(default=0, ge=0)
+
+    @classmethod
+    def of(cls, rows: list[Evidence]) -> EvidenceKindsSummary:
+        counts = {"measured": 0, "inferred": 0, "estimated": 0}
+        for row in rows:
+            counts[row.evidence_kind] += 1
+        return cls(**counts)
+
+
+class Recommendation(BaseModel):
+    """One ``brand_recommendations`` row. ``evidence_ids`` is never empty (DB CHECK mirrors
+    it); a decision (anything but ``proposed``) carries its actor and time."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID = Field(default_factory=uuid4)
+    brand_id: UUID
+    kind: RecommendationKind
+    title: str = Field(min_length=1, max_length=MAX_RECOMMENDATION_TITLE)
+    rationale: str = Field(min_length=1, max_length=MAX_RATIONALE_CHARS)
+    evidence_ids: list[UUID] = Field(min_length=1)
+    evidence_kinds_summary: EvidenceKindsSummary = Field(default_factory=EvidenceKindsSummary)
+    status: RecommendationStatus = "proposed"
+    decided_by_user_id: UUID | None = None
+    decided_at: datetime | None = None
+    materialized_item_id: UUID | None = None
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def _decision_invariants(self) -> Recommendation:
+        decided = self.status != "proposed"
+        has_actor = self.decided_by_user_id is not None and self.decided_at is not None
+        if decided != has_actor:
+            msg = "a decision needs decided_by_user_id and decided_at; proposed has neither"
+            raise ValueError(msg)
+        if self.materialized_item_id is not None and self.status != "materialized":
+            msg = "materialized_item_id requires status=materialized"
+            raise ValueError(msg)
+        return self
+
+
+class LearningSignal(BaseModel):
+    """One ``learning_signals`` row — **no text** (D-069): what was decided about which AI
+    subject, with the prompt/model identity and numeric/categorical features only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID = Field(default_factory=uuid4)
+    brand_id: UUID
+    purpose: str = Field(min_length=1, max_length=32)
+    subject_id: UUID
+    signal: LearningSignalKind
+    features: dict[str, Any] = Field(default_factory=dict)
+    prompt_version: str = Field(min_length=1, max_length=32)
+    model: str = Field(min_length=1, max_length=64)
+    credential_mode: Literal["platform", "user_key"]
+    created_at: datetime

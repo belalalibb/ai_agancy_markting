@@ -523,7 +523,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -928,7 +928,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1949,7 +1949,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2019,7 +2019,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2439,7 +2439,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2568,7 +2568,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"  # SPRINT-09 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2715,7 +2715,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2765,7 +2765,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2923,7 +2923,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -2970,7 +2970,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -3136,7 +3136,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
     at 0008 and come back; no other table is touched."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     wa_tables = {
@@ -3241,7 +3241,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert wa_tables <= present
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
@@ -4193,7 +4193,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
     the pre-cleanup marks the **older** one ``expired`` and the partial unique index
     ``uq_wa_reply_drafts_one_pending`` then rejects a second pending draft."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     command.downgrade(cfg, "0009")
@@ -4215,7 +4215,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
         _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 2
     )
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     statuses = dict(_rows("SELECT id, status FROM wa_reply_drafts"))
     assert statuses[older] == "expired" and statuses[newer] == "suggested"
     assert (
@@ -4453,7 +4453,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
     """B1-M1 — ``head ⇒ 0010 ⇒ head``: the five 0011 tables disappear and come back with
     their named constraints; 0010's partial index survives the round-trip."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0011 = {
         "brand_profiles",
@@ -4474,7 +4474,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
         r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
     }
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
     assert tables_0011 <= _public_tables()
     constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
     assert {
@@ -4710,3 +4710,377 @@ def test_b2_i2_cost_logging_gateway_commits_independently_on_pg(integration_app:
         assert body["total_calls"] == 2
         assert sum(item["errors"] for item in body["items"]) == 1
     reset_db_caches()
+
+
+# ============================================================================
+# SPRINT-10 B-3 — diagnosis + recommendations ⇒ drafts under approval (migration 0012)
+# ============================================================================
+def _brain_scripted_gateway(integration_app: FastAPI, payload: dict) -> list:
+    """Override the brain gateway with a scripted model answer; returns the call log."""
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+    from src.modules.brand_brain.router import get_brain_gateway
+
+    calls: list = []
+
+    class Scripted:
+        name = "scripted"
+        model = "scripted-pg"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            calls.append(req)
+            return CompletionResult(
+                text=json.dumps(payload, ensure_ascii=False),
+                provider="scripted",
+                model="scripted-pg",
+                usage=Usage(prompt_tokens=100, completion_tokens=50),
+                credential_mode=req.credential_mode,
+                latency_ms=3,
+            )
+
+    integration_app.dependency_overrides[get_brain_gateway] = Scripted
+    return calls
+
+
+def _brain_evidence_rows(client: TestClient, owner: dict[str, str]) -> list[dict]:
+    refreshed = client.post(f"{BRAIN_PG}/evidence/refresh", headers=owner)
+    assert refreshed.status_code == 200, refreshed.text
+    listed = client.get(f"{BRAIN_PG}/evidence", headers=owner)
+    assert listed.status_code == 200, listed.text
+    return listed.json()["items"]
+
+
+def test_b3_i1_diagnose_stores_proposed_rows_with_server_tags_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B3-I1 — ``POST /brain/diagnose`` on real tables: ≤10 ``proposed`` rows whose
+    ``rationale`` ends with the **server** grade tag, ``evidence_ids`` all resolve to
+    ``brand_evidence`` rows of this brand, a recommendation with a foreign evidence id is
+    dropped, provenance carries the prompt hash but never prompt text, no learning signal."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        rows = _brain_evidence_rows(client, owner)
+        measured = [r["id"] for r in rows if r["evidence_kind"] == "measured"]
+        assert len(measured) == 5
+        payload = {
+            "summary": "تشخيص [مُقاس] أولي",
+            "strengths": [{"text": "نشاط واتساب جيد [estimated]", "evidence_ids": measured[:1]}],
+            "gaps": [{"text": "بلا دليل", "evidence_ids": []}],
+            "recommendations": [
+                {
+                    "kind": "gap_action",
+                    "title": "زد وتيرة النشر",
+                    "rationale": "الوتيرة منخفضة [مُقدَّر]",
+                    "evidence_ids": measured[:2],
+                },
+                {
+                    "kind": "reply_template",
+                    "title": "قالب ترحيب",
+                    "rationale": "زمن الرد طويل",
+                    "evidence_ids": measured[2:3],
+                    "template": "أهلاً! استلمنا رسالتك وسنرد خلال ساعة.",
+                },
+                {
+                    "kind": "tone_adjustment",
+                    "title": "دليل من علامة أخرى",
+                    "rationale": "x",
+                    "evidence_ids": [str(uuid4())],
+                },
+            ],
+        }
+        calls = _brain_scripted_gateway(integration_app, payload)
+        res = client.post(f"{BRAIN_PG}/diagnose", headers=owner)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["recommendations_dropped"] == 1 and len(body["recommendations"]) == 2
+        assert body["summary"] == "تشخيص أولي"
+        assert body["strengths"][0]["text"] == "نشاط واتساب جيد [مُقاس]"
+        assert body["gaps"] == []
+        assert calls[0].json_mode is True and calls[0].prompt_version == "brand_diagnosis_v1"
+        # VIEWER-less brand: MANAGER sees the same rows through the list route
+        manager = integration_headers(integration_app.state.settings, AGENCY_ID)
+        assert client.get(f"{BRAIN_PG}/recommendations", headers=manager).status_code in (
+            200,
+            403,
+            404,
+        )
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+
+    stored = _rows(
+        "SELECT kind, status, rationale, evidence_ids::text, evidence_kinds_summary::text, "
+        "decided_by_user_id, decided_at, materialized_item_id, provenance::text "
+        "FROM brand_recommendations WHERE brand_id = :b ORDER BY created_at, kind",
+        {"b": BRAND_ID},
+    )
+    assert len(stored) == 2
+    assert {r[0] for r in stored} == {"gap_action", "reply_template"}
+    assert all(
+        r[1] == "proposed" and r[5] is None and r[6] is None and r[7] is None for r in stored
+    )
+    assert all(r[2].endswith("[مُقاس]") and "[مُقدَّر]" not in r[2] for r in stored)
+    cited = {e for r in stored for e in json.loads(r[3])}
+    assert cited <= set(measured) and len(cited) == 3
+    assert json.loads(stored[0][4]) in (
+        {"measured": 2, "inferred": 0, "estimated": 0},
+        {"measured": 1, "inferred": 0, "estimated": 0},
+    )
+    for r in stored:
+        provenance = json.loads(r[8])
+        assert provenance["kind"] == "ai_generated" and provenance["model"] == "scripted-pg"
+        assert provenance["prompt_version"] == "brand_diagnosis_v1" and "prompt_hash" in provenance
+        assert "system" not in provenance and "أنت محلّل" not in r[8]
+    assert _run("SELECT COUNT(*) FROM learning_signals", scalar=True) == 0
+    # the DB enforces what the service enforces
+    with pytest.raises(IntegrityError, match="ck_brand_recommendations_evidence_ids"):
+        _run(
+            "INSERT INTO brand_recommendations (id, brand_id, kind, title, rationale, "
+            "evidence_ids, status, provenance, created_at) VALUES (:id, :b, 'gap_action', 't', "
+            "'r', '[]'::jsonb, 'proposed', '{}'::jsonb, now())",
+            {"id": uuid4(), "b": BRAND_ID},
+        )
+    with pytest.raises(IntegrityError, match="ck_brand_recommendations_decision_actor"):
+        _run(
+            "INSERT INTO brand_recommendations (id, brand_id, kind, title, rationale, "
+            "evidence_ids, status, provenance, created_at) VALUES (:id, :b, 'gap_action', 't', "
+            "'r', :ev, 'accepted', '{}'::jsonb, now())",
+            {"id": uuid4(), "b": BRAND_ID, "ev": json.dumps(list(cited)[:1])},
+        )
+    reset_db_caches()
+
+
+def test_b3_i2_content_plan_creates_drafts_only_on_pg(integration_app: FastAPI) -> None:
+    """B3-I2 — ``POST /brain/content-plan`` ⇒ real ``content_items`` rows, every one
+    ``status='draft'`` with ``provenance.kind='ai_generated'`` and ``recommendation_id``;
+    ``approval_events`` stays **0**; the recommendation rows are ``materialized`` and point
+    at the item; one ``learning_signals`` row per item with no text."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        rows = _brain_evidence_rows(client, owner)
+        ev = rows[0]["id"]
+        payload = {
+            "items": [
+                {
+                    "title": f"منشور {i} [مُقاس]",
+                    "channel": "facebook" if i % 2 else "instagram",
+                    "body": f"نص المنشور رقم {i} [estimated] — زورونا اليوم.",
+                    "rationale": "الجمهور نشط صباحاً",
+                    "evidence_ids": [ev],
+                }
+                for i in range(8)
+            ]
+            + [{"title": "بلا دليل", "channel": "facebook", "body": "b", "evidence_ids": []}]
+        }
+        _brain_scripted_gateway(integration_app, payload)
+        res = client.post(f"{BRAIN_PG}/content-plan", headers=owner)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert len(body["items"]) == 7 and body["items_dropped"] == 2
+        assert all(i["status"] == "draft" for i in body["items"])
+        # the drafts are visible through the content API as plain drafts
+        listed = client.get(f"{API}/brands/{BRAND_ID}/content/items?status=draft", headers=owner)
+        assert listed.status_code == 200, listed.text
+        assert len(listed.json()["items"]) == 7
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+
+    items = _rows(
+        "SELECT id, status, channel FROM content_items WHERE brand_id = :b", {"b": BRAND_ID}
+    )
+    assert len(items) == 7 and {r[1] for r in items} == {"draft"}
+    assert {r[2] for r in items} == {"facebook_page", "instagram"}
+    assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
+    assert _run("SELECT COUNT(*) FROM publish_jobs", scalar=True) == 0
+    revisions = _rows(
+        "SELECT r.item_id, r.body, r.provenance::text FROM content_revisions r "
+        "JOIN content_items i ON i.id = r.item_id WHERE i.brand_id = :b "
+        "AND r.id = i.current_revision_id",
+        {"b": BRAND_ID},
+    )
+    assert len(revisions) == 7
+    recs = _rows(
+        "SELECT id, status, materialized_item_id, decided_by_user_id FROM brand_recommendations "
+        "WHERE brand_id = :b AND kind = 'content_plan_item'",
+        {"b": BRAND_ID},
+    )
+    assert len(recs) == 7 and {r[1] for r in recs} == {"materialized"}
+    assert {r[2] for r in recs} == {r[0] for r in items}
+    assert all(r[3] is not None for r in recs)
+    rec_ids = {str(r[0]) for r in recs}
+    for _, body_text, provenance_text in revisions:
+        provenance = json.loads(provenance_text)
+        assert provenance["kind"] == "ai_generated"
+        assert provenance["recommendation_id"] in rec_ids
+        assert provenance["prompt_version"] == "content_plan_v1"
+        assert "[estimated]" not in body_text
+    signals = _rows(
+        "SELECT purpose, signal, subject_id, features::text, prompt_version, model, "
+        "credential_mode FROM learning_signals WHERE brand_id = :b",
+        {"b": BRAND_ID},
+    )
+    assert len(signals) == 7 and {s[1] for s in signals} == {"materialized"}
+    assert {str(s[2]) for s in signals} == rec_ids
+    assert all(s[0] == "content_plan" and s[4] == "content_plan_v1" for s in signals)
+    assert all(s[5] == "scripted-pg" and s[6] == "platform" for s in signals)
+    for s in signals:
+        features = json.loads(s[3])
+        assert set(features) == {
+            "kind",
+            "evidence_count",
+            "measured",
+            "inferred",
+            "estimated",
+            "rationale_chars",
+            "channel",
+        }
+        assert "منشور" not in s[3]
+    columns = {
+        c
+        for (c,) in _rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'learning_signals'"
+        )
+    }
+    assert not columns & {"text", "body", "title", "rationale", "prompt", "output"}
+    reset_db_caches()
+
+
+def test_b3_i3_accept_dismiss_decisions_signals_and_reply_templates_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """B3-I3 — accept/dismiss on real rows: ``FOR UPDATE`` + CAS ⇒ exactly one decision,
+    actor + time stored (CHECK), a second decision ⇒ 409; ``reply_template`` accepted ⇒
+    ``brand_profiles.tone.reply_templates`` + an ``ai_suggested`` revision; one
+    ``learning_signals`` row per decision; VIEWER-visible provenance is the public subset."""
+    owner = _brain_owner(integration_app)
+    with TestClient(integration_app) as client:
+        rows = _brain_evidence_rows(client, owner)
+        ev = rows[0]["id"]
+        payload = {
+            "summary": "s",
+            "strengths": [],
+            "gaps": [],
+            "recommendations": [
+                {"kind": "gap_action", "title": "a", "rationale": "r", "evidence_ids": [ev]},
+                {"kind": "gap_action", "title": "d", "rationale": "r", "evidence_ids": [ev]},
+                {
+                    "kind": "reply_template",
+                    "title": "t",
+                    "rationale": "r",
+                    "evidence_ids": [ev],
+                    "template": "أهلاً بك في نايل كوفي! كيف نساعدك؟",
+                },
+            ],
+        }
+        _brain_scripted_gateway(integration_app, payload)
+        created = client.post(f"{BRAIN_PG}/diagnose", headers=owner).json()["recommendations"]
+        by_title = {r["title"]: r["id"] for r in created}
+        accept = client.post(f"{BRAIN_PG}/recommendations/{by_title['a']}/accept", headers=owner)
+        assert accept.status_code == 200, accept.text
+        assert accept.json()["status"] == "accepted"
+        dismiss = client.post(f"{BRAIN_PG}/recommendations/{by_title['d']}/dismiss", headers=owner)
+        assert dismiss.status_code == 200 and dismiss.json()["status"] == "dismissed"
+        again = client.post(f"{BRAIN_PG}/recommendations/{by_title['a']}/dismiss", headers=owner)
+        assert again.status_code == 409 and again.json()["detail"]["status"] == "accepted"
+        missing = client.post(f"{BRAIN_PG}/recommendations/{uuid4()}/accept", headers=owner)
+        assert missing.status_code == 404
+        # reply template: nothing in the profile before accept …
+        before = client.get(f"{BRAIN_PG}/profile", headers=owner).json()
+        assert before["tone"]["reply_templates"] == [] and before["version"] == 1
+        tpl = client.post(f"{BRAIN_PG}/recommendations/{by_title['t']}/accept", headers=owner)
+        assert tpl.status_code == 200, tpl.text
+        after = client.get(f"{BRAIN_PG}/profile", headers=owner).json()
+        assert after["tone"]["reply_templates"] == ["أهلاً بك في نايل كوفي! كيف نساعدك؟"]
+        revisions = client.get(f"{BRAIN_PG}/profile/revisions", headers=owner).json()["items"]
+        assert revisions[0]["source"] == "ai_suggested"
+        # the list route: status filter + the MANAGER projection still carries provenance
+        proposed = client.get(f"{BRAIN_PG}/recommendations?status=proposed", headers=owner)
+        assert proposed.status_code == 200 and proposed.json()["items"] == []
+        everything = client.get(f"{BRAIN_PG}/recommendations", headers=owner).json()["items"]
+        assert {r["status"] for r in everything} == {"accepted", "dismissed"}
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+
+    decided = _rows(
+        "SELECT status, decided_by_user_id, decided_at FROM brand_recommendations "
+        "WHERE brand_id = :b",
+        {"b": BRAND_ID},
+    )
+    assert sorted(r[0] for r in decided) == ["accepted", "accepted", "dismissed"]
+    assert all(r[1] is not None and r[2] is not None for r in decided)
+    signals = _rows(
+        "SELECT signal, purpose, prompt_version, model, credential_mode FROM learning_signals "
+        "WHERE brand_id = :b ORDER BY created_at",
+        {"b": BRAND_ID},
+    )
+    assert [s[0] for s in signals] == ["accepted", "dismissed", "accepted"]
+    assert all(
+        s[1:] == ("brand_diagnosis", "brand_diagnosis_v1", "scripted-pg", "platform")
+        for s in signals
+    )
+    profile_rows = _rows(
+        "SELECT version, tone::text FROM brand_profiles WHERE brand_id = :b", {"b": BRAND_ID}
+    )
+    assert len(profile_rows) == 1 and profile_rows[0][0] == 1
+    assert json.loads(profile_rows[0][1])["reply_templates"] == [
+        "أهلاً بك في نايل كوفي! كيف نساعدك؟"
+    ]
+    assert (
+        _run(
+            "SELECT source FROM brand_profile_revisions WHERE brand_id = :b ORDER BY version DESC "
+            "LIMIT 1",
+            {"b": BRAND_ID},
+            scalar=True,
+        )
+        == "ai_suggested"
+    )
+    with pytest.raises(IntegrityError, match="ck_learning_signals_signal"):
+        _run(
+            "INSERT INTO learning_signals (id, brand_id, purpose, subject_id, signal, features, "
+            "prompt_version, model, credential_mode, created_at) VALUES (:id, :b, 'x', :s, "
+            "'liked', '{}'::jsonb, 'v', 'm', 'platform', now())",
+            {"id": uuid4(), "b": BRAND_ID, "s": uuid4()},
+        )
+    reset_db_caches()
+
+
+def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
+    """B3-M1 — ``head ⇒ 0011 ⇒ head``: the two 0012 tables disappear and come back with
+    their named constraints and indexes; 0011's tables survive the round-trip."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    tables_0012 = {"brand_recommendations", "learning_signals"}
+
+    def _public_tables() -> set[str]:
+        return {t for (t,) in _rows("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+
+    assert tables_0012 <= _public_tables()
+    command.downgrade(cfg, "0011")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0011"
+    assert not tables_0012 & _public_tables()
+    assert {"brand_profiles", "brand_evidence", "ai_cost_log"} <= _public_tables()
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert tables_0012 <= _public_tables()
+    constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
+    assert {
+        "ck_brand_recommendations_kind",
+        "ck_brand_recommendations_status",
+        "ck_brand_recommendations_rationale_len",
+        "ck_brand_recommendations_evidence_ids",
+        "ck_brand_recommendations_decision_actor",
+        "ck_brand_recommendations_materialized_iff",
+        "fk_brand_recommendations_item",
+        "ck_learning_signals_signal",
+        "ck_learning_signals_credential_mode",
+        "ck_learning_signals_features",
+    } <= constraints
+    indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
+    assert {
+        "ix_brand_recommendations_brand_status_created",
+        "ix_learning_signals_brand_purpose_created",
+    } <= indexes

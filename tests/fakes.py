@@ -1268,7 +1268,61 @@ class FakeIndependentWrites:
 
 
 # -------------------------------------------------------------- brand brain --
-class FakeBrandBrainRepository:
+class _FakeRecommendationMixin:
+    """B-3 half of :class:`FakeBrandBrainRepository` (status CAS mirrors the PG UPDATE)."""
+
+    recommendations: dict[UUID, Any]
+    learning_signals: list[Any]
+    locked_recommendations: list[UUID]
+
+    async def add_recommendations(self, rows):  # noqa: ANN001, ANN201
+        for rec in rows:
+            self.recommendations[rec.id] = rec
+        return rows
+
+    async def list_recommendations(self, brand_id: UUID, *, status, limit):  # noqa: ANN001, ANN201
+        rows = [r for r in self.recommendations.values() if r.brand_id == brand_id]
+        if status is not None:
+            rows = [r for r in rows if r.status == status]
+        rows.sort(key=lambda r: (r.created_at, r.id.int), reverse=True)
+        return rows[:limit]
+
+    async def get_recommendation_for_update(self, brand_id: UUID, recommendation_id: UUID):  # noqa: ANN201
+        rec = self.recommendations.get(recommendation_id)
+        if rec is None or rec.brand_id != brand_id:
+            return None
+        self.locked_recommendations.append(recommendation_id)
+        return rec
+
+    async def decide_recommendation(  # noqa: ANN201
+        self,
+        recommendation_id: UUID,
+        *,
+        expected_status: str,
+        new_status: str,
+        actor_user_id: UUID,
+        decided_at,  # noqa: ANN001
+        materialized_item_id: UUID | None = None,
+    ):
+        rec = self.recommendations.get(recommendation_id)
+        if rec is None or rec.status != expected_status:
+            return False
+        self.recommendations[recommendation_id] = rec.model_copy(
+            update={
+                "status": new_status,
+                "decided_by_user_id": actor_user_id,
+                "decided_at": decided_at,
+                "materialized_item_id": materialized_item_id,
+            }
+        )
+        return True
+
+    async def add_learning_signal(self, signal):  # noqa: ANN001, ANN201
+        self.learning_signals.append(signal)
+        return signal
+
+
+class FakeBrandBrainRepository(_FakeRecommendationMixin):
     """In-memory :class:`BrandBrainRepository` (SPRINT-10 B-1). Mirrors the PG constraints
     that the service relies on: UNIQUE(brand_id, name) on competitors (``IntegrityError``),
     CAS on ``brand_profiles.version``, keyset order ``observed_at DESC, id DESC``."""
@@ -1289,6 +1343,10 @@ class FakeBrandBrainRepository:
         self.cost_entries: list[CostEntry] = []
         self.locked_brands: list[UUID] = []
         self.insert_profile_error: Exception | None = None
+        # B-3
+        self.recommendations: dict[UUID, Any] = {}
+        self.learning_signals: list[Any] = []
+        self.locked_recommendations: list[UUID] = []
 
     # profile
     async def get_profile(self, brand_id: UUID):  # noqa: ANN201

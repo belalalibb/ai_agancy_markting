@@ -14,6 +14,8 @@ from src.modules.brand_brain.domain.models import (
     CostDay,
     CostEntry,
     Evidence,
+    LearningSignal,
+    Recommendation,
 )
 
 EvidenceCursor = tuple[datetime, UUID]
@@ -78,6 +80,38 @@ class BrandBrainRepository(Protocol):
 
     # -------------------------------------------------------------- cost ----
     async def cost_by_day(self, brand_id: UUID, *, since: datetime) -> list[CostDay]: ...
+
+    # --------------------------------------------------- recommendations ----
+    async def add_recommendations(self, rows: list[Recommendation]) -> list[Recommendation]: ...
+
+    async def list_recommendations(
+        self, brand_id: UUID, *, status: str | None, limit: int
+    ) -> list[Recommendation]:
+        """Newest first."""
+        ...
+
+    async def get_recommendation_for_update(
+        self, brand_id: UUID, recommendation_id: UUID
+    ) -> Recommendation | None:
+        """``SELECT … FOR UPDATE`` — a decision is taken on a locked row (A-3 pattern)."""
+        ...
+
+    async def decide_recommendation(
+        self,
+        recommendation_id: UUID,
+        *,
+        expected_status: str,
+        new_status: str,
+        actor_user_id: UUID,
+        decided_at: datetime,
+        materialized_item_id: UUID | None = None,
+    ) -> bool:
+        """Compare-and-set ``proposed ⇒ accepted|dismissed|materialized``; ``True`` iff one
+        row changed."""
+        ...
+
+    # -------------------------------------------------- learning signals ----
+    async def add_learning_signal(self, signal: LearningSignal) -> LearningSignal: ...
 
 
 class CostLogWriter(Protocol):

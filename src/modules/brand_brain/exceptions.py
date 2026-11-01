@@ -57,3 +57,46 @@ class RefreshRateLimitedError(BrandBrainError):
     def __init__(self, retry_after_seconds: int) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__("refresh rate limited")
+
+
+# ------------------------------------------------------------------- B-3 --
+class BrainRateLimitedError(BrandBrainError):
+    """``POST /brain/diagnose`` / ``/content-plan`` — 5/hour/brand."""
+
+    error = "brain_rate_limited"
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("brain rate limited")
+
+
+class BrainBudgetExceededError(BrandBrainError):
+    """The shared daily AI token budget (``DailyBudget``) is exhausted ⇒ 429."""
+
+    error = "generation_budget_exceeded"
+
+    def __init__(self, budget: int, used: int, resets_in_seconds: int) -> None:
+        self.budget = budget
+        self.used = used
+        self.resets_in_seconds = resets_in_seconds
+        super().__init__("daily token budget exceeded")
+
+
+class InvalidModelOutputError(BrandBrainError):
+    """The model answered with JSON that does not match the template schema ⇒ 502."""
+
+    error = "ai_invalid_output"
+
+
+class RecommendationNotFoundError(BrandBrainError):
+    error = "recommendation_not_found"
+
+
+class RecommendationAlreadyDecidedError(BrandBrainError):
+    """``accept`` / ``dismiss`` on a row that is no longer ``proposed`` ⇒ 409."""
+
+    error = "recommendation_already_decided"
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(f"recommendation is {status}")
