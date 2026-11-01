@@ -29,7 +29,12 @@ from src.modules.whatsapp.domain.models import (
 from src.modules.whatsapp.exceptions import CredentialsInvalidError, PhoneNumberInUseError
 from src.modules.whatsapp.service import WhatsAppAccountService
 from src.modules.whatsapp.suggestions import resolve_language
-from src.modules.whatsapp.webhook import MAX_BODY_BYTES, WEBHOOK_PATH, compute_signature
+from src.modules.whatsapp.webhook import (
+    MAX_BODY_BYTES,
+    MAX_PHONE_NUMBER_IDS,
+    WEBHOOK_PATH,
+    compute_signature,
+)
 
 from tests.conftest import AGENCY_ID, BRAND_ID, OWNER_ID, STRANGER_ID, USER_BY_TENANT, grant
 from tests.fakes import FakeStore, FakeWhatsAppRepository
@@ -180,13 +185,13 @@ def test_a5_u1_body_over_one_mib_is_413_with_zero_repository_calls(
 ) -> None:
     counters.reset()
     calls = {"n": 0}
-    original = wa_repo.get_account_by_phone_number_id
+    original = wa_repo.get_accounts_by_phone_number_ids
 
-    async def _counting(pid: str):  # noqa: ANN202
+    async def _counting(pids: list[str]):  # noqa: ANN202
         calls["n"] += 1
-        return await original(pid)
+        return await original(pids)
 
-    monkeypatch.setattr(wa_repo, "get_account_by_phone_number_id", _counting)
+    monkeypatch.setattr(wa_repo, "get_accounts_by_phone_number_ids", _counting)
     raw = b"{" + b" " * MAX_BODY_BYTES + b"}"  # 1 MiB + 2 bytes
     with TestClient(wa_app) as client:
         res = client.post(
@@ -231,6 +236,104 @@ def test_a5_u2_malformed_signature_header_is_401_before_json_loads(
     assert loads["n"] == 0
     assert len(wa_repo.messages) == 0
     assert counters["wa_webhook_rejected"] == 1
+
+
+# ------------------------------------------------------------- SPRINT-11 B6 (A-1) ---
+def _multi_pnid_payload(ids: list[str]) -> bytes:
+    """One ``entry`` per id, compact JSON (≈95 B/id ⇒ 10,000 ids ≈ 950 KiB < 1 MiB)."""
+    base = load_payload("inbound_text")
+    base["entry"] = [
+        {"id": "WABA_" + "x" * 12, "changes": [{"value": {"metadata": {"phone_number_id": pid}}}]}
+        for pid in ids
+    ]
+    return json.dumps(base, separators=(",", ":")).encode()
+
+
+def _install_repo_spy(wa_repo: FakeWhatsAppRepository, monkeypatch) -> dict[str, int]:  # noqa: ANN001
+    calls = {"n": 0}
+    original = wa_repo.get_accounts_by_phone_number_ids
+
+    async def _counting(pids: list[str]):  # noqa: ANN202
+        calls["n"] += 1
+        return await original(pids)
+
+    monkeypatch.setattr(wa_repo, "get_accounts_by_phone_number_ids", _counting)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        [],
+        [f"PNID_{i}" for i in range(MAX_PHONE_NUMBER_IDS + 1)],
+        [f"PNID_{i:05d}" for i in range(10_000)],  # ≈950 KiB payload (B6 probe)
+    ],
+    ids=["zero-ids", "nine-ids", "ten-thousand-ids"],
+)
+def test_b6_u1_id_cardinality_outside_1_to_8_is_400_with_zero_queries(
+    wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, wa_account, monkeypatch, ids: list[str]
+) -> None:
+    """B6 — ``len(ids) == 0`` or ``> MAX_PHONE_NUMBER_IDS`` ⇒ 400 ``webhook_rejected`` before
+    any repository read; the (valid) signature is never needed."""
+    counters.reset()
+    calls = _install_repo_spy(wa_repo, monkeypatch)
+    raw = _multi_pnid_payload(ids)
+    assert len(raw) < MAX_BODY_BYTES
+    with TestClient(wa_app) as client:
+        res = client.post(
+            WEBHOOK,
+            content=raw,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": compute_signature(APP_SECRET, raw),
+            },
+        )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == {"error": "webhook_rejected"}
+    assert calls["n"] == 0
+    assert counters["wa_webhook_rejected"] == 1
+
+
+def test_b6_u2_eight_unknown_ids_use_one_query_then_401(
+    wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, wa_account, monkeypatch
+) -> None:
+    """B6 — exactly ``MAX_PHONE_NUMBER_IDS`` ids ⇒ one bulk lookup; no match ⇒ 401."""
+    counters.reset()
+    calls = _install_repo_spy(wa_repo, monkeypatch)
+    ids = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS)]
+    raw = _multi_pnid_payload(ids)
+    with TestClient(wa_app) as client:
+        res = client.post(
+            WEBHOOK,
+            content=raw,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": "sha256=" + "0" * 64,
+            },
+        )
+    assert res.status_code == 401
+    assert res.json()["detail"] == {"error": "webhook_unverified"}
+    assert calls["n"] == 1
+
+
+def test_b6_u3_known_id_among_eight_still_verifies_and_processes(
+    wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, wa_account, monkeypatch
+) -> None:
+    """B6 — the real account id mixed with 7 unknown ids: one query, HMAC verified, 200."""
+    calls = _install_repo_spy(wa_repo, monkeypatch)
+    ids = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS - 1)] + [PHONE_NUMBER_ID]
+    raw = _multi_pnid_payload(ids)
+    with TestClient(wa_app) as client:
+        res = client.post(
+            WEBHOOK,
+            content=raw,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": compute_signature(APP_SECRET, raw),
+            },
+        )
+    assert res.status_code == 200, res.text
+    assert calls["n"] == 1
 
 
 # ------------------------------------------------------------------------ A6-U1 ---

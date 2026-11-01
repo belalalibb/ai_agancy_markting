@@ -9,6 +9,7 @@ OWNER-only cost aggregation, and the internal evidence collection (``measured/in
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -60,6 +61,33 @@ COMPETITOR_REFRESH_WINDOW_SECONDS = 3600
 GRAPH_PUBLIC_CONFIDENCE = Decimal("0.70")  # public counters of a page we do not own
 PUBLIC_WEB_CONFIDENCE = Decimal("0.40")  # a page excerpt — what they *say*, not what they do
 PUBLIC_SUMMARY_CHARS = 600
+COMPETITOR_NOTES_MAX = 600  # ``Competitor.notes`` max_length
+_FETCH_STATUS_RE = re.compile(r"(?:^|\n)unavailable:\d{3}$")
+
+
+def with_fetch_status(notes: str, status: int | None) -> str:
+    """A-4: keep the owner's notes, replace/append one trailing ``unavailable:<status>`` line
+    (``None`` clears it). Never exceeds :data:`COMPETITOR_NOTES_MAX`."""
+    base = _FETCH_STATUS_RE.sub("", notes).rstrip()
+    if status is None:
+        return base
+    marker = f"unavailable:{status}"
+    room = COMPETITOR_NOTES_MAX - len(marker) - 1
+    base = base[:room].rstrip()
+    return f"{base}\n{marker}" if base else marker
+
+
+@dataclass(frozen=True)
+class CompetitorRefreshOutcome:
+    """A-4: ``rows`` are the evidence rows written; ``unavailable_status`` is set when the
+    public page answered with an error status (no ``brand_evidence`` row for it)."""
+
+    rows: list[Evidence]
+    unavailable_status: int | None = None
+
+    @property
+    def status(self) -> str:
+        return "unavailable" if self.unavailable_status is not None else "ok"
 
 
 @dataclass(frozen=True)
@@ -170,16 +198,24 @@ class CompetitorRefresher:
 
     async def refresh(
         self, competitor: Competitor, *, now: datetime | None = None
-    ) -> list[Evidence]:
+    ) -> CompetitorRefreshOutcome:
         now = now or datetime.now(tz=UTC)
         rows: list[Evidence] = []
+        unavailable_status: int | None = None
         if competitor.facebook_page_id and self._graph is not None:
             rows.extend(await self._graph_rows(competitor, now))
         if competitor.website_host and self._web is not None:
-            rows.append(await self._web_row(competitor, now))
+            web_row, unavailable_status = await self._web_row(competitor, now)
+            if web_row is not None:
+                rows.append(web_row)
         saved = await self._repo.add_evidence(rows)
+        if competitor.website_host and self._web is not None:
+            # A-4: the error status lives on the competitor (``notes``), not in evidence.
+            notes = with_fetch_status(competitor.notes, unavailable_status)
+            if notes != competitor.notes:
+                await self._repo.set_competitor_notes(competitor.id, notes=notes)
         await self._repo.touch_competitor_refreshed(competitor.id, at=now)
-        return saved
+        return CompetitorRefreshOutcome(rows=saved, unavailable_status=unavailable_status)
 
     async def _graph_rows(self, competitor: Competitor, now: datetime) -> list[Evidence]:
         page_id = competitor.facebook_page_id or ""
@@ -235,7 +271,9 @@ class CompetitorRefresher:
             )
         return rows
 
-    async def _web_row(self, competitor: Competitor, now: datetime) -> Evidence:
+    async def _web_row(
+        self, competitor: Competitor, now: datetime
+    ) -> tuple[Evidence | None, int | None]:
         host = competitor.website_host or ""
         ref = f"public_web:{host}"
         assert self._web is not None  # noqa: S101 - guarded by the caller
@@ -245,11 +283,15 @@ class CompetitorRefresher:
             )
         except PublicFetchRefused as exc:
             logger.info(
-                "brain competitor public fetch refused: competitor=%s reason=%s",
+                "brain competitor public fetch refused: competitor=%s reason=%s status=%s",
                 competitor.id,
                 exc.reason,
+                exc.status,
             )
-            return self._row(
+            if exc.reason == "unavailable":
+                # A-4: an error page is not evidence — no row, status recorded on the competitor.
+                return None, exc.status or 0
+            row = self._row(
                 competitor,
                 "public_page_summary",
                 {"unavailable": exc.reason},
@@ -257,13 +299,14 @@ class CompetitorRefresher:
                 ref,
                 now,
             )
+            return row, None
         value = {
             "status": page.status,
             "title": page.title,
             "meta_description": page.meta_description,
             "excerpt": page.text_excerpt[:PUBLIC_SUMMARY_CHARS],
         }
-        return self._row(competitor, "public_page_summary", value, "public_web", ref, now)
+        return self._row(competitor, "public_page_summary", value, "public_web", ref, now), None
 
     @staticmethod
     def _row(
@@ -405,7 +448,9 @@ class BrandBrainService:
             raise CompetitorNotFoundError()
         return competitor
 
-    async def refresh_competitor(self, brand_id: UUID, competitor_id: UUID) -> list[Evidence]:
+    async def refresh_competitor(
+        self, brand_id: UUID, competitor_id: UUID
+    ) -> CompetitorRefreshOutcome:
         """B-2: Graph (app token) + legal public page ⇒ ``estimated`` rows; 10/h/brand.
         The limiter is hit *after* the 404 check so probing ids does not burn the quota."""
         competitor = await self.get_competitor(brand_id, competitor_id)

@@ -148,6 +148,26 @@ def test_put_profile_requires_if_match_and_bumps_version(
     assert revisions["items"][0]["snapshot"]["tone"]["banned_phrases"] == ["cheap", "best ever"]
 
 
+def test_a5_viewer_revisions_never_carry_banned_phrases_or_reply_templates(
+    brain_client: TestClient, owner_headers, viewer_headers, manager_headers
+) -> None:
+    """A-5 (B3): ``GET /profile/revisions`` applies the same projection as ``GET /profile`` —
+    VIEWER's response does not contain the text ``banned_phrases`` / ``reply_templates`` at
+    all; OWNER and MANAGER (PRIVATE_ROLES) still see both keys."""
+    assert _put(brain_client, owner_headers, version=1).status_code == 200
+    owner = brain_client.get(f"{BRAIN}/profile/revisions", headers=owner_headers)
+    viewer = brain_client.get(f"{BRAIN}/profile/revisions", headers=viewer_headers)
+    manager = brain_client.get(f"{BRAIN}/profile/revisions", headers=manager_headers)
+    assert owner.status_code == viewer.status_code == manager.status_code == 200
+    assert "banned_phrases" in owner.text and "reply_templates" in owner.text
+    assert "banned_phrases" in manager.text
+    assert "banned_phrases" not in viewer.text
+    assert "reply_templates" not in viewer.text
+    snap = viewer.json()["items"][0]["snapshot"]
+    assert snap["tone"]["formality"] == owner.json()["items"][0]["snapshot"]["tone"]["formality"]
+    assert [r["version"] for r in viewer.json()["items"]] == [1]
+
+
 def test_put_profile_cas_race_and_first_insert_race(
     brain_client: TestClient, owner_headers, brain_repo: FakeBrandBrainRepository
 ) -> None:

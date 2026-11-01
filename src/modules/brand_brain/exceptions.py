@@ -92,6 +92,14 @@ class RecommendationNotFoundError(BrandBrainError):
     error = "recommendation_not_found"
 
 
+class ProfileConflictError(BrandBrainError):
+    """A-6 (B4): two concurrent ``accept`` calls for a ``reply_template`` on a brand without a
+    profile both tried the first ``INSERT`` — the loser gets 409 instead of 500
+    («الملف أُنشئ للتو — أعد المحاولة»)."""
+
+    error = "profile_conflict"
+
+
 class RecommendationAlreadyDecidedError(BrandBrainError):
     """``accept`` / ``dismiss`` on a row that is no longer ``proposed`` ⇒ 409."""
 

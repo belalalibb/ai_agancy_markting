@@ -25,6 +25,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
@@ -48,6 +49,7 @@ from src.modules.brand_brain.exceptions import (
     BrainBudgetExceededError,
     BrainRateLimitedError,
     InvalidModelOutputError,
+    ProfileConflictError,
     RecommendationAlreadyDecidedError,
     RecommendationNotFoundError,
 )
@@ -70,6 +72,7 @@ CONTENT_PLAN_BUCKET = "brain:content-plan"
 CONTENT_PLAN_LIMIT = 5
 CONTENT_PLAN_WINDOW_SECONDS = 3600
 EVIDENCE_WINDOW_ROWS = 60
+MAX_REPLY_TEMPLATE_LEN = 600  # A-6: a ``reply_template`` body beyond this is dropped at parse
 
 # Server-side grade tags (Arabic, directive §2 B-3). Any bracketed tag the model wrote —
 # Arabic or English — is removed before ours is appended.
@@ -104,7 +107,7 @@ class _RecommendationOut(_Out):
     title: str = Field(min_length=1, max_length=MAX_RECOMMENDATION_TITLE)
     rationale: str = Field(min_length=1, max_length=MAX_RATIONALE_CHARS)
     evidence_ids: list[UUID] = Field(default_factory=list)
-    template: str | None = Field(default=None, max_length=600)
+    template: str | None = None  # A-6: length policed in diagnose() (drop, not 502)
 
 
 class DiagnosisOutput(_Out):
@@ -113,7 +116,23 @@ class DiagnosisOutput(_Out):
     summary: str = Field(min_length=1, max_length=400)
     strengths: list[_Point] = Field(default_factory=list, max_length=20)
     gaps: list[_Point] = Field(default_factory=list, max_length=20)
-    recommendations: list[_RecommendationOut] = Field(default_factory=list, max_length=20)
+    # A-7: raw rows — validated one by one in ``diagnose`` so an unknown ``kind`` drops that
+    # recommendation only (WARNING + ``dropped``) instead of failing the whole diagnosis.
+    recommendations: list[Any] = Field(default_factory=list, max_length=20)
+
+
+def parse_recommendations(raw: list[Any]) -> tuple[list[_RecommendationOut], int]:
+    """Per-recommendation validation (A-7): ``(valid, dropped)``."""
+    valid: list[_RecommendationOut] = []
+    dropped = 0
+    for row in raw:
+        try:
+            valid.append(_RecommendationOut.model_validate(row))
+        except (ValidationError, TypeError):
+            kind = row.get("kind") if isinstance(row, dict) else type(row).__name__
+            logger.warning("advisor: dropped recommendation (invalid shape) kind=%r", kind)
+            dropped += 1
+    return valid, dropped
 
 
 class _PlanItemOut(_Out):
@@ -307,15 +326,21 @@ class BrandAdvisor:
         strengths = _points(out.strengths)
         gaps = _points(out.gaps)
         recommendations: list[Recommendation] = []
-        dropped = 0
-        for rec in out.recommendations:
+        parsed, dropped = parse_recommendations(out.recommendations)  # A-7
+        for rec in parsed:
             cited = _cited(rec.evidence_ids)
             if not cited or len(recommendations) >= MAX_DIAGNOSIS_RECOMMENDATIONS:
                 dropped += 1
                 continue
             rec_provenance = dict(provenance)
-            if rec.kind == "reply_template" and rec.template:
-                rec_provenance["template"] = strip_fake_tags(rec.template)[:600]
+            if rec.kind == "reply_template":
+                template = strip_fake_tags(rec.template or "")
+                if not template or len(template) > MAX_REPLY_TEMPLATE_LEN:
+                    # A-6: never store an empty / oversized template body.
+                    logger.warning("advisor: dropped reply_template (empty)")
+                    dropped += 1
+                    continue
+                rec_provenance["template"] = template
             recommendations.append(
                 Recommendation(
                     brand_id=brand_id,
@@ -516,7 +541,11 @@ class BrandAdvisor:
                     "updated_at": now,
                 }
             )
-            await self._repo.insert_profile(updated)
+            try:
+                await self._repo.insert_profile(updated)
+            except IntegrityError as exc:
+                # A-6: a concurrent accept created the profile a moment ago ⇒ 409, not 500.
+                raise ProfileConflictError() from exc
         else:
             templates = [t for t in profile.tone.reply_templates if t != template]
             templates = ([*templates, template])[-MAX_REPLY_TEMPLATES:]

@@ -53,6 +53,10 @@ class BrandBrainRepository(Protocol):
 
     async def touch_competitor_refreshed(self, competitor_id: UUID, *, at: datetime) -> None: ...
 
+    async def set_competitor_notes(self, competitor_id: UUID, *, notes: str) -> None:
+        """A-4: persist the ``unavailable:<status>`` marker (or its removal) in ``notes``."""
+        ...
+
     async def lock_brand_for_competitors(self, brand_id: UUID) -> None:
         """Serialise competitor inserts per brand (``SELECT … FOR UPDATE`` on ``brands``)."""
         ...

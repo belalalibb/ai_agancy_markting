@@ -970,6 +970,13 @@ class FakeWhatsAppRepository:
             (a for a in self.accounts.values() if a.phone_number_id == phone_number_id), None
         )
 
+    async def get_accounts_by_phone_number_ids(self, phone_number_ids: list[str]):  # noqa: ANN201
+        return [
+            a
+            for a in self.accounts.values()
+            if a.phone_number_id in phone_number_ids and a.status.value == "active"
+        ]
+
     async def list_active_accounts(self):  # noqa: ANN201
         return [a for a in self.accounts.values() if a.status.value == "active"]
 
@@ -1410,6 +1417,10 @@ class FakeBrandBrainRepository(_FakeRecommendationMixin):
     async def touch_competitor_refreshed(self, competitor_id: UUID, *, at) -> None:  # noqa: ANN001
         c = self.competitors[competitor_id]
         self.competitors[competitor_id] = c.model_copy(update={"refreshed_at": at})
+
+    async def set_competitor_notes(self, competitor_id: UUID, *, notes: str) -> None:
+        c = self.competitors[competitor_id]
+        self.competitors[competitor_id] = c.model_copy(update={"notes": notes})
 
     async def lock_brand_for_competitors(self, brand_id: UUID) -> None:
         self.locked_brands.append(brand_id)

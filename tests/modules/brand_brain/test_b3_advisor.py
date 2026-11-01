@@ -242,6 +242,138 @@ def test_diagnose_without_evidence_still_answers_but_stores_nothing(
     assert "(no evidence collected yet)" in gateway.calls[0].user
 
 
+# ------------------------------------------------------- SPRINT-11 A-7 (B5) --
+def test_a7_unknown_recommendation_kind_is_dropped_not_502(
+    b3_client: TestClient,
+    gateway: ScriptedGateway,
+    brain_repo: FakeBrandBrainRepository,
+    owner_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A-7 (B5): three recommendations, one with ``kind="content_plan_item"`` ⇒ 200 with the
+    two valid ones stored, ``dropped == 1`` (and the legacy ``recommendations_dropped``), a
+    WARNING logged — the diagnosis is not lost to one bad row."""
+    m = _evidence(brain_repo, "measured")
+    ok = {"kind": "gap_action", "title": "ok", "rationale": "x", "evidence_ids": [str(m.id)]}
+    gateway.payload = {
+        "summary": "s",
+        "strengths": [],
+        "gaps": [],
+        "recommendations": [
+            ok,
+            {**ok, "kind": "content_plan_item", "title": "unknown kind"},
+            {**ok, "kind": "tone_adjustment", "title": "ok2"},
+        ],
+    }
+    with caplog.at_level("WARNING", logger="src.modules.brand_brain.advisor"):
+        res = b3_client.post(f"{BRAIN}/diagnose", headers=owner_headers)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [r["title"] for r in body["recommendations"]] == ["ok", "ok2"]
+    assert body["dropped"] == 1 and body["recommendations_dropped"] == 1
+    assert len(brain_repo.recommendations) == 2
+    assert any("dropped recommendation" in r.message for r in caplog.records)
+
+
+def test_a7_all_recommendations_invalid_is_200_with_empty_list(
+    b3_client: TestClient,
+    gateway: ScriptedGateway,
+    brain_repo: FakeBrandBrainRepository,
+    owner_headers: dict[str, str],
+) -> None:
+    m = _evidence(brain_repo, "measured")
+    gateway.payload = {
+        "summary": "s",
+        "strengths": [],
+        "gaps": [],
+        "recommendations": [
+            {"kind": "nope", "title": "a", "rationale": "x", "evidence_ids": [str(m.id)]},
+            "not even an object",
+            {"kind": "gap_action", "title": "", "rationale": "x", "evidence_ids": [str(m.id)]},
+        ],
+    }
+    res = b3_client.post(f"{BRAIN}/diagnose", headers=owner_headers)
+    assert res.status_code == 200, res.text
+    assert res.json()["recommendations"] == [] and res.json()["dropped"] == 3
+    assert brain_repo.recommendations == {}
+
+
+# ------------------------------------------------------- SPRINT-11 A-6 (B4) --
+@pytest.mark.parametrize("template", ["", "   ", "x" * 601], ids=["empty", "blank", "overlong"])
+def test_a6_empty_or_overlong_reply_template_is_dropped_at_parse(
+    b3_client: TestClient,
+    gateway: ScriptedGateway,
+    brain_repo: FakeBrandBrainRepository,
+    owner_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+    template: str,
+) -> None:
+    m = _evidence(brain_repo, "measured")
+    gateway.payload = {
+        "summary": "s",
+        "strengths": [],
+        "gaps": [],
+        "recommendations": [
+            {
+                "kind": "reply_template",
+                "title": "t",
+                "rationale": "x",
+                "evidence_ids": [str(m.id)],
+                "template": template,
+            },
+            {"kind": "gap_action", "title": "keep", "rationale": "x", "evidence_ids": [str(m.id)]},
+        ],
+    }
+    with caplog.at_level("WARNING", logger="src.modules.brand_brain.advisor"):
+        res = b3_client.post(f"{BRAIN}/diagnose", headers=owner_headers)
+    assert res.status_code == 200, res.text
+    assert [r["kind"] for r in res.json()["recommendations"]] == ["gap_action"]
+    assert res.json()["dropped"] == 1
+    assert any("dropped reply_template (empty)" in r.message for r in caplog.records)
+
+
+def test_a6_reply_template_without_body_is_dropped_too(
+    b3_client: TestClient,
+    gateway: ScriptedGateway,
+    brain_repo: FakeBrandBrainRepository,
+    owner_headers: dict[str, str],
+) -> None:
+    m = _evidence(brain_repo, "measured")
+    gateway.payload = {
+        "summary": "s",
+        "strengths": [],
+        "gaps": [],
+        "recommendations": [
+            {"kind": "reply_template", "title": "t", "rationale": "x", "evidence_ids": [str(m.id)]}
+        ],
+    }
+    res = b3_client.post(f"{BRAIN}/diagnose", headers=owner_headers)
+    assert res.status_code == 200 and res.json()["recommendations"] == []
+    assert res.json()["dropped"] == 1
+
+
+def test_a6_concurrent_first_profile_insert_is_409_profile_conflict(
+    b3_client: TestClient, brain_repo: FakeBrandBrainRepository, owner_headers: dict[str, str]
+) -> None:
+    """A-6 (B4): the brand has no profile yet; our ``insert_profile`` loses the race (unique
+    violation) ⇒ 409 ``profile_conflict`` — not 500 — and the recommendation stays
+    ``proposed`` so the caller can simply retry."""
+    from sqlalchemy.exc import IntegrityError
+
+    assert BRAND_ID not in brain_repo.profiles
+    rid = _proposed(brain_repo, "reply_template", template="أهلاً")
+    brain_repo.insert_profile_error = IntegrityError("brand_profiles_pkey", {}, Exception())
+    res = b3_client.post(f"{BRAIN}/recommendations/{rid}/accept", headers=owner_headers)
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"] == {"error": "profile_conflict"}
+    assert brain_repo.recommendations[rid].status == "proposed"
+    assert brain_repo.learning_signals == []
+
+    retry = b3_client.post(f"{BRAIN}/recommendations/{rid}/accept", headers=owner_headers)
+    assert retry.status_code == 200, retry.text
+    assert brain_repo.profiles[BRAND_ID].tone.reply_templates == ["أهلاً"]
+
+
 @pytest.mark.parametrize(
     "raw",
     ['{"summary": 5}', '{"strengths": "x"}', "[]", '{"summary": "ok", "recommendations": 1}'],

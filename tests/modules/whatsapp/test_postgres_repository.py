@@ -179,6 +179,7 @@ async def test_account_create_update_and_reads() -> None:
             StubResult(scalar=None),  # get_account (missing)
             StubResult(scalar=row),  # get_account_by_phone_number_id
             StubResult(scalars=[row]),  # list_active_accounts
+            StubResult(scalars=[row]),  # get_accounts_by_phone_number_ids (B6)
             StubResult(),  # set_account_status
         ]
     )
@@ -207,9 +208,18 @@ async def test_account_create_update_and_reads() -> None:
     assert "whatsapp_accounts.phone_number_id =" in compiled(session.executed[3][0])
     assert [a.id for a in await repo.list_active_accounts()] == [ACCOUNT_ID]
     assert "whatsapp_accounts.status =" in compiled(session.executed[4][0])
+    # B6: one ``IN (...)`` query filtered on active status; empty input ⇒ no query at all.
+    assert [a.id for a in await repo.get_accounts_by_phone_number_ids(["10001", "x"])] == [
+        ACCOUNT_ID
+    ]
+    bulk_sql = compiled(session.executed[5][0])
+    assert "whatsapp_accounts.phone_number_id IN" in bulk_sql
+    assert "whatsapp_accounts.status =" in bulk_sql
+    assert await repo.get_accounts_by_phone_number_ids([]) == []
+    assert len(session.executed) == 6
 
     await repo.set_account_status(ACCOUNT_ID, AccountStatus.DISABLED, now=NOW)
-    status_sql = compiled(session.executed[5][0])
+    status_sql = compiled(session.executed[6][0])
     assert status_sql.startswith("UPDATE whatsapp_accounts")
     assert "status=" in status_sql and "updated_at=" in status_sql
 

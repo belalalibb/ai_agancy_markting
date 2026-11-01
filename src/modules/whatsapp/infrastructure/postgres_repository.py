@@ -175,6 +175,19 @@ class PostgresWhatsAppRepository:
         )
         return _account(row) if row is not None else None
 
+    async def get_accounts_by_phone_number_ids(
+        self, phone_number_ids: list[str]
+    ) -> list[WhatsAppAccount]:
+        if not phone_number_ids:
+            return []
+        rows = await self._session.scalars(
+            select(WhatsAppAccountRow).where(
+                WhatsAppAccountRow.phone_number_id.in_(phone_number_ids),
+                WhatsAppAccountRow.status == AccountStatus.ACTIVE.value,
+            )
+        )
+        return [_account(r) for r in rows]
+
     async def list_active_accounts(self) -> list[WhatsAppAccount]:
         rows = await self._session.scalars(
             select(WhatsAppAccountRow).where(

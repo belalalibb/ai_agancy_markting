@@ -102,14 +102,25 @@ class RevisionPublic(_Strict):
     snapshot: dict[str, Any]
 
     @classmethod
-    def from_domain(cls, rev: BrandProfileRevision) -> RevisionPublic:
+    def from_domain(cls, rev: BrandProfileRevision, *, private: bool) -> RevisionPublic:
+        """A-5 (B3): the same projection as ``ProfilePublic`` — a non-private reader never
+        sees ``tone.banned_phrases`` nor ``reply_templates`` inside a revision snapshot."""
+        snapshot: dict[str, Any] = dict(rev.snapshot)
+        if not private:
+            tone = snapshot.get("tone")
+            if isinstance(tone, dict):
+                tone = dict(tone)
+                tone.pop("banned_phrases", None)
+                tone.pop("reply_templates", None)  # stored under ``tone`` (see Tone model)
+                snapshot["tone"] = tone
+            snapshot.pop("reply_templates", None)  # tolerate a top-level key as well
         return cls(
             id=rev.id,
             version=rev.version,
             source=rev.source,
             changed_by_user_id=rev.changed_by_user_id,
             created_at=rev.created_at,
-            snapshot=dict(rev.snapshot),
+            snapshot=snapshot,
         )
 
 
@@ -210,6 +221,7 @@ class RefreshResult(_Strict):
     collected: int
     metrics: list[str]
     observed_at: datetime
+    status: Literal["ok", "unavailable"] = "ok"  # A-4: public page answered >= 400
 
 
 # --------------------------------------------------------------------- cost --
@@ -256,6 +268,7 @@ class DiagnosisPublic(_Strict):
     evidence_used: list[EvidenceUsedPublic]
     recommendations: list[RecommendationPublic]
     recommendations_dropped: int
+    dropped: int = 0  # A-7 (B5): literal name from the directive; equals recommendations_dropped
     prompt_version: str
 
 

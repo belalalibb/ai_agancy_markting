@@ -3305,6 +3305,66 @@ def test_b1_i1_signed_webhook_persists_inbound_and_dedupes_on_pg(
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
+# ============================================================ SPRINT-11 A-1 (B6) ===
+def _wa_multi_pnid_raw(ids: list[str]) -> bytes:
+    """Compact Meta-shaped payload with one ``entry`` per phone_number_id."""
+    body = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_" + "x" * 12,
+                "changes": [{"value": {"metadata": {"phone_number_id": p}}}],
+            }
+            for p in ids
+        ],
+    }
+    return json.dumps(body, separators=(",", ":")).encode()
+
+
+def test_b6_single_query_before_hmac(integration_app: FastAPI, integration_encryption) -> None:  # noqa: ANN001
+    """B6 — on PG: 8 unknown ids with an unsigned-shape header ⇒ at most ONE
+    ``whatsapp_accounts`` statement then 401; 9 ids ⇒ 400 with ZERO statements;
+    a ≈950 KiB body carrying 10,000 ids ⇒ 400 with ZERO statements (no HMAC, no DB)."""
+    from sqlalchemy import event
+    from src.core import database
+    from src.modules.whatsapp.webhook import MAX_PHONE_NUMBER_IDS
+
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    _wa_account_row(integration_encryption)
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        statements.append(statement)
+
+    bogus = {"Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + "0" * 64}
+    with TestClient(integration_app) as client:
+        engine = database.get_engine()
+        event.listen(engine.sync_engine, "before_cursor_execute", _count)
+        try:
+            eight = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS)]
+            res = client.post(WA_WEBHOOK, content=_wa_multi_pnid_raw(eight), headers=bogus)
+            assert res.status_code == 401, res.text
+            account_sql = [s for s in statements if "whatsapp_accounts" in s]
+            assert len(account_sql) <= 1, account_sql
+            assert len(statements) <= 1, statements
+
+            statements.clear()
+            nine = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS + 1)]
+            res = client.post(WA_WEBHOOK, content=_wa_multi_pnid_raw(nine), headers=bogus)
+            assert res.status_code == 400 and res.json()["detail"] == {"error": "webhook_rejected"}
+            assert statements == []
+
+            flood = _wa_multi_pnid_raw([f"PNID_{i:05d}" for i in range(10_000)])
+            assert 900 * 1024 < len(flood) < 1024 * 1024
+            res = client.post(WA_WEBHOOK, content=flood, headers=bogus)
+            assert res.status_code == 400 and res.json()["detail"] == {"error": "webhook_rejected"}
+            assert statements == []
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _count)
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
 # ================================================================ SPRINT-09 B-2 (M6) ===
 WA_BRAND = f"{API}/brands/{BRAND_ID}/whatsapp"
 WA_MESSAGES_PATH = f"/{WA_PHONE_NUMBER_ID}/messages"
@@ -4510,9 +4570,14 @@ def test_b2_i1_competitor_refresh_writes_estimated_rows_and_timestamp_on_pg(
     from src.modules.brand_brain.router import get_public_page_source
 
     owner = _brain_owner(integration_app)
+
     # Fresh robots cache per call ⇒ the second refresh re-reads the (now closed) robots.txt.
+    # A-2: ``rival.example`` has no DNS — inject a resolver that answers a public address.
+    async def _public_resolver(host: str, port: int) -> list[tuple]:  # noqa: ANN401
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
     integration_app.dependency_overrides[get_public_page_source] = lambda: PublicPageFetcher(
-        httpx.AsyncClient(), robots_cache=_RobotsCache()
+        httpx.AsyncClient(), robots_cache=_RobotsCache(), resolver=_public_resolver
     )
     page_json = {
         "id": "777000",

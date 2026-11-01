@@ -76,6 +76,7 @@ router = APIRouter(tags=["WhatsApp — webhook (public, signed)"])
 SIGNATURE_HEADER = "X-Hub-Signature-256"
 SIGNATURE_PATTERN = re.compile(r"^sha256=[0-9a-f]{64}$")
 MAX_BODY_BYTES = 1024 * 1024  # A-5: 1 MiB — Meta's real payloads are a few KiB
+MAX_PHONE_NUMBER_IDS = 8  # SPRINT-11 A-1 (B6): cap on distinct ids before any DB query
 _STATUS_MAP: dict[str, DeliveryStatus] = {
     "sent": DeliveryStatus.SENT,
     "delivered": DeliveryStatus.DELIVERED,
@@ -385,11 +386,16 @@ async def receive_webhook(
     except ValueError:
         payload = None
     phone_number_ids = extract_phone_number_ids(payload)
-    accounts: dict[str, WhatsAppAccount] = {}
-    for pid in phone_number_ids:
-        account = await repo.get_account_by_phone_number_id(pid)
-        if account is not None and account.status is AccountStatus.ACTIVE:
-            accounts[pid] = account
+    if not phone_number_ids or len(phone_number_ids) > MAX_PHONE_NUMBER_IDS:
+        # B6: shape/cardinality rejection before any DB round-trip (0 queries).
+        counters.increment("wa_webhook_rejected")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"error": "webhook_rejected"})
+    # B6: exactly one query for every id, before any decrypt/HMAC work.
+    accounts: dict[str, WhatsAppAccount] = {
+        account.phone_number_id: account
+        for account in await repo.get_accounts_by_phone_number_ids(phone_number_ids)
+        if account.status is AccountStatus.ACTIVE
+    }
     if not accounts:
         counters.increment("wa_webhook_rejected")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"error": "webhook_unverified"})

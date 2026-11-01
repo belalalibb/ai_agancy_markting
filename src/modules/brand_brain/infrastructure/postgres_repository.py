@@ -333,6 +333,13 @@ class PostgresBrandBrainRepository(_RecommendationMixin):
             .values(competitor_refreshed_at=at)
         )
 
+    async def set_competitor_notes(self, competitor_id: UUID, *, notes: str) -> None:
+        await self._session.execute(
+            update(BrandCompetitorRow)
+            .where(BrandCompetitorRow.id == competitor_id)
+            .values(notes=notes)
+        )
+
     async def lock_brand_for_competitors(self, brand_id: UUID) -> None:
         # ``FOR NO KEY UPDATE`` on the brand row: serialises the count-then-insert of
         # competitors per brand without blocking FK ``KEY SHARE`` takers (lesson of A-1).

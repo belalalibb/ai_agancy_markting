@@ -47,6 +47,7 @@ from src.modules.brand_brain.exceptions import (
     InvalidHostError,
     InvalidIfMatchError,
     InvalidModelOutputError,
+    ProfileConflictError,
     ProfileVersionConflictError,
     RecommendationAlreadyDecidedError,
     RecommendationNotFoundError,
@@ -298,6 +299,8 @@ def to_http(exc: BrandBrainError) -> HTTPException:
     elif isinstance(exc, RecommendationAlreadyDecidedError):
         code = status.HTTP_409_CONFLICT
         detail["status"] = exc.status
+    elif isinstance(exc, ProfileConflictError):
+        code = status.HTTP_409_CONFLICT  # A-6: retry — the profile was created concurrently
     else:
         code = status.HTTP_400_BAD_REQUEST
     return HTTPException(code, detail=detail, headers=headers)
@@ -382,14 +385,19 @@ async def put_profile(
 @router.get(
     f"{BRAIN_PREFIX}/profile/revisions",
     response_model=RevisionsPage,
-    summary="Profile revisions (newest first) — all roles",
+    summary="Profile revisions (newest first) — all roles (VIEWER without banned_phrases)",
 )
 async def list_revisions(
     brand_id: UUID, actor: CurrentUser, resolver: Resolver, service: Service
 ) -> RevisionsPage:
-    await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
-    revisions = await service.list_revisions(brand_id)
-    return RevisionsPage(items=[RevisionPublic.from_domain(r) for r in revisions])
+    role = await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
+    private = role in PRIVATE_ROLES  # A-5: same projection as GET /profile
+    return RevisionsPage(
+        items=[
+            RevisionPublic.from_domain(r, private=private)
+            for r in await service.list_revisions(brand_id)
+        ]
+    )
 
 
 # --------------------------------------------------------------- competitors --
@@ -472,12 +480,16 @@ async def refresh_competitor(
     as ``{"unavailable": reason}``; ``competitor_refreshed_at`` is bumped."""
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     try:
-        rows = await service.refresh_competitor(brand_id, competitor_id)
+        outcome = await service.refresh_competitor(brand_id, competitor_id)
     except BrandBrainError as exc:
         raise to_http(exc) from exc
+    rows = outcome.rows
     observed = rows[0].observed_at if rows else datetime.now(tz=UTC)
     return RefreshResult(
-        collected=len(rows), metrics=[r.metric for r in rows], observed_at=observed
+        collected=len(rows),
+        metrics=[r.metric for r in rows],
+        observed_at=observed,
+        status=outcome.status,  # type: ignore[arg-type]
     )
 
 
@@ -615,6 +627,7 @@ async def diagnose(
             RecommendationPublic.from_domain(r, private=private) for r in result.recommendations
         ],
         recommendations_dropped=result.recommendations_dropped,
+        dropped=result.recommendations_dropped,
         prompt_version=result.prompt_version,
     )
 
