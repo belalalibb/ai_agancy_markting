@@ -55,3 +55,10 @@
 - مراجعة المخطط أثبتت سبع نتائج غير مانعة بمِجسّ حي (E1–E5, F1, F2 — `sprints/SPRINT-11_REVIEW.md`) ⇒ تُغلق في **SPRINT-11.1 Part A**.
 - **SPRINT-11.1 صدر** في `CURRENT_DIRECTIVE.md`: Part A الإغلاقات ⇒ Part B كتالوج المزودين (D-077: `ai_providers`/`ai_models`/`ai_routing` + هجرة 0015 + تسعير رموز/صوت + بدائل مرتّبة + `FEATURE_PROVIDER_CATALOG_ENABLED`) ⇒ Part C `/api/v1/admin/ai/*` (11 مساراً + probe) ⇒ `PROTECTED_ROUTE_COUNT` 77.
 - نظافة GitHub: حُذفت فروع `wip/*` السبعة بعد الدمج.
+
+### المحطة 10: 2 نوفمبر 2026 — SPRINT-11.1 مقبول (كتالوج المزودين D-077 + تحكم الإدارة) وإصدار SPRINT-12 بتقسيم G6
+- **SPRINT-11.1** (A: إغلاق E1–E5/F1/F2 عبر منافذ يملكها المستهلك `CounterGuard` (D-016) + `--cov-precision=2`؛ B: `ai_providers`/`ai_models`/`ai_routing` + هجرة 0015 + `CatalogPriceTable` + `CatalogGatewayResolver` (fallback ≤ 3) + مفتاح قتل `FEATURE_PROVIDER_CATALOG_ENABLED`؛ C: `/api/v1/admin/ai/*` 11 مساراً + probe + Zero-Secret + `REMOVABILITY.md`) — **مقبول ودُمج `ffb3f5d`** (PR #42؛ 121 تكامل + وحدات بلا DB ≥ 95% على PG 17.11 UTF8؛ `PROTECTED_ROUTE_COUNT` 77؛ المالك قبِل تجاوز صمّام الحجم +32 سطراً).
+- مراجعة المخطط أثبتت **ست فرضيات H1–H6 بمِجسّ حي** (`sprints/SPRINT-11.1_REVIEW.md` §3) — لا واحدة مانعة لأنها محصورة خلف الافتراضيين: 🔴 H1 `plan_inactive` ⇒ 500 للـwebhook مع فقدان الرسالة · 🟡 H2 أوراكل حصة قبل التفويض · 🟡 H3 Brand Brain يتجاوز الكتالوج · 🟠 H4 SSRF عبر DNS في `validate_provider_host` · 🟡 H5 `CatalogPriceTable` تتجاهل `enabled` · H6a–d ⇒ تُغلق في **SPRINT-12 Part A**.
+- **SPRINT-12 صدر** في `CURRENT_DIRECTIVE.md` بعد **بوابة G6**: خارطة POST_M7 (≈ 3,600–4,200 سطر) قُسمت إلى **12** خلفية (A إغلاقات ⇒ B حلقة الليد + `pulse` SQL + أسقف D-082 + هجرة 0016 ⇒ C `/d/{token}` + Batch Approval) و**12.1** واجهة L1 الست + Umami + Playbooks. قرار `[DECISION]` H1: webhook موقَّع ⇒ 200 دائماً؛ الصادر ⇒ 402 `entitlement_plan_inactive`.
+- 🔴 **حظر تشغيلي حتى دمج SPRINT-12 Part A:** لا تفعيل للكتالوج، لا `PLATFORM_ADMIN_USER_IDS`، لا `suspend` لعلامة لها webhook حيّ.
+- نظافة GitHub: حُذف `wip/sprint11.1-chain` و`wip/sprint11.1-squash`.
