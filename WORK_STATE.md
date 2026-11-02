@@ -79,7 +79,7 @@
 
 ## 3. المهمة النشطة الحالية (Active Task)
 
-- **معرف المهمة:** **`SPRINT-12-CLOSURES-LEAD-LOOP-PULSE`** — `ISSUED` · يبدأ المنفذ من `main` @ **SHA دمج PR التخطيط** (يُسجَّل في §6) · ثلاثة كوميتات **A** (إغلاق H1–H6 — يُدفع وحده أولاً) ⇒ **B** (هجرة 0016 + lead loop + `pulse` + أسقف D-082) ⇒ **C** (`/d/{token}` + Batch Approval) + docs.
+- **معرف المهمة:** **`SPRINT-12-CLOSURES-LEAD-LOOP-PULSE`** — `ISSUED` · يبدأ المنفذ من `main` @ **`0efaa92`** (دمج PR #43) · ثلاثة كوميتات **A** (إغلاق H1–H6 — يُدفع وحده أولاً) ⇒ **B** (هجرة 0016 + lead loop + `pulse` + أسقف D-082) ⇒ **C** (`/d/{token}` + Batch Approval) + docs.
 - **السابق:** `SPRINT-11.1-PROVIDER-CATALOG` **مقبول ومدموج** `main` @ `ffb3f5d` (A `67dceb4` · B `4c396c8` · C `2d26c28` · docs `9d944ce`).
 - **وثيقة التوجيه المعتمدة:** [`CURRENT_DIRECTIVE.md`](./CURRENT_DIRECTIVE.md) (SPRINT-12، 2026-11-02؛ 12 معياراً).
 - **قرار `[DECISION]` H1:** webhook موقَّع ⇒ **200 دائماً** + تخزين + علامة `plan_inactive`؛ كل مسار صادر ⇒ **402 `entitlement_plan_inactive`** (لا 429).
@@ -119,6 +119,7 @@
 
 | التاريخ | الوكيل | الفرع | الكوميت | ما تم تأكيده | الخطوة التالية |
 |---|---|---|---|---|---|
+| 2026-11-02 | المخطط | `main` | `0efaa92` (دمج PR [#43](https://github.com/belalalibb/ai_agancy_markting/pull/43)) | **نقطة الاستئناف المؤكدة:** `SPRINT_12_ISSUED` على `main`؛ `verify_hub` ✅ 57 وثيقة؛ 0 فرق في `src/ tests/ alembic/`. **SHA بداية المنفذ لـSPRINT-12 = `0efaa92`.** | المنفذ: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` ⇒ Part A (H1–H6) ويُدفع وحده. المالك: تدوير التوكن + الحظر التشغيلي الثلاثي. |
 | 2026-11-02 | المخطط | `main` | `ffb3f5d` (دمج PR [#42](https://github.com/belalalibb/ai_agancy_markting/pull/42)) | **نقطة الاستئناف المؤكدة:** SPRINT-11.1 مدموج في `main` بعد مراجعة PG 17 مستقلة؛ H1–H6 مُثبَتة حياً؛ `wip/sprint11.1-chain` و`wip/sprint11.1-squash` حُذفا. | المخطط يدمج PR التخطيط (مراجعة + SPRINT-12 + WORK_STATE). |
 | 2026-11-02 | المخطط | `genspark_ai_developer` (من `main` @ `7e7542e`، مُعاد تأسيسه على `ffb3f5d`) → PR التخطيط **يدمجه المخطط بنفسه** ⇒ `main` | مراجعة 11.1 / توجيه SPRINT-12 / هذا الكوميت (WORK_STATE + Hub) | **0 فرق في `src/ tests/ alembic/`**؛ `verify_hub.py` ✅. SPRINT-12 = A (H1–H6) ⇒ B (0016 + lead loop + pulse + caps) ⇒ C (`/d/{token}` + batch)؛ L1 ⇒ 12.1. | المنفذ يبدأ SPRINT-12 Part A من SHA دمج PR التخطيط. |
 | 2026-11-02 | المنفذ | `work/implementation` (من `main` @ `7e7542e`) → PR إلى `main` | A `67dceb4` / B `4c396c8` / C `2d26c28` / docs (هذا الكوميت) | **SPRINT-11.1 مُسلَّم:** A إغلاق E1–E5 + F1/F2 (consent في `content_plan`، trial للعلامة غير المخزَّنة + `CounterGuard` ports، نقل consent إلى `tenancy`، رموز الحجز، `referral_self_tenant` 422، `--cov-precision=2`)؛ B كتالوج D-077 (0015، `ProviderCatalog`/`CatalogPriceTable`/`CredentialResolver`/`CatalogGatewayResolver` + fallback، `netguard`، مفتاح قتل)؛ C `/admin/ai/*` 11 مساراً + probe + `catalog/REMOVABILITY.md` + عزل. 1,467/0/98.18% على PG 17 UTF8؛ 77 مساراً محمياً؛ greps 0؛ صمّام §5-6 موثَّق (+32 سطراً فعلياً). | **المخطط:** مراجعة مستقلة على PG 17 ⇒ `sprints/SPRINT-11.1_REVIEW.md` ⇒ قرار الصمّام ⇒ دمج ⇒ SPRINT-12. |
