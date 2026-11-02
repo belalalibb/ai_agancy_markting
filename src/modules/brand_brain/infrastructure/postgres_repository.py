@@ -206,6 +206,33 @@ class _RecommendationMixin:
         )
         return result.rowcount == 1
 
+    # SPRINT-12 C-1: the public share lives on ``brand_recommendations`` (hash only).
+    async def set_recommendation_share(
+        self,
+        brand_id: UUID,
+        recommendation_id: UUID,
+        *,
+        token_hash: str | None,
+        shared_at: datetime | None,
+    ) -> bool:
+        result = await self._session.execute(
+            update(BrandRecommendationRow)
+            .where(
+                BrandRecommendationRow.brand_id == brand_id,
+                BrandRecommendationRow.id == recommendation_id,
+            )
+            .values(share_token_hash=token_hash, shared_at=shared_at)
+        )
+        return result.rowcount == 1
+
+    async def get_recommendation_by_share_hash(self, token_hash: str) -> Recommendation | None:
+        row = await self._session.scalar(
+            select(BrandRecommendationRow).where(
+                BrandRecommendationRow.share_token_hash == token_hash
+            )
+        )
+        return _recommendation(row) if row is not None else None
+
     async def add_learning_signal(self, signal: LearningSignal) -> LearningSignal:
         self._session.add(
             LearningSignalRow(

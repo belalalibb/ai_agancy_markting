@@ -1378,6 +1378,32 @@ class _FakeRecommendationMixin:
         self.learning_signals.append(signal)
         return signal
 
+    # SPRINT-12 C-1: share hash kept beside the row (the PG columns are not on the model).
+    shares: dict[UUID, tuple[str, Any]]
+
+    async def set_recommendation_share(  # noqa: ANN201
+        self,
+        brand_id: UUID,
+        recommendation_id: UUID,
+        *,
+        token_hash: str | None,
+        shared_at,  # noqa: ANN001
+    ):
+        rec = self.recommendations.get(recommendation_id)
+        if rec is None or rec.brand_id != brand_id:
+            return False
+        if token_hash is None:
+            self.shares.pop(recommendation_id, None)
+        else:
+            self.shares[recommendation_id] = (token_hash, shared_at)
+        return True
+
+    async def get_recommendation_by_share_hash(self, token_hash: str):  # noqa: ANN201
+        for rec_id, (stored, _at) in self.shares.items():
+            if stored == token_hash:
+                return self.recommendations.get(rec_id)
+        return None
+
 
 class FakeBrandBrainRepository(_FakeRecommendationMixin):
     """In-memory :class:`BrandBrainRepository` (SPRINT-10 B-1). Mirrors the PG constraints
@@ -1403,6 +1429,7 @@ class FakeBrandBrainRepository(_FakeRecommendationMixin):
         self.recommendations: dict[UUID, Any] = {}
         self.learning_signals: list[Any] = []
         self.locked_recommendations: list[UUID] = []
+        self.shares: dict[UUID, tuple[str, Any]] = {}  # SPRINT-12 C-1
 
     # profile
     async def get_profile(self, brand_id: UUID):  # noqa: ANN201

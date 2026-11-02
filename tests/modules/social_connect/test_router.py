@@ -969,8 +969,13 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
         if "password" not in h.lower() and h not in byok_request_fields
     ]
     assert request_hits == [], request_hits
-    # And no path leaks a token-like segment either.
-    assert not any("token" in p.lower() for p in spec["paths"])
+    # And no path leaks a token-like segment either. SPRINT-12 C-1 is the single deliberate
+    # exception: ``GET /api/v1/d/{token}`` is the directive-named public *capability* link —
+    # 32 random bytes, only ``sha256`` stored, read-only watermarked card, revocable,
+    # 60/min/IP — not a credential of any account (``test_c1_public_share.py``).
+    share_link = "/api/v1/d/{token}"
+    assert share_link in spec["paths"]
+    assert not any("token" in p.lower() for p in spec["paths"] if p != share_link)
 
 
 # --------------------------------------------------- B7 / B-U11: logging ---

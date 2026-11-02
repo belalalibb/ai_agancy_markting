@@ -113,5 +113,22 @@ class BrandBrainRepository(Protocol):
         row changed."""
         ...
 
+    # ---------------------------------------------- public share (C-1) ----
+    async def set_recommendation_share(
+        self,
+        brand_id: UUID,
+        recommendation_id: UUID,
+        *,
+        token_hash: str | None,
+        shared_at: datetime | None,
+    ) -> bool:
+        """Stamp (``sha256`` hex, time) or clear (``None``, ``None``) the public share of one
+        recommendation of ``brand_id``; ``True`` iff one row changed."""
+        ...
+
+    async def get_recommendation_by_share_hash(self, token_hash: str) -> Recommendation | None:
+        """The recommendation whose ``share_token_hash`` equals ``token_hash`` (UNIQUE)."""
+        ...
+
     # -------------------------------------------------- learning signals ----
     async def add_learning_signal(self, signal: LearningSignal) -> LearningSignal: ...
