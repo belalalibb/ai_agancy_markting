@@ -1,6 +1,6 @@
 # 🎯 CURRENT DIRECTIVE — التوجيه التنفيذي النشط
 
-> **المصدر الوحيد للمهمة الحالية.** SPRINT-10 (M7 Brand Brain + N1–N5) رُوجع مستقلاً على PostgreSQL 17 و**قُبل ودُمج** (`main` @ `b633540`؛ التقرير في [`sprints/SPRINT-10_REVIEW.md`](./sprints/SPRINT-10_REVIEW.md) §4 يثبت B1–B6). خطة ما بعد M7 اعتمدها المالك (Q1–Q17 ⇒ D-075–D-082). هذا التوجيه = **SPRINT-11**: إغلاق B1–B6 بإثبات على PG 17، ثم الطبقة المالية الصحيحة (D-075)، ثم طبقة الباقات/التفعيل (D-073) مع عقد القابلية الآمنة للإزالة (D-076). **كتالوج المزودين وتحكم الإدارة الكامل (D-077) = SPRINT-11.1** يصدر فور قبول هذا السبرنت (قرار تقسيم الحجم — انظر §1-ب).
+> **المصدر الوحيد للمهمة الحالية.** SPRINT-11 رُوجع مستقلاً على PostgreSQL 17.11 UTF8 و**قُبل ودُمج** (`main` @ `8fbbe8c`؛ التقرير [`sprints/SPRINT-11_REVIEW.md`](./sprints/SPRINT-11_REVIEW.md) §3 يثبت E1–E5 + F1/F2 بمِجسّ حي). هذا التوجيه = **SPRINT-11.1**: **Part A** يغلق النتائج السبع المثبتة (خصوصية/مالية/حدود) ثم **Part B/C** يسلّم **كتالوج المزودين مع تحكّم الإدارة الكامل (D-077)**: هجرة `0015`، `/api/v1/admin/ai/*`، probe، تسعير رموز/صوت، مفتاح قتل، عقد إزالة (D-076).
 
 ---
 
@@ -8,167 +8,128 @@
 
 | البند | القيمة |
 |---|---|
-| **معرف المهمة** | `SPRINT-11-FINANCE-AND-ENTITLEMENTS` |
-| **النوع** | Part A: إغلاق B2–B6 (SSRF/robots/صفحات الخطأ · كشف الخاص في `/profile/revisions` · سباق `reply_template` + جسم فارغ · إسقاط التشخيص على نوع مجهول · سقف `phone_number_id` قبل HMAC) + متغيرات `AI_*` في `.env.template` ⇒ Part B: المالية (B1 + D-075: نقل ملكية `ai_cost_log` إلى `ai_gateway`، هجرة 0013، `BudgetGuard.reserve/settle/refund`، fail-closed، سقف المنصة، حذف `UNION ALL`) ⇒ Part C: `entitlements` (D-073/D-078) + `platform_admin` + `learning_consent` (D-080) + إحالة CTWA (`wa_messages.referral`) + `referred_by_brand_id` + هجرة 0014 + عقد Safe Removability (D-076) |
+| **معرف المهمة** | `SPRINT-11.1-PROVIDER-CATALOG` |
+| **النوع** | Part A: إغلاق E1 (consent في `content_plan`) · E2/E2c (`check_counter` + حدود trial للعلامة غير المخزَّنة) · E3/F2 (نقل `PATCH /learning-consent` إلى `tenancy` + إزالة استيراد البنية التحتية من `whatsapp/webhook.py`) · E4 (رموز الحجز) · E5 (رفض الإحالة الذاتية للمستأجر) · F1 (دقة بوابة التغطية) ⇒ Part B: `ai_providers`/`ai_models`/`ai_routing` + هجرة `0015` + `ProviderCatalog` + `CatalogPriceTable` + `CatalogGatewayResolver` + مفتاح القتل ⇒ Part C: `/api/v1/admin/ai/*` (CRUD + routing + probe) + `REMOVABILITY.md` + اختبار العزل |
 | **الحالة** | `ISSUED` — جاهز للتنفيذ فور دمج هذا التوجيه في `main` (المخطط يدمجه بنفسه — D-063) |
 | **يبدأ من** | `main` @ **SHA دمج هذا التوجيه** (يسجَّل في `WORK_STATE.md` §6). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
-| **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-11: B1–B6 closure + finance (D-075) + entitlements (D-073) + removability (D-076)` |
-| **الكوميتات** | **ثلاثة** متسلسلة، **كلٌّ منها يمرّ كاملاً على PG 17 UTF8** (الاختبارات + `ruff` + `alembic upgrade head`/`downgrade`): **A** (B2–B6 + `.env.template`، بلا هجرة) ⇒ **B** (المالية + هجرة 0013) ⇒ **C** (entitlements + هجرة 0014 + consent + referral + removability). كوميت رابع اختياري `docs(sprint-11): executor report` يملأ §6 فقط. |
-| **تبعيات جديدة** | **لا شيء**. لا مكتبة جديدة في `pyproject.toml`. `httpx` يبقى عبر `core/http.py` ومواضع `TID251` الحالية فقط. |
-| **الحجم المتوقع** | A ≈ 350 سطر كود + 600 اختبار · B ≈ 650 + 900 · C ≈ 900 + 1,000 ⇒ **≈ 1,900 سطر `src/`** (تحت سقف G6 البالغ ~2,000؛ لذلك خرج الكتالوج إلى SPRINT-11.1) |
-| **المسارات المحمية بعد السبرنت** | **`PROTECTED_ROUTE_COUNT == 66`** (62 + 4 جديدة في Part C — انظر §2-C-5) · العامة تبقى 6 |
-| **الهجرات** | `0013_ai_cost_log_ownership_and_reservations.py` (Part B) · `0014_entitlements_consent_referral.py` (Part C) · كلتاهما بـ`downgrade` فعلي مُختبَر |
-| **تاريخ الإصدار** | 2026-11-01 |
+| **الفرع المستهدف** | `work/implementation` ⇒ PR إلى `main` بعنوان `SPRINT-11.1: E1–E5 closure + provider catalog (D-077) + admin AI control` |
+| **الكوميتات** | **ثلاثة** متسلسلة، **كلٌّ منها يمرّ كاملاً على PG 17 UTF8**: **A** (الإغلاقات السبعة، بلا هجرة) ⇒ **B** (الكتالوج + هجرة 0015 + الحلّ الديناميكي + مفتاح القتل، **بلا مسارات جديدة**) ⇒ **C** (مسارات الإدارة + probe + removability). كوميت رابع اختياري `docs(sprint-11.1): executor report` يملأ §6 فقط. |
+| **تبعيات جديدة** | **لا شيء**. لا مكتبة جديدة في `pyproject.toml`. التشفير عبر `src/core/security.py::TokenEncryptionService` (MultiFernet) الموجود. |
+| **الحجم المتوقع** | A ≈ 200 سطر `src/` + 350 اختبار · B ≈ 800 + 700 · C ≈ 700 + 800 ⇒ **≤ ~1,800 سطر `src/`** (سقف G6). **صمّام:** إن تجاوز B+C معاً 1,600 سطر `src/` فعلياً، أنجز C بلا `routing` (مسارات المزودين/النماذج/probe فقط) وسجّل في §6. |
+| **المسارات المحمية بعد السبرنت** | **`PROTECTED_ROUTE_COUNT == 77`** = 66 + **11** (انظر §2-C-1) · العامة تبقى **6** (لا مسار عام جديد) · `PATCH /brands/{id}/learning-consent` **ينتقل** من `entitlements` إلى `tenancy` بلا تغيير في العدد |
+| **الهجرات** | `0015_ai_provider_catalog.py` (Part B) — ثلاثة جداول جديدة فقط؛ لا تعديل على جداول قائمة؛ `downgrade` فعلي مُختبَر `head ⇒ 0014 ⇒ head` |
+| **تاريخ الإصدار** | 2026-11-02 |
 
 ---
 
 ## 0. لماذا؟ (السياق الذي يجب أن يفهمه المنفذ قبل أي سطر)
 
-1. **B1 مُثبَت ×8:** نداء `content-plan` واحد بـ150 رمزاً يُحتسب 1,200 لأن `pg_budget.py::ai_token_usage_sources` يجمع `UNION ALL` من `content_revisions` + `wa_reply_drafts` + `ai_cost_log` **و** `CostLoggingGateway` تكتب نسخة ثانية. القرار (D-075): `ai_cost_log` **المصدر الوحيد**، ويُحذف `UNION ALL`. الصف يُكتب **قبل** النداء (`pending`) لا بعده — لأن الكتابة بعد النداء تضيع عند انقطاع الاتصال فيُستهلك المزوّد بلا سجل.
-2. **ملكية خاطئة:** `ai_gateway/cost_logging.py` يستورد `CostEntry`/`CostOutcome`/`CostLogWriter` من `brand_brain` ⇒ البوابة المشتركة تعتمد على وحدة أعمال (مخالفة D-016). تنتقل الملكية إلى `ai_gateway`.
-3. **Fail-closed:** في وضع `platform` (مفتاح المنصة) أي نموذج بلا سعر معروف (`PriceTable.estimate ⇒ None`) **يُرفض قبل النداء**. **`Decimal("0")` سعر صالح** (Groq المجاني، faster-whisper المحلي، `fake`) — المحظور فقط `None` (قرار المالك Q4). هذا يمنع فاتورة مفاجئة من نموذج أُضيف دون تسعير.
-4. **B6 خطر إنتاجي الآن:** طلب غير موقَّع بـ10,000 معرّف ⇒ 10,000 استعلام قبل أي HMAC. يُصلح **أولاً** في Part A.
-5. **B2-أ SSRF:** `127.0.0.1.nip.io` يُجلب فعلاً. يُصلح بـ`getaddrinfo` + `ip_address.is_global` **قبل** أي اتصال.
-6. **لا فئات أخطاء جديدة:** `ErrorCategory` في `contract.py` ثابت على 12 اسماً (`auth_expired, invalid_credential, rate_limited, quota_exceeded, model_unavailable, provider_unavailable, unsupported_capability, bad_request, content_rejected, timeout, retryable_server_error, non_retryable_error`) مع `RETRYABLE_DEFAULT` وتأكيد سلامته. الميزانية/التسعير **استثناءات طبقة `BudgetGuard`** لا فئات مزوّد.
-7. **عقد الإزالة (D-076):** كل وحدة جديدة (`entitlements` هنا) تشحن `REMOVABILITY.md` + اختبار عزل + مفتاح قتل — ليتمكن المالك من إلغاء أي قدرة دون إعادة بناء.
+1. **E1 خصوصية مُثبَتة على PG:** `PATCH /learning-consent {none}` ثم `POST /brain/content-plan` ⇒ **3 صفوف `learning_signals`** (`advisor.py:445–448` حلقة غير مشروطة). D-080 يقول «`none` ⇒ لا إشارة جديدة» — بلا استثناء للمسار.
+2. **E2c مالي مُثبَت:** علامة بلا صف `brand_entitlements` ترى `daily_tokens=20,000` في `GET /entitlement` بينما `PgEntitlementLimitsReader.check()` تُرجع `False` (`service.py:226`) فتُحكم بالإعداد **200,000**. العرض يجب أن يساوي الفرض. **قرار المخطط:** العلامة غير المخزَّنة **تُحكم بحدود `trial`** (20k/10/50)؛ الإعداد `ai_daily_token_budget_per_brand` يبقى **سقفاً احتياطياً** عند مفتاح القتل فقط.
+3. **E4 مالي:** الحجز (`budget_guard.py:254–270`) يكتب `estimated_cost_usd` بلا `prompt_tokens`/`completion_tokens` ⇒ `combined_usage_since` يحتسب **0** للصف `pending`/`ambiguous`. سقف المنصة بالدولار صحيح (يجمع `estimated_cost_usd`)؛ الخلل في رموز العلامة فقط.
+4. **E5 مالي:** `POST /brands {referred_by_brand_id: علامة من نفس المستأجر}` ⇒ **201** ⇒ إحالة ذاتية تُنتج `referral_credit` 10% (D-078).
+5. **E3/F2 حدود:** `PATCH /learning-consent` يعيش في `entitlements/router.py:107` (وحدة قابلة للإزالة) بينما العمود ملك `tenancy`؛ و`whatsapp/webhook.py:57` يستورد `tenancy.infrastructure.postgres_repository` مباشرة. D-016/D-076: المستهلك يملك العقد و`tenancy/dependencies.py` يملك التركيب.
+6. **F1 حوكمة:** `--cov-fail-under=95` بدقة 0 يقبل 94.57% (pytest-cov 7.1 يقرّب). بوابة `unit` في CI طبعت `FAIL … 94.57%` ونجحت. نصلح الدقة **ونرفع** تغطية الوحدات ≥ 95.00 فعلياً.
+7. **D-077 لماذا الآن:** اليوم إضافة نموذج = تعديل `.env` + إعادة تشغيل + `AI_PRICE_TABLE_JSON` يدوي. المالك يريد إضافة/تعطيل مزوّد أو نموذج أو سعر أو مسار بديل **في وقت التشغيل** دون نشر، ولكل غرض (`content_generation`, `whatsapp_suggest_reply`, `brand_diagnosis`, `content_plan`, مستقبلاً `audio_transcription`) مسار أساسي + بدائل مرتّبة. **المفاتيح لا تُعاد أبداً** عبر أي مسار (G4).
+8. **لا فئات أخطاء جديدة:** `ErrorCategory` ثابتة على 12 اسماً. أخطاء الكتالوج استثناءات طبقة `BudgetGuard`/`ProviderCatalog` بأسماء HTTP حرفية (§2-B-6).
+9. **قابلية الإزالة (D-076):** `FEATURE_PROVIDER_CATALOG_ENABLED=false` ⇒ السلوك الحالي حرفياً (`.env` `AI_*` + `AI_PRICE_TABLE_JSON`) دون لمس الجداول.
 
 ---
 
 ## 1. النطاق
 
 ### 1-أ. داخل النطاق
-- **Part A:** `brand_brain/public_fetch.py`، `brand_brain/schemas.py` (+`router.py` موضع الاستدعاء)، `brand_brain/service.py` و`advisor.py` (B4/B5)، `whatsapp/webhook.py` + `whatsapp/domain/repository.py` + `whatsapp/infrastructure/postgres_repository.py` (B6)، `.env.template`.
-- **Part B:** `ai_gateway/` (ملفات جديدة `cost_log.py` [النماذج + البروتوكول]، `infrastructure/pg_cost_log.py`، `budget_guard.py`؛ تعديل `cost_logging.py`، `budget.py`، `dependencies.py`، `infrastructure/pg_budget.py`)، `brand_brain/domain/models.py` + `domain/repository.py` + `infrastructure/orm.py` + `infrastructure/postgres_repository.py` (إزالة ما انتقل)، `brand_brain/router.py`/`advisor.py`، `content/service.py`/`router.py`/`dependencies.py`، `whatsapp/suggestions.py` + مواضع تركيبه، `core/config.py`، `alembic/versions/0013_*.py`، `publishing/scheduler.py` أو وحدة مجدول عامة (مهمة `settle_stale_reservations`).
-- **Part C:** وحدة جديدة `src/modules/entitlements/` كاملة، `tenancy/infrastructure/orm.py` + `domain/models.py` + `router.py` (عمودان + مسار consent)، `whatsapp/webhook.py` + `infrastructure/orm.py` (`referral`)، `auth/dependencies.py` (`PlatformAdmin`)، `core/config.py`، `src/main.py` (تركيب)، `alembic/versions/0014_*.py`، `pyproject.toml` (`per-file-ignores` موثَّق فقط إن لزم — انظر §2-C-8)، `tests/test_auth_guard.py` و`tests/modules/content/test_router.py` (العدد ⇒ 66).
+- Part A: الإغلاقات السبعة (E1, E2+E2c, E3+F2, E4, E5, F1).
+- Part B: هجرة `0015` + `ai_gateway/catalog/` (نموذج المجال، المستودع PG، `ProviderCatalog`، `CatalogPriceTable`، `CatalogGatewayResolver`) + تكامله مع `build_gateway`/`build_price_table`/`BudgetGuard` خلف مفتاح القتل.
+- Part C: `/api/v1/admin/ai/*` (11 مساراً) + probe + `ai_gateway/catalog/REMOVABILITY.md` + `tests/modules/ai_gateway/catalog/test_isolation.py`.
 
-### 1-ب. خارج النطاق (صراحةً — لا تُلمس)
-- **كتالوج المزودين** `ai_providers/ai_models/ai_routing`، مسارات `/api/v1/admin/ai/*`، `POST /admin/ai/probe`، `AI_ALLOW_LOCAL_PROVIDER_HOSTS`، نقل `platform_admin` إلى قاعدة البيانات ⇒ **SPRINT-11.1** (يصدره المخطط فور قبول SPRINT-11). السبب: مجموع A+B+C+الكتالوج ≈ 3,100 سطر `src/` > سقف G6.
-- أسقف واتساب 300/يوم ومفتاح القتل لكل رقم (D-082) ⇒ SPRINT-12. مهام التنظيف/الاحتفاظ (D-081) ⇒ SPRINT-13. `tenant_members`، `media_jobs`، بوابة الدفع، Benchmark Lab ⇒ V1.1.
-- أي واجهة أمامية، أي تبعية جديدة، أي تغيير في `ErrorCategory`، أي بث جماعي واتساب.
+### 1-ب. خارج النطاق (مؤجَّل صراحةً)
+- **لا** تنفيذ فعلي لـ`audio_transcription` (الغرض يُسجَّل في الكتالوج والتسعير فقط؛ لا مزوّد صوت).
+- **لا** واجهة ويب للإدارة؛ **لا** `users.is_platform_admin` في DB (يبقى `PLATFORM_ADMIN_USER_IDS`).
+- **لا** تغيير في `public_fetch.py` (SSRF) — `AI_ALLOW_LOCAL_PROVIDER_HOSTS` يخص نقاط نهاية المزودين فقط.
+- **لا** أسقف واتساب D-082، **لا** احتفاظ D-081 (SPRINT-12/13).
 
 ---
 
 ## 2. المواصفات
 
-> **قاعدة عامة لكل Part:** لا تغيير سلوكي خارج البنود المذكورة. أسماء الحقول/الأخطاء أدناه **حرفية**. كل بند له اختبار يذكر رقمه في اسم الدالة (`test_b6_…`, `test_b1_…`, `test_c3_…`).
+### Part A — الإغلاقات (كوميت `fix(sprint-11.1): close E1–E5 + F1/F2 (PG17-proven)`)
 
-### 2-A. Part A — إغلاق B2–B6 + بيئة AI (كوميت واحد، بلا هجرة)
-
-**A-1 (B6) — سقف المعرّفات + استعلام واحد قبل HMAC** — `whatsapp/webhook.py`:
-- ثابت `MAX_PHONE_NUMBER_IDS = 8` بجوار `MAX_BODY_BYTES`. ترتيب `POST receive_webhook` **الإلزامي**: (1) سقف الجسم 1 MiB ⇒ 413؛ (2) شكل الرأس `^sha256=[0-9a-f]{64}$` ⇒ 401؛ (3) `extract_phone_number_ids`؛ إن كان `len(ids) == 0` أو `> MAX_PHONE_NUMBER_IDS` ⇒ **400 `webhook_rejected`** (جسم ثابت `{"error":"webhook_rejected"}`، بلا تفاصيل — قبل أي استعلام)؛ (4) **استعلام واحد** `repo.get_accounts_by_phone_number_ids(ids) -> list[WhatsAppAccount]` (جديد في البروتوكول والتنفيذ: `WHERE phone_number_id = ANY(:ids) AND is_active`)؛ (5) فك التشفير + HMAC لكل حساب كما هو اليوم.
-- يُحذف الاستدعاء الحلقي لـ`get_account_by_phone_number_id` من المسار (يبقى في البروتوكول إن استُخدم في مكان آخر).
-- **اختبار PG إلزامي** `test_b6_single_query_before_hmac`: بنمط العدّاد الموجود (`event.listen(engine.sync_engine, "before_cursor_execute", …)` — `tests/integration/test_postgres_persistence.py:2301`) يثبت أن طلباً غير موقَّع بـ8 معرّفات ينفّذ **≤ 1** استعلام قبل الرفض 401، وأن 9 معرّفات ⇒ 400 بـ**0** استعلام، و950 KiB بـ10,000 معرّف ⇒ 400 بـ0 استعلام.
-
-**A-2 (B2-أ) — SSRF: حلّ DNS وفحص `is_global` قبل أي اتصال** — `brand_brain/public_fetch.py`:
-- أضف إلى `RefusalReason`: `"private_address"` و`"unavailable"`.
-- قبل أي طلب (الصفحة **و** robots): `infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)`؛ إن فشل ⇒ `PublicFetchRefused("host_not_allowed", host=host)`؛ لكل عنوان `ipaddress.ip_address(sockaddr[0])`: إن كان **أيّ** عنوان ليس `is_global` (يشمل loopback/private/link-local/reserved/multicast/unspecified، وIPv6 ULA `fd00::/8`) ⇒ `PublicFetchRefused("private_address", host=host)`. لا استثناءات ولا إعداد يعطّله في هذا السبرنت.
-- `getaddrinfo` يُحقن (`resolver: Callable | None` في مُنشئ `PublicFetcher`) ليُحاكى في الاختبارات بلا شبكة.
-- **اختبارات:** `127.0.0.1.nip.io`، `169.254.169.254.nip.io`، `10.0.0.1.nip.io`، `fd00--1.sslip.io`، مضيف يحلّ إلى عنوان عام + عنوان خاص (يُرفض)، IPv6 عام (يمرّ). **كل حالة رفض تثبت `respx.calls.call_count == 0`** (لا طلب شبكي البتة).
-- التحويلات (3xx) تبقى مرفوضة كما هي (`follow_redirects=False`).
-
-**A-3 (B2-ب) — robots.txt متدفق** — `_robots_for`: استخدم `client.stream("GET", …)` و`aiter_bytes()` مع إيقاف القراءة عند `ROBOTS_MAX_BYTES` (64 KiB) ثم `response.aclose()`؛ **اختبار:** جسم 4.7 MiB ⇒ لا تُقرأ سوى ≤ 64 KiB (عدّاد على المولّد) ولا يُرفع `too_large`. حالة robots ≠ 200 ⇒ تُعامل كـ«لا robots» كما هو اليوم **إلا** 401/403 ⇒ `robots_disallow` (محافظة).
-
-**A-4 (B2-ج) — صفحات الخطأ ليست أدلة** — `_get_page`: أي `status_code >= 400` ⇒ `PublicFetchRefused("unavailable", host=host)`. في `service.py::CompetitorRefresher.refresh` تُسجَّل الحالة في `brand_competitors.notes`/حقل الحالة الموجود كـ`unavailable:<status>` **ولا يُنشأ صف `brand_evidence`**. **اختبار:** 503 ⇒ صفر أدلة جديدة + الاستجابة 200 بحالة `unavailable`.
-
-**A-5 (B3) — إخفاء الخاص في المراجعات** — `schemas.py::RevisionPublic.from_domain(cls, rev, *, private: bool)`: إن لم يكن `private` يُحذف من النسخة `snapshot["tone"]["banned_phrases"]` و`snapshot["reply_templates"]` (مفاتيح تُحذف لا تُفرَّغ، ليطابق `ProfilePublic` حيث `None` ⇒ مخفي). `router.py` `GET …/profile/revisions`: `private=role in PRIVATE_ROLES`. **اختبار:** VIEWER لا يرى المفتاحين، OWNER يراهما، وحجم الاستجابة للـVIEWER لا يحتوي النص `banned_phrases`.
-
-**A-6 (B4) — سباق `reply_template` وجسم فارغ**:
-- `service.py` موضع `accept()` لنوع `reply_template` على علامة بلا ملف: التقط `IntegrityError` حول `insert_profile` ⇒ `ProfileConflictError` جديد في `exceptions.py` ⇒ **409 `profile_conflict`** (رسالة: «الملف أُنشئ للتو — أعد المحاولة»). **اختبار PG** `test_b4_concurrent_accept_is_409_not_500`: قبولان متزامنان (`asyncio.gather`) ⇒ `sorted(status) == [200, 409]`.
-- `advisor.py`: توصية `reply_template` بجسم فارغ/مسافات أو `len > MAX_REPLY_TEMPLATE_LEN` **تُسقَط** عند التحليل مع `logger.warning("advisor: dropped reply_template (empty)")` ولا تصل لقاعدة البيانات.
-
-**A-7 (B5) — نوع توصية مجهول لا يُسقط التشخيص** — `advisor.py` حول السطر 135: التحليل على مستوى **كل توصية**: `json.JSONDecodeError` للجسم كله ⇒ 502 `ai_invalid_output` (كما هو)؛ لكن `ValidationError` لتوصية واحدة (مثل `kind="content_plan_item"`) ⇒ تُسقَط تلك التوصية مع WARNING ويستمر الباقي؛ إن سقطت كلها ⇒ 200 بقائمة فارغة و`dropped: int` في الاستجابة. **اختبار:** مخرجات بـ3 توصيات إحداها مجهولة ⇒ 200 باثنتين و`dropped == 1`.
-
-**A-8 — `.env.template`**: أضف كتلة `# --- AI gateway (D-075) ---` بالمتغيرات **وقيمها الافتراضية المطابقة لـ`core/config.py`**: `AI_PROVIDER=fake`، `AI_PROVIDER_BASE_URL=https://api.openai.com/v1`، `AI_PROVIDER_API_KEY=`، `AI_DEFAULT_MODEL=gpt-4o-mini`، `AI_HTTP_TIMEOUT_SECONDS=30`، `AI_DAILY_TOKEN_BUDGET_PER_BRAND=200000`، `AI_PRICE_TABLE_JSON={"gpt-4o-mini":{"prompt_per_1k":"0.00015","completion_per_1k":"0.0006"}}` مع تعليق: «**في وضع `platform` يجب أن يحتوي الجدول على `AI_DEFAULT_MODEL` وإلا رُفض كل نداء بـ503 `ai_model_unpriced` (fail-closed، D-075)**». متغيرات Part B/C (`PLATFORM_DAILY_USD_CAP`, `FEATURE_ENTITLEMENTS_ENFORCED`, `PLATFORM_ADMIN_USER_IDS`) تُضاف في كوميتاتها. اختبار بسيط `test_env_template_lists_all_ai_settings` يقارن أسماء حقول `Settings` التي تبدأ بـ`ai_`/`platform_`/`feature_` بما في القالب.
-
-### 2-B. Part B — المالية (B1 + D-075) + هجرة 0013 (كوميت واحد نظيف)
-
-**B-1 — نقل الملكية إلى `ai_gateway`** (بلا تغيير سلوكي في هذه الخطوة):
-- جديد `src/modules/ai_gateway/cost_log.py`: `CostOutcome(StrEnum)` = `PENDING="pending"`, `OK="ok"`, `ERROR="error"`, `AMBIGUOUS="ambiguous"`؛ `CostEntry` (نفس حقول `brand_brain/domain/models.py:173` + `brand_id: UUID | None`)؛ `CostLogWriter(Protocol)` بـ`reserve(entry) -> UUID`، `settle(entry_id, *, prompt_tokens, completion_tokens, estimated_cost_usd, latency_ms, outcome, error_category)`، `refund(entry_id)`، `platform_usd_since(since) -> Decimal` (مجموع `estimated_cost_usd` حيث `credential_mode='platform'` و`outcome IN ('pending','ok','ambiguous')`)، `brand_tokens_since(brand_id, since) -> int`، `settle_stale(older_than) -> int`.
-- جديد `ai_gateway/infrastructure/pg_cost_log.py`: `AICostLogRow` (ينتقل من `brand_brain/infrastructure/orm.py:186`) + `PgCostLogWriter` (ينتقل من `brand_brain/infrastructure/postgres_repository.py:452` ويُوسَّع). **يُحذف** الأصلان من `brand_brain` وتُحدَّث كل الاستيرادات. `grep -rn "CostEntry\|CostOutcome\|CostLogWriter\|AICostLogRow" src/modules/brand_brain` ⇒ **لا نتائج إلا استيرادات من `ai_gateway`**.
-- `ai_gateway/infrastructure/pg_budget.py`: **يُحذف** `ai_token_usage_sources` و`UNION ALL` واستيرادات `ContentItemRow/ContentRevisionRow/ReplyDraftRow`؛ `PgBudgetUsageReader.combined_usage_since` يقرأ **`ai_cost_log` فقط** (`SUM(prompt_tokens + completion_tokens)` حيث `brand_id` و`created_at >= since` و`outcome IN ('pending','ok','ambiguous')`؛ `error` لا يُحتسب). `oldest_generation_since` من الجدول نفسه. **اختبار PG** `test_b1_content_plan_counts_once`: نداء 150 رمزاً ⇒ الاستهلاك المقروء **150** بالضبط (لا 1,200).
-
-**B-2 — هجرة `0013_ai_cost_log_ownership_and_reservations.py`**:
-- `ALTER COLUMN outcome TYPE VARCHAR(16)` (كان `String(8)`).
-- إسقاط `fk_ai_cost_log_brand_id` وإعادة إنشائه بـ`ondelete="SET NULL"` + `ALTER COLUMN brand_id DROP NOT NULL` (قرار D-081: السجل المالي يبقى 7 سنوات مجهَّلاً). **اختبار PG:** حذف علامة ⇒ صفوف `ai_cost_log` تبقى و`brand_id IS NULL`.
-- أعمدة جديدة: `settled_at TIMESTAMPTZ NULL`، `request_id VARCHAR(64) NULL` (معرّف الطلب للربط بالسجلات).
-- فهرس `ix_ai_cost_log_mode_created (credential_mode, created_at)` لسقف المنصة، وفهرس جزئي `ix_ai_cost_log_pending (created_at) WHERE outcome = 'pending'` لمهمة التسوية.
-- `downgrade` يعكس كل ذلك (يضع `brand_id` NOT NULL بعد حذف الصفوف اليتيمة صراحةً مع تعليق تحذيري). `alembic upgrade head && alembic downgrade 0012 && alembic upgrade head` يمرّ على PG 17.
-
-**B-3 — `BudgetGuard` (جديد `ai_gateway/budget_guard.py`)** — يلفّ أي `Gateway` ويحلّ محلّ `CostLoggingGateway` في كل المستهلكين:
+**A-1 (E1) — `brand_brain/advisor.py` `content_plan()`:** استبدل الحلقة `:445–448` بـ:
 ```python
-class BudgetGuard:
-    def __init__(self, inner: Gateway, *, writer: CostLogWriter, price_table: PriceTable,
-                 daily_budget: DailyBudget, platform_daily_usd_cap: Decimal,
-                 limits_reader: EntitlementLimitsReader | None = None,  # Part C يملؤه
-                 clock: Callable[[], datetime] = utcnow) -> None: ...
-    async def generate_text(self, request: GenerateTextRequest, *, ctx: BudgetContext) -> GenerateTextResponse: ...
+if await may_write_signal(self._consent, brand_id):
+    for rec, _ in items:
+        await self._repo.add_learning_signal(...)
 ```
-`BudgetContext(brand_id, purpose, credential_mode, prompt_version, request_id)`. الترتيب داخل `generate_text` **حرفي**:
-1. **تسعير مسبق:** `price = price_table.estimate(request.model, 1000, 1000)`؛ إن كان `None` و`credential_mode == "platform"` ⇒ `raise UnpricedModelError(model)` (**قبل أي كتابة أو نداء**). `Decimal("0")` يمرّ. في `user_key` ⇒ يمرّ بـ`unpriced=True`.
-2. **رموز العلامة:** `verdict = await daily_budget.check(brand_id, usage_reader=…)`؛ غير مسموح ⇒ `raise BrandBudgetExceededError(verdict)`.
-3. **سقف المنصة (platform فقط):** `used = await writer.platform_usd_since(now - 24h)`؛ إن `used >= platform_daily_usd_cap` ⇒ `raise PlatformBudgetExhaustedError(resets_in_seconds)`.
-4. **حدود الباقة (إن وُجد `limits_reader`):** `await limits_reader.check(brand_id, purpose)` ⇒ قد يرفع `EntitlementLimitError` (يُعرَّف البروتوكول هنا في `ai_gateway/budget.py`، التنفيذ في Part C).
-5. **احجز:** `entry_id = await writer.reserve(CostEntry(outcome=PENDING, prompt_tokens=None, completion_tokens=None, estimated_cost_usd=None, …))` عبر **`independent_session()`** (D-072) — يُثبَّت حتى لو فشل الطلب لاحقاً.
-6. **النداء:** `try: resp = await inner.generate_text(request)` ⇒ `settle(entry_id, …, outcome=OK, estimated_cost_usd=price_table.estimate(model, resp.prompt_tokens, resp.completion_tokens))`؛ `except AIGatewayError as e` ⇒ إن كانت الفئة تدل على أن النداء **لم يصل** للمزوّد (`invalid_credential`, `auth_expired`, `unsupported_capability`, `bad_request` قبل الإرسال) ⇒ `refund(entry_id)`؛ وإلا (`timeout`, `retryable_server_error`, `provider_unavailable`, …) ⇒ `settle(outcome=ERROR, error_category=e.category)` مع الرموز إن توفرت وإلا تقدير تحفظي = `request` prompt tokens المقدَّرة + 0.
-7. **فشل الكاتب نفسه:** في وضع `platform` **يُرفع** (`CostLogUnavailableError` ⇒ 503) — لا يُبتلع. في `user_key` يُسجَّل ERROR ويستمر النداء (المستخدم يدفع لمزوّده).
+الاختبار: `tests/integration/…::test_a1_content_plan_consent_none_writes_zero_signals_on_pg` (نفس سيناريو مِجسّ المخطط: consent `none` ⇒ 3 عناصر ⇒ `learning_signals` = 0 و`brand_recommendations` = 3 و`content_items` = 3) + وحدة في `tests/modules/brand_brain/`.
 
-الاستثناءات (كلها في `ai_gateway/budget_guard.py`، ترث `BudgetGuardError`): `UnpricedModelError`, `BrandBudgetExceededError`, `PlatformBudgetExhaustedError`, `EntitlementLimitError`, `CostLogUnavailableError`. **لا تُضاف إلى `ErrorCategory`.** التحويل في مستوى الـrouter/الخدمة لكل مستهلك (موحَّد عبر دالة `budget_error_to_http` في `ai_gateway/http_errors.py`): `BrandBudgetExceededError`/`EntitlementLimitError` ⇒ **429 `generation_budget_exceeded`** (الاسم الموجود؛ يُلحق `limit_kind: brand_daily_tokens | plan_<name>` في التفاصيل) + `Retry-After`؛ `PlatformBudgetExhaustedError` ⇒ **503 `platform_budget_exhausted`** + `Retry-After`؛ `UnpricedModelError` ⇒ **503 `ai_model_unpriced`**؛ `CostLogUnavailableError` ⇒ **503 `cost_log_unavailable`**.
+**A-2 (E2 + E2c) — `entitlements`:**
+- `PgEntitlementLimitsReader.check()` (`service.py:219–247`): عند `not stored` **لا** تُرجع `False`؛ بل تحكم بـ`BrandEntitlement.trial(...).limits.daily_tokens` (20,000). تُرجع `False` **فقط** عند مفتاح القتل. حدّث docstring C-1 و`test_plan_replaces_setting.py` (الحالات: مخزَّن نشط ⇒ حدود الباقة؛ غير مخزَّن ⇒ trial 20k؛ مفتاح القتل ⇒ الإعداد 200k؛ مخزَّن منتهٍ `is_active=False` ⇒ trial).
+- **`check_counter` تُستدعى فعلاً:** (أ) `content/service.py` قبل **الموافقة** (`approve`) على عنصر: `monthly_posts`؛ (ب) `whatsapp/webhook.py` عند **إنشاء محادثة جديدة** (أول رسالة واردة لمحادثة غير موجودة): `monthly_wa_conversations` — **لا يُرجع 429 من webhook موقَّع أبداً** (دلالة Meta retry): عند التجاوز تُخزَّن الرسالة وتُعلَّم المحادثة `quota_exceeded=true` في الحمولة/السجل ويُمنع `suggest-reply`/الإرسال الصادر لها بـ**402 `entitlement_quota_exceeded`** `{counter, limit, used}`. (ج) `whatsapp/router.py` suggest-reply + send: نفس الفحص.
+- الاعتماد عبر بروتوكول يملكه المستهلك (`content/entitlements_port.py::CounterGuard` و`whatsapp/entitlements_port.py::CounterGuard`؛ `None` ⇒ لا فحص) وتركيبه في `entitlements/dependencies.py` فقط (grep §4-3 رقم 4 يبقى 0).
+- اختبار PG: 10 موافقات تنجح، الـ11 ⇒ 402؛ 50 محادثة جديدة ثم الـ51 ⇒ webhook 200 + `suggest-reply` 402.
 
-**B-4 — التركيب:**
-- `core/config.py`: `platform_daily_usd_cap: Decimal = Decimal("25")` (ge 0)، `feature_budget_guard_strict: bool = True` (مفتاح قتل لفحص الـ`None` فقط؛ تعطيله يسجّل WARNING عند الإقلاع — D-076). أضفهما إلى `.env.template`.
-- `ai_gateway/dependencies.py`: `build_price_table(settings) -> PriceTable`: `PriceTable.from_json(settings.ai_price_table_json)` **مع إضافة** `fake-1 ⇒ (0, 0)` تلقائياً عندما `ai_provider == "fake"` (ليبقى CI يعمل بلا جدول). `get_budget_guard(...)` تبعية واحدة يستهلكها الجميع.
-- **كل المستهلكين** (`brand_brain/router.py:196–215` و`:249`، `brand_brain/advisor.py`، `content/service.py:137/:593`، `whatsapp/suggestions.py:83/:89`) يستبدلون `DailyBudget.check` المباشر و`CostLoggingGateway` بـ`BudgetGuard`. `grep -rn "DailyBudget(" src/modules/{content,whatsapp,brand_brain}` ⇒ **0 نتائج** (يبقى داخل `ai_gateway` فقط). `CostLoggingGateway` تُحذف أو تصبح غلافاً رقيقاً فوق `BudgetGuard` — لا مسارَي كتابة.
-- **مهمة `settle_stale_reservations`:** تُضاف إلى حلقة المجدول الموجودة (`scheduler_loop` في `main.py:110` / `publishing/scheduler.py`) كخطوة ثانية كل دورة: `writer.settle_stale(older_than = now − 2 × ai_http_timeout_seconds)` ⇒ `pending` ⇒ `ambiguous` مع `estimated_cost_usd` تحفظي = `price × (prompt_estimate + max_tokens)` إن توفر السعر. **اختبار PG:** صف `pending` عمره 90 ث مع مهلة 30 ⇒ يصبح `ambiguous` ويُحتسب في سقف المنصة.
+**A-3 (E3 + F2) — نقل الموافقة إلى `tenancy`:**
+- انقل `PATCH /brands/{brand_id}/learning-consent` من `entitlements/router.py:107–125` إلى `tenancy/router.py` (نفس الـschema `LearningConsentPatch`، نفس `GRANT_ROLES`، نفس الاستجابة `BrandOut`). احذف المسار من `entitlements`؛ حدّث `entitlements/REMOVABILITY.md:11` و`:36–39` (الموافقة لم تعد تعتمد على الوحدة).
+- `tenancy/dependencies.py`: أضف `build_brand_consent_reader(session) -> PostgresBrandConsentReader`؛ `whatsapp/webhook.py:57` و`:378–382` يستخدمانه بدل الاستيراد المباشر للبنية التحتية.
+- `PROTECTED_ROUTE_COUNT` يبقى 66 بعد A.
 
-**B-5 — اختبارات Part B الإلزامية (PG 17):** `test_b1_content_plan_counts_once`؛ `test_b1_reserve_row_exists_before_provider_call` (مزوّد وهمي يفحص الجدول أثناء النداء)؛ `test_b1_timeout_settles_error_not_refund`؛ `test_b1_invalid_credential_refunds`؛ `test_b1_unpriced_model_platform_503_no_call_no_row` (respx: 0 نداء، جدول: 0 صفوف)؛ `test_b1_zero_price_is_valid` (`Decimal("0")` ⇒ 200 وصف `ok` بتكلفة 0)؛ `test_b1_user_key_unpriced_passes_null_cost`؛ `test_b1_platform_cap_503_with_retry_after`؛ `test_b1_user_key_not_counted_in_platform_cap`؛ `test_b1_fake_provider_ci_path` (`AI_PROVIDER=fake` بلا `AI_PRICE_TABLE_JSON` ⇒ يعمل)؛ `test_b1_writer_failure_platform_503_user_key_continues`؛ `test_b1_brand_delete_sets_null`؛ `test_b1_settle_stale`؛ اختبارات التماثل القديمة (`test_a4_i1/i2`) تُحدَّث لتقرأ من المصدر الوحيد وتبقى خضراء.
+**A-4 (E4) — `budget_guard.py` الحجز:** `CostEntry(... prompt_tokens=prompt_estimate, completion_tokens=req.max_tokens, ...)` في `:257–270`. `_settle_ok` يستبدلهما بالفعلي (كما الآن)؛ `_settle_error` كما الآن؛ `_refund` يصفّرهما (`outcome=refunded`). `settle_stale` يبقي القيم (المحجوزة تُحتسب في `ambiguous`). اختبار PG: صف `pending` ⇒ `combined_usage_since` = `prompt_estimate + max_tokens` > 0؛ بعد `settle_stale` تبقى > 0؛ بعد `_settle_ok(150)` = 150. حدّث `test_b1_content_plan_counts_once` إن لزم (الاحتساب النهائي يبقى 150).
 
-### 2-C. Part C — `entitlements` (D-073/D-078) + `platform_admin` + `learning_consent` (D-080) + إحالة CTWA + هجرة 0014 + Safe Removability (D-076)
+**A-5 (E5) — `tenancy/service.py:70–95`:** بعد التحقق من وجود المُحيل: إن كان `referrer.owner_tenant_id == owner_tenant_id` ⇒ `SelfReferralError` ⇒ **422 `referral_self_tenant`** `{"error":"referral_self_tenant","message":"a brand cannot be referred by a brand of the same tenant"}`. اختبار PG يعيد مِجسّ المخطط (`POST /brands` بـ`BRAND_ID` ⇒ 422 ولا صف).
 
-**C-1 — وحدة جديدة `src/modules/entitlements/`** (نفس تخطيط الوحدات الحالية: `domain/{models,repository}.py`, `infrastructure/{orm,postgres_repository}.py`, `service.py`, `router.py`, `dependencies.py`, `exceptions.py`, **`REMOVABILITY.md`**):
-- `domain/models.py`: `Plan(StrEnum) = trial|starter|growth|agency`؛ `PlanLimits(frozen)`: `daily_tokens: int`, `monthly_posts: int`, `monthly_wa_conversations: int`, `max_brands: int`, `seats: int`؛ **الافتراضات الثابتة في `DEFAULT_LIMITS: dict[Plan, PlanLimits]`** (قابلة للتجاوز لكل علامة): `trial(20_000, 10, 50, 1, 1)`, `starter(60_000, 40, 300, 1, 1)`, `growth(200_000, 150, 1_000, 3, 3)`, `agency(600_000, 600, 3_000, 10, 10)`؛ `BrandEntitlement(brand_id, plan, limits, active_until: datetime | None, is_active, referred_by_brand_id: UUID | None, updated_at)`؛ `EntitlementEvent(id, brand_id, kind ∈ {activated, extended, downgraded, suspended, referral_credit, limits_overridden}, actor_user_id, payload: dict, created_at)`.
-- **اللغة:** حدود الرموز اليومية في الباقة **تحلّ محلّ** `ai_daily_token_budget_per_brand` عند وجود entitlement نشط (الإعداد يبقى افتراضاً للعلامات بلا سجل = `trial`).
-- `EntitlementLimitsReader` (البروتوكول في `ai_gateway/budget.py` — Part B) تنفّذه `entitlements/service.py::PgEntitlementLimitsReader.check(brand_id, purpose)`: علامة بلا سجل ⇒ `trial`؛ `is_active=False` أو `active_until < now` ⇒ `EntitlementLimitError(limit_kind="plan_inactive")` (**429 `generation_budget_exceeded`** بتفاصيل `limit_kind` — لا رمز خطأ جديد)؛ تجاوز `daily_tokens` ⇒ `limit_kind="plan_daily_tokens"`. فحوص `monthly_posts` (عند الموافقة/الجدولة في `content`) و`monthly_wa_conversations` (عند إنشاء محادثة جديدة في `whatsapp`) عبر `check_counter(brand_id, counter: Literal["monthly_posts","monthly_wa_conversations"])` — الاستهلاك يُقرأ من الجداول الموجودة **عبر بروتوكول قارئ تعرّفه الوحدة المستهلِكة** (لا استيراد ORM عبر الحدود — D-016/D-076).
-- **مفتاح القتل:** `feature_entitlements_enforced: bool = True` في `core/config.py`؛ `False` ⇒ القارئ يُرجع «مسموح» دائماً ويُسجَّل WARNING واحد عند الإقلاع.
+**A-6 (F1) — `.github/workflows/ci.yml:71`:** `--cov-fail-under=95 --cov-precision=2`؛ **و** ارفع تغطية `pytest -m "not integration"` إلى **≥ 95.00%** فعلياً بإضافة اختبارات وحدة للأسطر المفقودة (`ai_gateway/dependencies.py:99–105`, `tenancy/dependencies.py:73`, `whatsapp/client.py:86–87`, `publishing/channels/registry.py:53–54`, `brand_brain/infrastructure/internal_metrics.py:35–123`, …) — **لا** `# pragma: no cover` جديد.
 
-**C-2 — هجرة `0014_entitlements_consent_referral.py`:**
-- `brand_entitlements(brand_id PK FK brands CASCADE, plan VARCHAR(16), limits JSONB, active_until TIMESTAMPTZ NULL, is_active BOOL NOT NULL DEFAULT false, updated_at)`.
-- `entitlement_events(id UUID PK, brand_id FK brands **SET NULL** nullable (D-081), kind VARCHAR(24), actor_user_id UUID NULL FK users SET NULL, payload JSONB, created_at)` + فهرس `(brand_id, created_at)`.
-- `brands.referred_by_brand_id UUID NULL FK brands(id) ON DELETE SET NULL` + `CHECK (referred_by_brand_id <> id)`.
-- `brands.learning_consent VARCHAR(16) NOT NULL DEFAULT 'signals_only'` + `CHECK IN ('signals_only','none','full')`.
-- `wa_messages.referral JSONB NULL` (كائن `referral` من Meta CTWA: `source_url, source_id, source_type, headline, body, ctwa_clid` — يُخزَّن بعد قصّ النصوص إلى 512 حرفاً).
-- `downgrade` كامل. `upgrade head → downgrade 0013 → upgrade head` يمرّ.
+### Part B — الكتالوج (كوميت `feat(ai-gateway): provider catalog + migration 0015 + dynamic routing (D-077)`)
 
-**C-3 — دور `platform_admin` (نسخة الإعدادات؛ ينتقل إلى قاعدة البيانات في SPRINT-11.1):**
-- `core/config.py`: `platform_admin_user_ids: list[UUID] = []` (من `PLATFORM_ADMIN_USER_IDS` مفصولاً بفواصل). فارغ ⇒ **كل مسارات `/admin/*` تُرجع 403 `platform_admin_required`** (آمن افتراضاً).
-- `auth/dependencies.py`: `PlatformAdmin = Annotated[AuthenticatedActor, Depends(require_platform_admin)]` تبني على `CurrentUserFresh` وتفحص `actor.user_id in settings.platform_admin_user_ids` ⇒ وإلا 403 `platform_admin_required`. لا تُستخدم `email` (غير موجودة في `AuthenticatedActor`).
-- **تدقيق:** كل نداء إداري ناجح يكتب `entitlement_events` بـ`actor_user_id` — لا استثناء.
+**B-1 هجرة `alembic/versions/0015_ai_provider_catalog.py`** (ثلاثة جداول؛ كل القيود **مسمّاة**):
+- `ai_providers`: `id UUID PK` · `slug VARCHAR(32) UNIQUE` (`^[a-z0-9_-]+$`) · `kind VARCHAR(24)` CHECK `IN ('openai_compatible','fake')` · `base_url TEXT NOT NULL` · `credential_cipher TEXT NULL` (نص Fernet) · `credential_ref VARCHAR(64) NULL` (اسم متغير بيئة) · CHECK `ck_ai_providers_one_credential`: `NOT (credential_cipher IS NOT NULL AND credential_ref IS NOT NULL)` · `enabled BOOL NOT NULL DEFAULT true` · `timeout_seconds NUMERIC(5,1) NOT NULL DEFAULT 30` · `created_at`, `updated_at TIMESTAMPTZ`.
+- `ai_models`: `id UUID PK` · `provider_id FK ai_providers ON DELETE CASCADE` · `model_name VARCHAR(64)` · UNIQUE `(provider_id, model_name)` · `capability VARCHAR(16)` CHECK `IN ('text','audio')` · `prompt_per_1k NUMERIC(12,6) NULL` · `completion_per_1k NUMERIC(12,6) NULL` · `cost_per_minute_usd NUMERIC(12,6) NULL` · `max_audio_seconds INT NULL` CHECK `<= 120` · CHECK `ck_ai_models_price_shape`: `(capability='text' AND cost_per_minute_usd IS NULL AND max_audio_seconds IS NULL) OR (capability='audio' AND prompt_per_1k IS NULL AND completion_per_1k IS NULL)` · CHECK كل سعر `>= 0` · `enabled BOOL DEFAULT true` · `max_tokens_cap INT NULL` · timestamps.
+- `ai_routing`: `id UUID PK` · `purpose VARCHAR(32)` CHECK `IN ('content_generation','whatsapp_suggest_reply','brand_diagnosis','content_plan','audio_transcription')` · `model_id FK ai_models ON DELETE CASCADE` · `priority SMALLINT NOT NULL` (0 = أساسي) · UNIQUE `(purpose, priority)` · UNIQUE `(purpose, model_id)` · `enabled BOOL DEFAULT true` · timestamps.
+- `downgrade`: إسقاط الثلاثة بالترتيب العكسي. اختبار `test_b1_migration_0015_round_trip_on_pg` (`head ⇒ 0014 ⇒ head`؛ الجداول الثلاثة و11 قيداً مسمّى تختفي وتعود).
 
-**C-4 — خدمة التفعيل والإحالة** (`entitlements/service.py`):
-- `activate(brand_id, plan, months: int (1..12), actor_user_id, note)`: upsert، `active_until = max(now, active_until) + months×30d`، `is_active=True`، حدث `activated` (أو `extended`). **الإحالة (D-078):** إن كانت العلامة لها `referred_by_brand_id` **وهذا أول حدث `activated` لها** ⇒ حدث `referral_credit` للعلامة المُحيلة بـ`payload={"referred_brand_id":…, "percent":10, "plan":…, "months":…}` — **حدث مدقَّق فقط، لا رصيد آلي ولا تعديل حدود**. معاملة واحدة مع `SELECT … FOR UPDATE` على صف العلامة المُحالة؛ اختبار PG لتفعيلين متزامنين ⇒ حدث `referral_credit` واحد.
-- `set_limits_override(brand_id, limits, actor)` ⇒ حدث `limits_overridden`. `suspend(brand_id, actor, reason)` ⇒ `is_active=False` + حدث `suspended`.
+**B-2 المجال `ai_gateway/catalog/domain.py`:** `Provider`, `Model`, `Route` (Pydantic frozen) + `Purpose = Literal[...]` + `ModelPricing` (`token(prompt, completion) | audio(per_minute, max_seconds)`). **`Provider` لا يحمل المفتاح الخام** — يحمل `credential_cipher | credential_ref` ويُفكّ عبر `CredentialResolver(encryption, env)` داخل `CatalogGatewayResolver` فقط، لحظة البناء، ولا يُسجَّل في أي log.
 
-**C-5 — المسارات (4 جديدة محمية ⇒ `PROTECTED_ROUTE_COUNT == 66`):**
-| # | المسار | الحارس | الاستجابة |
+**B-3 المستودع `ai_gateway/catalog/infrastructure/pg_repository.py`:** `PgCatalogRepository` (CRUD + `list_routes(purpose)` مرتّبة بالأولوية + `snapshot()` يعيد الثلاثة في استعلام أو ثلاثة). **ذاكرة مؤقتة** في العملية بعمر `AI_CATALOG_CACHE_SECONDS=30` (قابل للتصفير من مسارات الإدارة عبر `invalidate()`).
+
+**B-4 `ProviderCatalog` (`ai_gateway/catalog/service.py`):**
+- `resolve(purpose) -> list[ResolvedModel]` = المسارات المفعَّلة ⇒ نماذج مفعَّلة ⇒ مزودون مفعَّلون، بالأولوية؛ فارغة ⇒ `NoRouteError` ⇒ **503 `ai_route_unavailable`**.
+- **تسعير:** `CatalogPriceTable(catalog)` ينفّذ نفس واجهة `PriceTable.estimate/estimate_unit` من `ai_models`؛ `Decimal("0")` صالح؛ `None` (سعر غير مُدخَل) ⇒ `UnpricedModelError` كما اليوم (503 `ai_model_unpriced`) في وضع `platform` الصارم. للصوت: `estimate_audio(model, seconds)`؛ `seconds > max_audio_seconds` ⇒ `UnpricedModelError`.
+- **بدائل مرتّبة (fallback):** `CatalogGatewayResolver.complete(req)` يجرّب المسار 0؛ عند `AIError` فئتها في `{provider_unavailable, model_unavailable, rate_limited, timeout, retryable_server_error}` ينتقل للتالي **بحجز جديد وتسوية/استرداد السابق** عبر `BudgetGuard` (كل محاولة صفّ `ai_cost_log` مستقل)؛ أي فئة أخرى ⇒ لا بديل. حد أقصى **3** محاولات. `credential_mode=user_key` (`X-AI-Key`) ⇒ **لا** fallback (مفتاح المستخدم لمزوّد واحد).
+- **`AI_ALLOW_LOCAL_PROVIDER_HOSTS`** (`list[str]`, افتراضي فارغ): `base_url` لمزوّد يُقبل فقط إن كان مضيفه عاماً (`_is_global_address` **مستورد** من `brand_brain/public_fetch.py`؟ **لا** — انسخ الدالة الصغيرة إلى `core/netguard.py` واستخدمها في المكانين دون تغيير سلوك `public_fetch`) **أو** مذكوراً حرفياً في القائمة (مثل `localhost:11434`, `ollama:11434`). الرفض ⇒ 422 `provider_host_not_allowed`.
+
+**B-5 التكامل خلف مفتاح القتل (`ai_gateway/dependencies.py`):**
+- `FEATURE_PROVIDER_CATALOG_ENABLED: bool = False` (افتراضي **معطَّل** في هذا السبرنت؛ المالك يفعّله بعد الـseed).
+- `get_ai_gateway` و`build_price_table`: إن كان المفتاح مفعَّلاً ⇒ `CatalogGatewayResolver(purpose)` + `CatalogPriceTable`؛ وإلا السلوك الحالي **حرفياً** (`build_gateway(settings)` + `PriceTable.from_json`). `purpose` يأتي من `BudgetContext.purpose` الموجود.
+- **لا** تغيير في `BudgetGuard.complete` سوى قبول `price_table` بأي تنفيذ للبروتوكول `PriceSource` (استخرجه من `PriceTable`).
+
+**B-6 أخطاء HTTP الحرفية (لا `ErrorCategory` جديد):** `ai_route_unavailable` 503 · `ai_model_unpriced` 503 (موجود) · `provider_host_not_allowed` 422 · `catalog_conflict` 409 (slug/model/priority مكرر) · `catalog_not_found` 404 · `catalog_disabled` 503 (مسارات الإدارة عندما المفتاح معطَّل **تعمل** للكتابة والقراءة — فقط **التشغيل** يتجاهل الكتالوج؛ لذا لا 503 هنا — احذف هذا الاسم إن لم يلزم).
+
+### Part C — تحكّم الإدارة (كوميت `feat(admin-ai): /admin/ai/* CRUD + routing + probe + removability (D-077)`)
+
+**C-1 المسارات (كلها `PlatformAdmin`، كلها تكتب `entitlement_events`? **لا** — جدول تدقيق خاص غير مطلوب: سجّل بـ`logger.info("admin_ai …")` بحقول `actor_user_id, action, target_id` **بلا أسرار**، وأضف صف `ai_cost_log` فقط للـprobe):**
+
+| # | Method | Path | ملاحظة |
 |---|---|---|---|
-| 1 | `POST /api/v1/admin/entitlements/activate` | `PlatformAdmin` | 200 `BrandEntitlementOut`؛ 404 `brand_not_found`؛ 422 |
-| 2 | `GET /api/v1/admin/entitlements/{brand_id}` | `PlatformAdmin` | 200 `BrandEntitlementOut` + آخر 20 حدثاً |
-| 3 | `GET /api/v1/brands/{brand_id}/entitlement` | `READ_ROLES` | 200 `BrandEntitlementPublic` (الخطة، `active_until`، الحدود، **الاستهلاك الحالي** لكل حدّ) — بلا أحداث ولا `referred_by` |
-| 4 | `PATCH /api/v1/brands/{brand_id}/learning-consent` | `GRANT_ROLES` (OWNER فقط) | 200 `{learning_consent}`؛ جسم `{"learning_consent": "signals_only"\|"none"\|"full"}` |
-- الوسوم: `APIRouter(tags=["Entitlements (D-073)"])` و`tags=["Platform admin"]`؛ يُركَّبان في `main.py` بعد `brand_brain_router`. لا مسارات عامة جديدة.
-- `tests/test_auth_guard.py:75` و`tests/modules/content/test_router.py:1417` ⇒ `66`.
+| 1 | GET | `/admin/ai/providers` | قائمة؛ `has_credential: bool` فقط |
+| 2 | POST | `/admin/ai/providers` | `{slug, kind, base_url, api_key?: SecretStr, credential_ref?, timeout_seconds?}` ⇒ يشفّر `api_key` فوراً ويُسقطه؛ 201 |
+| 3 | PATCH | `/admin/ai/providers/{id}` | `enabled/base_url/timeout/api_key/credential_ref` (api_key جديد يستبدل القديم؛ `null` صريح يمسحه) |
+| 4 | DELETE | `/admin/ai/providers/{id}` | 204؛ CASCADE على النماذج والمسارات |
+| 5 | GET | `/admin/ai/models` | `?provider_id=` اختياري |
+| 6 | POST | `/admin/ai/models` | `{provider_id, model_name, capability, pricing{…}, max_tokens_cap?}` |
+| 7 | PATCH | `/admin/ai/models/{id}` | `enabled/pricing/max_tokens_cap` |
+| 8 | DELETE | `/admin/ai/models/{id}` | 204 |
+| 9 | GET | `/admin/ai/routing` | `?purpose=` ⇒ مرتّبة |
+| 10 | PUT | `/admin/ai/routing/{purpose}` | `{"models": [model_id, …]}` يستبدل القائمة كاملة ذرّياً (الترتيب = الأولوية)؛ فارغة = لا مسار |
+| 11 | POST | `/admin/ai/probe` | انظر C-2 |
 
-**C-6 — `learning_consent` (D-080):**
-- `tenancy/domain/models.py::Brand` يكتسب `learning_consent` و`referred_by_brand_id`؛ `BrandOut` يعرض `learning_consent` فقط.
-- `POST /brands` يقبل حقلاً اختيارياً `referred_by_brand_id` (يُتحقق من وجود العلامة) — **ليس مساراً جديداً**.
-- **فلترة الكاتب:** `whatsapp/suggestions.py` (كاتب `wa_learning_signals`) و`brand_brain` (كاتب `learning_signals`) يقرآن `learning_consent` عبر بروتوكول `BrandConsentReader` تعرّفه كل وحدة وتنفّذه `tenancy`: `none` ⇒ **لا تُكتب** إشارة جديدة؛ `signals_only`/`full` ⇒ تُكتب. أي قارئ تعلّم عبر العلامات (لا يوجد بعد) **يجب** أن يفلتر `full` فقط — يُسجَّل في `REMOVABILITY.md`.
+**الاستجابات لا تحتوي أبداً** `api_key`, `credential_cipher`, `credential_ref` **القيمة** (يُعاد `credential_ref` الاسم فقط لأنه اسم متغير لا سر). وسّع حارس Zero-Secret (`tests/modules/social_connect/test_router.py:865`) ليشمل `openapi.json` الجديد **وقراءة فعلية** لكل مسار GET بعد إنشاء مزوّد بمفتاح: `"sk-"` و النص الخام **لا يظهران** في أي استجابة ولا في `caplog`.
 
-**C-7 — إحالة CTWA (`wa_messages.referral`):** `WebhookProcessor` يخزّن `messages[i]["referral"]` إن وُجد (قصّ ≤ 512 لكل نص، إسقاط المفاتيح غير المعروفة)؛ `MessageRow.referral: Mapped[dict | None]`؛ يُعرض في مسار الرسائل الموجود كحقل اختياري. لا تغيير في ON CONFLICT. اختبار: حمولة Meta بـ`referral` ⇒ محفوظ؛ `referral` 10 KiB ⇒ قُصّ.
+**C-2 probe `POST /admin/ai/probe`:** `{model_id, prompt: str (≤ 500 حرف), max_tokens: int (≤ 64)}` ⇒ ينفّذ عبر `BudgetGuard` بـ`BudgetContext(purpose="admin_probe", brand_id=None, platform_pays=True, credential_mode="platform")` ⇒ صف `ai_cost_log` بـ`brand_id NULL`, `purpose='admin_probe'` (وسّع قيد `purpose` إن وُجد). **حدود:** `max_tokens ≤ 64`؛ محدِّد `RateLimiter` دلو `admin:ai-probe` **5/دقيقة لكل `user_id`**؛ يحترم سقف المنصة `$25`. الاستجابة: `{latency_ms, prompt_tokens, completion_tokens, estimated_cost_usd, preview: str (≤ 200 حرف), error_category: ErrorCategory|null, ok: bool}` — عند فشل المزوّد يُرجع **200** بـ`ok=false` و`error_category` من الـ12 (لا 5xx — الـprobe أداة تشخيص). `PlatformAdmin` فقط.
 
-**C-8 — Safe Removability (D-076) — إلزامي للقبول:**
-- `src/modules/entitlements/REMOVABILITY.md`: الجداول، المسارات الأربعة، الإعدادات (`FEATURE_ENTITLEMENTS_ENFORCED`, `PLATFORM_ADMIN_USER_IDS`)، نقاط الوصل (`EntitlementLimitsReader` المحقون في `BudgetGuard` عبر `ai_gateway/dependencies.py`)، خطوات الإزالة (تعطيل المفتاح ⇒ إزالة التركيب من `main.py`/`ai_gateway/dependencies.py` ⇒ `alembic downgrade`).
-- `tests/modules/entitlements/test_isolation.py`: لا ملف خارج `entitlements/` يستورد `src.modules.entitlements` **إلا** `src/main.py` و`src/modules/ai_gateway/dependencies.py` (قائمة بيضاء صريحة داخل الاختبار).
-- `tests/modules/entitlements/test_kill_switch.py`: `FEATURE_ENTITLEMENTS_ENFORCED=false` ⇒ علامة معلّقة تولّد محتوى بنجاح ويُسجَّل WARNING.
-- **G5:** `brand_brain/infrastructure/internal_metrics.py:25–27` (استيراد ORM من `content`/`publishing`/`whatsapp` للقراءة) — **لا يُغيَّر في هذا السبرنت** ولا تُضاف قاعدة `ruff` جديدة للاستيراد عبر الحدود؛ اختبار العزل يغطي `entitlements` فقط.
+**C-3 `ai_gateway/catalog/REMOVABILITY.md`** (≤ 70 سطراً): ما يُحذف (`catalog/`, هجرة 0015 `downgrade`, مسارات `/admin/ai/*`, الإعدادات `FEATURE_PROVIDER_CATALOG_ENABLED`/`AI_ALLOW_LOCAL_PROVIDER_HOSTS`/`AI_CATALOG_CACHE_SECONDS`)، ما يبقى (`ai_cost_log` صفوف `admin_probe` ⇒ `brand_id NULL` سليمة)، مفتاح القتل، واختبار العزل `tests/modules/ai_gateway/catalog/test_isolation.py`: تحميل التطبيق مع `FEATURE_PROVIDER_CATALOG_ENABLED=false` وإزالة `catalog` من `sys.modules` ⇒ كل مسارات غير الإدارة تعمل؛ `grep -rn "ai_gateway.catalog" src --include=*.py` ⇒ فقط `ai_gateway/dependencies.py`, `ai_gateway/catalog/*`, `main.py`.
+
+**C-4 `.env.template`:** `FEATURE_PROVIDER_CATALOG_ENABLED=false`, `AI_ALLOW_LOCAL_PROVIDER_HOSTS=`, `AI_CATALOG_CACHE_SECONDS=30` مع تعليقات عربية قصيرة.
 
 ---
 
@@ -176,28 +137,26 @@ class BudgetGuard:
 
 | # | المعيار | كيف يتحقق المخطط |
 |---|---|---|
-| 1 | **ثلاثة كوميتات متسلسلة A ⇒ B ⇒ C**، كلٌّ يمرّ وحده: `ruff check . && ruff format --check . && pytest -q --cov=src --cov-fail-under=95` + `alembic upgrade head` | `git checkout <sha>` لكل كوميت |
-| 2 | `PROTECTED_ROUTE_COUNT == 66` والعامة 6 (لا مسار عام جديد) | `tests/test_auth_guard.py` + مقارنة `openapi.json` |
-| 3 | **B6:** 8 معرّفات غير موقَّعة ⇒ ≤1 استعلام ثم 401؛ 9 معرّفات ⇒ 400 بـ0 استعلام؛ 950 KiB/10,000 معرّف ⇒ 400 بـ0 استعلام | عدّاد `before_cursor_execute` على PG |
-| 4 | **B2-أ:** `127.0.0.1.nip.io`, `169.254.169.254.nip.io`, `10.0.0.1.nip.io`, `fd00--1.sslip.io` ⇒ `private_address` و**0 طلب شبكي** | `respx` + حاقن `getaddrinfo` |
-| 5 | **B2-ب/ج:** robots 4.7 MiB ⇒ ≤64 KiB مقروءة؛ صفحة 503 ⇒ 0 أدلة | اختبارات Part A |
-| 6 | **B3:** VIEWER لا يرى `banned_phrases`/`reply_templates` في `/profile/revisions`؛ OWNER يراهما | اختبار + فحص JSON |
-| 7 | **B4:** قبولان متزامنان ⇒ `[200, 409]`؛ جسم فارغ يُسقَط | PG `asyncio.gather` |
-| 8 | **B5:** توصية مجهولة ⇒ 200 مع `dropped == 1` | اختبار advisor |
-| 9 | **B1:** نداء 150 رمزاً ⇒ استهلاك **150**؛ `grep -rn "UNION ALL\|ContentRevisionRow\|ReplyDraftRow\|from src.modules.brand_brain" src/modules/ai_gateway` ⇒ 0 | PG + grep |
-| 10 | **احجز ثم سوِّ:** صف `pending` موجود **أثناء** نداء المزوّد؛ timeout ⇒ `error` لا refund؛ `invalid_credential` ⇒ refund؛ stale 90 ث ⇒ `ambiguous` | اختبارات B-5 |
-| 11 | **Fail-closed:** نموذج بلا سعر في `platform` ⇒ 503 `ai_model_unpriced` **بلا نداء وبلا صف**؛ `Decimal("0")` ⇒ 200؛ `user_key` غير مسعَّر ⇒ 200 بـ`estimated_cost_usd IS NULL`؛ `AI_PROVIDER=fake` بلا جدول ⇒ يعمل | اختبارات B-5 |
-| 12 | **سقف المنصة:** ⇒ 503 `platform_budget_exhausted` + `Retry-After`؛ `user_key` لا يُحتسب | PG |
-| 13 | **فشل الكاتب:** `platform` ⇒ 503 `cost_log_unavailable`؛ `user_key` يستمر | اختبار |
-| 14 | **هجرات 0013/0014:** `upgrade head → downgrade 0012 → upgrade head` نظيف؛ حذف علامة ⇒ `ai_cost_log.brand_id IS NULL` و`entitlement_events.brand_id IS NULL` والصفوف باقية | PG |
-| 15 | **Entitlements:** تفعيل ⇒ `activated` + `active_until`؛ تفعيلان متزامنان لعلامة مُحالة ⇒ `referral_credit` **واحد**؛ علامة معلّقة ⇒ 429 `generation_budget_exceeded` بـ`limit_kind=plan_inactive`؛ مفتاح القتل يعطّل | PG |
-| 16 | **platform_admin:** قائمة فارغة ⇒ 403 لكل `/admin/*`؛ مستخدم عادي ⇒ 403؛ المُدرج ⇒ 200 وحدث مدقَّق | اختبار |
-| 17 | **learning_consent:** افتراض `signals_only`؛ `none` ⇒ لا إشارات جديدة في `wa_learning_signals` و`learning_signals`؛ MANAGER ⇒ 403 على PATCH | PG |
-| 18 | **CTWA:** `referral` يُحفظ ويُقصّ | اختبار |
-| 19 | **Removability:** `REMOVABILITY.md` مكتمل؛ `test_isolation.py` يمرّ؛ `grep -rn "src.modules.entitlements" src --include=*.py` ⇒ فقط `main.py` + `ai_gateway/dependencies.py` | grep |
-| 20 | **لا تغيير في `ErrorCategory`**؛ لا تبعية جديدة (`git diff main -- pyproject.toml` فارغ أو `per-file-ignores` موثَّق فقط) | diff |
-| 21 | `.env.template` يحوي كل متغيرات `AI_*`/`PLATFORM_*`/`FEATURE_*` بقيم مطابقة لـ`Settings` | اختبار A-8 |
-| 22 | التغطية ≥ 95% إجمالاً و≥ 90% لكل ملف جديد في `ai_gateway/` و`entitlements/` | `--cov-report=term-missing` |
+| 1 | **ثلاثة كوميتات A ⇒ B ⇒ C**، كلٌّ يمرّ وحده: `ruff check src tests alembic scripts && ruff format --check …` + `pytest -q --cov=src --cov-fail-under=95 --cov-precision=2` (كامل) + `pytest -m "not integration" --cov-fail-under=95 --cov-precision=2` بلا DB **≥ 95.00%** + `alembic upgrade head` | `git checkout <sha>` لكل كوميت |
+| 2 | `PROTECTED_ROUTE_COUNT == 77` بعد C (66 بعد A و B)؛ العامة 6 | `tests/test_auth_guard.py` + `openapi.json` |
+| 3 | **E1:** consent `none` ⇒ `content-plan` 3 عناصر ⇒ `learning_signals` **0**، `brand_recommendations` 3 | مِجسّ المخطط على PG |
+| 4 | **E2c:** علامة بلا صف ⇒ `GET /entitlement` 20,000 **و** الطلب الـN الذي يتجاوز 20,000 رمزاً ⇒ 402/429 حسب العقد الحالي (`entitlement_exceeded`) لا 200 | PG + `FIN_PRICES` |
+| 5 | **E2:** الموافقة الـ11 في الشهر ⇒ 402 `entitlement_quota_exceeded`؛ المحادثة الـ51 ⇒ webhook **200** + `suggest-reply` 402 | PG |
+| 6 | **E3:** `PATCH /learning-consent` في `tenancy/router.py`؛ `grep -rn "learning-consent" src/modules/entitlements` ⇒ 0؛ `grep -rn "tenancy.infrastructure" src/modules --include=*.py` خارج `tenancy/` ⇒ **فقط** `brand_brain/infrastructure/postgres_repository.py:40` | grep |
+| 7 | **E4:** صف `pending` ⇒ `combined_usage_since` = `prompt_estimate + max_tokens`؛ بعد `settle_stale` يبقى؛ بعد نجاح 150 ⇒ 150 | PG |
+| 8 | **E5:** إحالة من نفس المستأجر ⇒ **422 `referral_self_tenant`** ولا صف | PG |
+| 9 | **0015:** `head ⇒ 0014 ⇒ head` على قاعدة نظيفة؛ 11 قيداً مسمّى | alembic |
+| 10 | **Zero-secret:** إنشاء مزوّد بـ`api_key="sk-PLANNER-PROBE-…"` ⇒ لا يظهر النص في أي استجابة GET/PATCH/probe ولا في `caplog` ولا في `openapi.json`؛ `SELECT credential_cipher` يبدأ بـ`gAAAA` (Fernet) | PG + caplog |
+| 11 | **التسعير:** نموذج بسعر `0/0` ⇒ النداء ينجح و`estimated_cost_usd=0`؛ نموذج بسعر `NULL` ⇒ 503 `ai_model_unpriced` **قبل** أي نداء للمزوّد (respx 0 طلب)؛ صوت `max_audio_seconds=121` ⇒ 422 عند الإنشاء | PG + respx |
+| 12 | **Routing/fallback:** مساران؛ الأول يرجع 503 ⇒ الثاني يُستدعى؛ صفّا `ai_cost_log` (الأول `refunded`/`error`، الثاني `ok`)؛ الأول يرجع 400 `bad_request` ⇒ **لا** بديل؛ `X-AI-Key` ⇒ لا بديل | respx + PG |
+| 13 | **SSRF للمزودين:** `base_url=http://127.0.0.1:11434` ⇒ 422 `provider_host_not_allowed`؛ مع `AI_ALLOW_LOCAL_PROVIDER_HOSTS=127.0.0.1:11434` ⇒ 201؛ `public_fetch.py` **بلا تغيير** (`git diff` فارغ) | PG + grep |
+| 14 | **probe:** `max_tokens=65` ⇒ 422؛ السادس خلال دقيقة ⇒ 429؛ النجاح ⇒ صف `ai_cost_log` `purpose='admin_probe'`, `brand_id NULL`, `outcome='ok'`؛ فشل المزوّد ⇒ 200 `ok=false` + `error_category` من الـ12 + صف `error` | PG + respx |
+| 15 | **مفتاح القتل:** `FEATURE_PROVIDER_CATALOG_ENABLED=false` مع كتالوج ممتلئ ⇒ النداء يستخدم `AI_PROVIDER`/`AI_PRICE_TABLE_JSON` حرفياً (respx يرى `base_url` القديم)؛ مسارات `/admin/ai/*` تبقى تعمل | respx |
+| 16 | **PlatformAdmin:** كل الـ11 ⇒ 403 `platform_admin_required` لمستخدم عادي و401 بلا توكن؛ قائمة فارغة ⇒ 403 للجميع | TestClient |
+| 17 | **الحدود:** `grep -rn "ai_gateway.catalog" src --include=*.py` خارج `ai_gateway/` ⇒ فقط `main.py`؛ `grep -rn "src.modules.entitlements" src --include=*.py` خارج القائمة البيضاء ⇒ 0؛ `ErrorCategory` 12 بلا تغيير؛ `pyproject.toml` بلا تغيير | grep |
+| 18 | **G6:** `git diff --numstat <main> <C> -- src` ≤ ~1,800 سطر مُضاف | numstat |
+| 19 | **Removability:** `REMOVABILITY.md` + `test_isolation.py` يمرّ | pytest |
+| 20 | **لا تراجع:** كل اختبارات SPRINT-11 (B1–B6, C1–C7, FIN) تمرّ بلا تعديل في التوقعات إلا A-4 (150 يبقى 150) و A-2 (trial) | pytest |
 
 ---
 
@@ -207,20 +166,26 @@ class BudgetGuard:
 # 0) البداية (من main @ SHA دمج هذا التوجيه)
 git checkout work/implementation && git fetch origin && git merge --ff-only origin/main
 
-# 1) بيئة PG 17 UTF8 (كما في SPRINT-10)
-export DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/aimp_test
-alembic upgrade head
+# 1) بيئة PG 17 UTF8 (كما في SPRINT-11)
+initdb -D /var/lib/pg17 -U postgres --auth=trust -E UTF8 --locale=C.UTF-8
+pg_ctl -D /var/lib/pg17 -l /var/lib/pg17/log.txt -o "-p 5432 -c listen_addresses=127.0.0.1" start
+psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE ai_growth_os_test ENCODING 'UTF8' TEMPLATE template0 LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'"
+psql -h 127.0.0.1 -U postgres -d ai_growth_os_test -c "CREATE EXTENSION vector"
+pip install -e ".[dev]"
 
 # 2) بعد كل Part
-ruff check . && ruff format --check .
-pytest -q --cov=src --cov-report=term-missing --cov-fail-under=95
-alembic downgrade 0012 && alembic upgrade head      # Part B ⇒ 0012؛ Part C ⇒ 0013 ثم head
+ruff check src tests alembic scripts && ruff format --check src tests alembic scripts
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/ai_growth_os_test pytest -q --cov=src --cov-fail-under=95 --cov-precision=2
+env -u TEST_DATABASE_URL pytest -m "not integration" -q --cov=src --cov-fail-under=95 --cov-precision=2   # بوابة CI بلا DB — يجب ≥ 95.00
+alembic -x database_url=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/ai_growth_os_test upgrade head
 
 # 3) فحوص grep الملزمة (يجب أن تُرجع 0 نتائج)
-grep -rn "UNION ALL\|ContentRevisionRow\|ReplyDraftRow\|from src.modules.brand_brain" src/modules/ai_gateway
-grep -rn "DailyBudget(" src/modules/content src/modules/whatsapp src/modules/brand_brain
-grep -rn "budget_unavailable\|budget_exceeded\b" src/modules/ai_gateway/contract.py
+grep -rn "learning-consent" src/modules/entitlements
+grep -rn "tenancy.infrastructure" src/modules --include=*.py | grep -v "src/modules/tenancy/\|brand_brain/infrastructure/postgres_repository.py"
 grep -rn "src.modules.entitlements" src --include=*.py | grep -v "src/modules/entitlements/\|src/main.py\|ai_gateway/dependencies.py"
+grep -rn "ai_gateway.catalog" src --include=*.py | grep -v "src/modules/ai_gateway/\|src/main.py"
+grep -rn "get_secret_value()" src/modules/ai_gateway/catalog | grep -v "credential"   # المفتاح يُفكّ في CredentialResolver فقط
+git diff origin/main -- src/modules/ai_gateway/contract.py src/modules/brand_brain/public_fetch.py pyproject.toml | wc -l   # 0
 
 # 4) الدفع بعد كل كوميت (قاعدة الساندبوكس)
 git push origin work/implementation
@@ -230,12 +195,12 @@ git push origin work/implementation
 
 ## 5. التزامات المنفذ
 
-1. **كوميت واحد لكل Part** بالترتيب A ⇒ B ⇒ C، كلٌّ أخضر وحده على PG 17 (معيار 1). لا كوميتات «إصلاح لاحق» داخل الـPR — الإصلاح يُدمج في كوميت الـPart قبل الدفع النهائي.
-2. **لا تلمس** `ErrorCategory`، لا تضف تبعية، لا تضف مساراً عاماً، لا تبدأ الكتالوج (SPRINT-11.1).
-3. **الأسماء حرفية** كما في §2 (`webhook_rejected`, `private_address`, `unavailable`, `profile_conflict`, `ai_model_unpriced`, `platform_budget_exhausted`, `cost_log_unavailable`, `platform_admin_required`, `limit_kind`, `dropped`). أي انحراف يُبرَّر في §6.
-4. **ادفع بعد كل كوميت** وحدّث §6 في كوميت رابع منفصل `docs(sprint-11): executor report`.
+1. **لا دمج** إلى `main` (D-063). PR واحد من `work/implementation`.
+2. **لا** `ErrorCategory` جديد؛ **لا** تبعية جديدة؛ **لا** `# pragma: no cover` جديد؛ **لا** لمس `public_fetch.py`.
+3. المفاتيح: تُشفَّر عند الاستلام، تُفكّ في `CredentialResolver` لحظة بناء العميل فقط، لا تُسجَّل، لا تُعاد. أي `SecretStr` في schema الإدخال فقط.
+4. **ادفع بعد كل كوميت** وحدّث §6 في كوميت رابع منفصل `docs(sprint-11.1): executor report`.
 5. إن اكتشفت تعارضاً بين هذا التوجيه والكود الفعلي (اسم دالة/سطر)، **الكود الفعلي هو المرجع**: نفّذ المقصود وسجّل الفرق في §6 «انحرافات».
-6. إن تجاوز Part C وحده 1,200 سطر `src/` فعلياً، **توقف** بعد Part B، ادفع، واكتب في §6 طلب تقسيم — المخطط يراجع A+B ويصدر C كـSPRINT-11.0.1.
+6. **صمّام الحجم:** إن تجاوز B+C معاً 1,600 سطر `src/` فعلياً، سلّم C بلا `PUT /routing` و fallback (الكتالوج يعمل بمسار واحد لكل غرض = النموذج الأول المفعَّل) وسجّل ذلك؛ **لا تتوقف** قبل C.
 
 ---
 
@@ -243,20 +208,20 @@ git push origin work/implementation
 
 | البند | القيمة |
 |---|---|
-| SHA الكوميتات | A: `f71ddfc` · B: `6b371f0` · C: `68b42b0` · docs: (هذا الكوميت — فوق `68b42b0`) · الأساس `main` @ `367fc6d` |
-| نتائج `pytest` (العدد/التغطية) لكل كوميت | A: 1,145 ناجحاً / 0 فشل / 98.2% · B: 1,206 / 0 / 98.1% · C: **1,331 ناجحاً / 0 فشل / 98.11%** (تكامل 110 + وحدات 1,221 على PG 17 UTF8، عمليتان متتاليتان بـ`--cov-append`) + بوابة CI للوحدات بلا `DATABASE_URL`: 1,221 / 0 / ≥95% ✅ · كل ملف جديد في `entitlements/` و`whatsapp/consent.py` و`brand_brain/consent.py` ≥ 94% (الحد 90%) |
-| `PROTECTED_ROUTE_COUNT` | **66** (62 + `POST /admin/entitlements/activate` + `GET /admin/entitlements/{brand_id}` + `GET /brands/{id}/entitlement` + `PATCH /brands/{id}/learning-consent`)؛ العامة 6 بلا تغيير؛ `ErrorCategory` 12 بلا تغيير |
-| هجرات مُختبَرة ذهاباً وإياباً | 0013: `head ⇒ 0012 ⇒ head` ✅ (`test_b1_migration_0013_round_trip_on_pg`) · 0014: `head ⇒ 0013 ⇒ head` **و** `head ⇒ 0012 ⇒ head` ✅ (`test_c1_migration_0014_round_trip_on_pg` — الجدولان + 3 أعمدة + 7 قيود مسمّاة تختفي وتعود) |
-| نتائج grep الملزمة (§4-3) | الأربعة ⇒ **0 نتائج** ✅: (1) `UNION ALL\|ContentRevisionRow\|ReplyDraftRow\|from src.modules.brand_brain` في `ai_gateway` = 0 · (2) `DailyBudget(` في content/whatsapp/brand_brain = 0 · (3) `budget_unavailable\|budget_exceeded\b` في `contract.py` = 0 · (4) `src.modules.entitlements` خارج القائمة البيضاء (`main.py`, `ai_gateway/dependencies.py`) = 0 |
-| أسطر `src/` المضافة لكل Part | A: 259 · B: 1,105 · **C: 1,389 سطراً مُضافاً (`git diff --numstat` ملفات `.py` فقط؛ −58 محذوفاً؛ صافٍ 1,331) — منها 1,149 سطر كود غير فارغ/غير تعليق؛ + 59 سطراً `REMOVABILITY.md`**. ⚠️ **صمّام §5-6:** القياس الخام (1,389) يتجاوز 1,200؛ قياس الكود الفعلي (1,149) تحته. **قرار المنفذ:** المتابعة لا التوقف — لأن C مترابط (الهجرة 0014 تحمل أعمدة C-4/C-6/C-7 معاً، والمسارات الأربعة والعدد 66 مُتوقَّعان في §3)، ولأن التوقف بعد B كان سيترك `get_entitlement_limits_reader ⇒ None` وبروتوكولاً بلا تنفيذ. مُسجَّل هنا صراحةً ليقرّر المخطط/المالك (انظر «ما يحتاج قرار المالك» #1). |
-| انحرافات عن §2 (مع السبب) | **Part B (مرحَّلة من كوميت B):** (B-1) `AIGateway.complete(req)` هو العقد الفعلي — أسماء `generate_text`/`GenerateTextRequest` في التوجيه غير موجودة في الكود (§5-5)؛ (B-2) `CostLoggingGateway` حُذفت لا «غلافاً رقيقاً»؛ (B-3) `settle_stale_reservations` عبر `scheduler_loop(extra_steps=…)` لا مهمة مستقلة؛ (B-4) `fake-1 ⇒ (0,0)` يُحقن في `PriceTable` عند `AI_PROVIDER=fake` ليمرّ CI بلا جدول أسعار. **Part C:** (C-1) **دلالة «تحلّ محلّ»:** نُفّذت حرفياً — `EntitlementLimitsReader.check()` تُرجع `bool` (تعديل توقيع البروتوكول في `ai_gateway/budget.py`): `True` = سجل entitlement **مخزَّن** ونشط ⇒ `daily_tokens` الباقة تحلّ محلّ `ai_daily_token_budget_per_brand` ولا يُفحص الإعداد؛ `False` = لا سجل (trial ضمني) أو مفتاح القتل ⇒ الإعداد كما كان. ترتيب `BudgetGuard` أصبح: سعر ⇒ (باقة **أو** إعداد) ⇒ سقف المنصة ⇒ حجز؛ اختبار `test_plan_replaces_setting.py` يثبّت الحالات الثلاث. (C-2) **`check_counter` مكشوفة لكن غير مستدعاة بعد** من `content` (الموافقة/الجدولة) ولا من `whatsapp` (محادثة جديدة): البروتوكول `CounterUsageReader` + `PgCounterUsageReader` + الفحص مُختبَرة على PG (`test_c1_counters_…`)، لكن خطّاف الاستدعاء في المستهلكَين **مؤجَّل** — إضافته تتطلب تمرير القارئ إلى `ContentService`/`WebhookProcessor` (≈ +40 سطراً) وتجاوزاً إضافياً للصمّام؛ طُلب قرار (#2). (C-3) `BrandConsentReader` بروتوكول **مكرَّر** في `whatsapp/consent.py` و`brand_brain/consent.py` (المستهلك يملك العقد — D-016/D-076) وتنفيذ واحد `tenancy.PostgresBrandConsentReader` يُرضي كليهما؛ `may_write_signal(None, …) ⇒ True` للمستدعين القدامى/الـfakes. (C-4) `PlatformAdmin` مبني على `CurrentUserFresh` (استعلام جلسة) لا `CurrentUser` — مسارات الإدارة المالية تستحق التحقق الطازج. (C-5) `referral_credit` **حدث فقط** بـ`percent: 10` في الحمولة — لا رصيد يُطبَّق (D-078) وهو ما نصّ عليه التوجيه؛ يُذكر لتفادي اللبس. (C-6) القيود الخارجية للمفاتيح `brand_entitlements.brand_id`/`entitlement_events.brand_id` بأسماء SQLAlchemy الافتراضية (`*_brand_id_fkey`) لا أسماء مخصّصة — فقط `fk_brands_referred_by_brand_id` مسمّى صراحةً. (C-7) `daily_tokens` أُضيف إلى قائمة السماح في حارس Zero-Secret (`test_openapi_has_no_token_named_fields…`) — حصة عددية لا بيانات اعتماد. (C-8) تشغيل `-m integration` وحدها بوجود `TEST_DATABASE_URL` يُنتج تغطية 83% < 85% (عتبة `pyproject`) — **غير مؤثر** لأن CI تشغّل الوحدات والتكامل معاً؛ موثَّق لعدم الالتباس. |
-| ما يحتاج قرار المالك | **(1) صمّام الحجم §5-6:** قبول Part C كما هو (1,389 خام / 1,149 كود) **أو** إعادة إصداره كـSPRINT-11.0.1 — الكود جاهز ومُختبَر في كوميت واحد مستقل `68b42b0` يمكن قبوله أو إسقاطه دون مسّ A/B. **(2) خطّاف `check_counter`:** هل يُستدعى في SPRINT-11.1 (مع كتالوج D-077) أم يُضاف الآن كـhotfix صغير؟ **(3) `PLATFORM_ADMIN_USER_IDS`:** تحديد معرّفات المستخدمين (UUID) في بيئة الإنتاج — القائمة الفارغة ترفض كل مسارات `/admin/entitlements/*` بـ403 (آمن افتراضياً). **(4) تدوير توكن GitHub** (الطلب ≥ 22 — ظهر في المحادثة مراراً). |
+| SHA الكوميتات | A: · B: · C: · docs: · الأساس `main` @ |
+| نتائج `pytest` (العدد/التغطية) لكل كوميت — كامل **و** بلا DB | |
+| `PROTECTED_ROUTE_COUNT` | (المتوقع 66 بعد A/B، **77** بعد C) |
+| هجرة 0015 ذهاباً وإياباً | |
+| نتائج grep الملزمة (§4-3) | |
+| أسطر `src/` المضافة لكل Part | |
+| انحرافات عن §2 (مع السبب) | |
+| ما يحتاج قرار المالك | |
 
 ---
 
 ## 7. ما ينتظر المالك
 
-1. **تدوير التوكن** (`ghp_…` ظهر في المحادثة ≥ 13 مرة) + تفعيل حماية فرع `main` (مراجعة إلزامية + CI أخضر).
-2. تحديد `PLATFORM_ADMIN_USER_IDS` في بيئة التشغيل (معرّف المستخدم الخاص بك) قبل أول تفعيل يدوي.
-3. تأكيد `AI_PRICE_TABLE_JSON` للنموذج الافتراضي (أو تبديل `AI_DEFAULT_MODEL` إلى نموذج مسعَّر حياً) — وإلا يرفض وضع `platform` كل نداء (fail-closed بالتصميم).
-4. بعد قبول SPRINT-11: المخطط يصدر **SPRINT-11.1** (كتالوج المزودين + `/admin/ai/*` + probe + `AI_ALLOW_LOCAL_PROVIDER_HOSTS`) ثم SPRINT-12 (L1 + Pulse-SQL + أسقف واتساب).
+1. **تدوير التوكن** (`ghp_…` ظهر في المحادثة **≥ 15 مرة**) + حماية فرع `main`.
+2. تحديد `PLATFORM_ADMIN_USER_IDS` قبل أول استخدام لـ`/admin/ai/*` أو `/admin/entitlements/*`.
+3. بعد قبول SPRINT-11.1: تفعيل `FEATURE_PROVIDER_CATALOG_ENABLED=true` **بعد** إدخال مزوّد + نموذج مسعَّر + مسار لكل غرض عبر `/admin/ai/*` (وإلا 503 `ai_route_unavailable` بالتصميم).
+4. ثم SPRINT-12 (L1 + Pulse-SQL + أسقف واتساب D-082) ⇒ SPRINT-13 (Day-2 Ops + احتفاظ D-081).
