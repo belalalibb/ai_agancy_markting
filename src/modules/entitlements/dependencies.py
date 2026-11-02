@@ -7,10 +7,12 @@ Only ``src/main.py`` (router mount) and ``src/modules/ai_gateway/dependencies.py
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
@@ -23,7 +25,12 @@ from src.modules.entitlements.infrastructure.postgres_repository import (
     PgCounterUsageReader,
     PgEntitlementRepository,
 )
-from src.modules.entitlements.service import EntitlementService, PgEntitlementLimitsReader
+from src.modules.entitlements.service import (
+    EntitlementService,
+    PgEntitlementLimitsReader,
+    PlanCounterUsageRow,
+    plan_counter_usage,
+)
 
 
 def get_entitlement_repository(
@@ -118,3 +125,33 @@ def counter_guard_dependency(
         return PlanCounterGuard(limits, exceeded=exceeded, inactive=inactive)
 
     return _get
+
+
+# ------------------------------------------------------- SPRINT-12 B-3 (Pulse check 6) --
+_ACTIVE_BRANDS_SQL = """
+SELECT brand_id FROM wa_conversations WHERE created_at >= :since
+UNION
+SELECT brand_id FROM publish_jobs WHERE created_at >= :since
+"""
+
+
+class PgPlanCounterUsageReader:
+    """``pulse.domain.PlanCounterUsageReader`` adapter bound in ``src/main.py`` (D-016):
+    the brands that consumed any counter this month, with ``used / limit`` per counter."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def usage(self, now: datetime) -> list[PlanCounterUsageRow]:
+        from src.modules.entitlements.service import MONTH_WINDOW
+
+        result = await self._session.execute(
+            text(_ACTIVE_BRANDS_SQL), {"since": now - MONTH_WINDOW}
+        )
+        brand_ids: list[UUID] = [row[0] for row in result.all()]
+        return await plan_counter_usage(
+            brand_ids,
+            repo=PgEntitlementRepository(self._session),
+            counters=PgCounterUsageReader(self._session),
+            now=now,
+        )

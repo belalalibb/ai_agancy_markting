@@ -166,7 +166,9 @@ def test_b6_u1_scheduler_loop_started_and_cancelled_when_enabled(
     async def fake_loop(scheduler: Any, poll_seconds: float, *, extra_steps=()) -> None:  # noqa: ANN001
         calls.append(type(scheduler).__name__)
         assert poll_seconds == 1
-        assert len(extra_steps) == 1  # SPRINT-11 B-4: settle_stale_reservations
+        # SPRINT-11 B-4: settle_stale_reservations; SPRINT-12 B-3: pulse_step (FEATURE_PULSE
+        # defaults to true — ``test_pulse.py`` covers the 1-step shape when it is off).
+        assert len(extra_steps) == 2
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:

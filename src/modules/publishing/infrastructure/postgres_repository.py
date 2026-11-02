@@ -329,3 +329,23 @@ def _attempt_to_domain(row: PublishAttemptRow) -> PublishAttempt:
         graph_trace_id=row.graph_trace_id,
         external_post_id=row.external_post_id,
     )
+
+
+class PgPublishedPostLookup:
+    """SPRINT-12 B-2 (D-079): the ``whatsapp.lead_loop.PublishedPostLookup`` port — *"which
+    succeeded job of this brand published ``external_post_id``?"* (read-only)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def published_job_id(self, brand_id: UUID, external_post_id: str) -> UUID | None:
+        return await self._session.scalar(
+            select(PublishJobRow.id)
+            .where(
+                PublishJobRow.brand_id == brand_id,
+                PublishJobRow.status == "succeeded",
+                PublishJobRow.external_post_id == external_post_id,
+            )
+            .order_by(PublishJobRow.created_at.desc())
+            .limit(1)
+        )

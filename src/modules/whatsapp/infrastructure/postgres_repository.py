@@ -24,9 +24,12 @@ from src.modules.whatsapp.domain.models import (
     DeliveryStatus,
     Direction,
     DraftStatus,
+    LeadAttribution,
+    LeadStage,
     LearningSignal,
     Message,
     MessageKind,
+    NumberCap,
     RejectionReason,
     ReplyDraft,
     WhatsAppAccount,
@@ -35,8 +38,10 @@ from src.modules.whatsapp.domain.models import (
 from src.modules.whatsapp.domain.repository import Cursor, WhatsAppRepository
 from src.modules.whatsapp.infrastructure.orm import (
     ConversationRow,
+    LeadAttributionRow,
     LearningSignalRow,
     MessageRow,
+    NumberCapRow,
     ReplyDraftRow,
     WhatsAppAccountRow,
 )
@@ -73,6 +78,9 @@ def _conversation(row: ConversationRow) -> Conversation:
         status=ConversationStatus(row.status),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        lead_stage=LeadStage(row.lead_stage or "new"),  # SPRINT-12 B-2
+        lead_stage_set_by_user_id=row.lead_stage_set_by_user_id,
+        lead_stage_at=row.lead_stage_at,
     )
 
 
@@ -624,6 +632,86 @@ class PostgresWhatsAppRepository:
             }
             for r in rows
         ]
+
+    # ------------------------------------------------ SPRINT-12 B-2 lead loop (D-079) ----
+    async def set_lead_stage(
+        self, conversation_id: UUID, *, stage: LeadStage, actor_user_id: UUID, now: datetime
+    ) -> Conversation | None:
+        row = await self._session.scalar(
+            update(ConversationRow)
+            .where(ConversationRow.id == conversation_id)
+            .values(
+                lead_stage=stage.value,
+                lead_stage_set_by_user_id=actor_user_id,
+                lead_stage_at=now,
+                updated_at=now,
+            )
+            .returning(ConversationRow)
+        )
+        return _conversation(row) if row is not None else None
+
+    async def add_lead_attribution(self, attribution: LeadAttribution) -> bool:
+        result = await self._session.execute(
+            pg_insert(LeadAttributionRow)
+            .values(
+                id=attribution.id,
+                brand_id=attribution.brand_id,
+                conversation_id=attribution.conversation_id,
+                grade=attribution.grade,
+                source_kind=attribution.source_kind,
+                source_ref=attribution.source_ref,
+                signals=dict(attribution.signals),
+                created_at=attribution.created_at,
+            )
+            .on_conflict_do_nothing(constraint="uq_lead_attributions_conversation_source")
+        )
+        return bool(result.rowcount)
+
+    # --------------------------------------------- SPRINT-12 B-4 number caps (D-082) ----
+    async def get_number_cap(self, account_id: UUID) -> NumberCap | None:
+        row = await self._session.scalar(
+            select(NumberCapRow).where(NumberCapRow.account_id == account_id)
+        )
+        return _number_cap(row) if row is not None else None
+
+    async def upsert_number_cap(self, cap: NumberCap) -> NumberCap:
+        values = {
+            "account_id": cap.account_id,
+            "daily_reply_cap": cap.daily_reply_cap,
+            "kill_switch": cap.kill_switch,
+            "updated_at": cap.updated_at,
+        }
+        await self._session.execute(
+            pg_insert(NumberCapRow)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=[NumberCapRow.account_id],
+                set_={k: v for k, v in values.items() if k != "account_id"},
+            )
+        )
+        return cap
+
+    async def count_outbound_since(self, account_id: UUID, *, since: datetime) -> int:
+        value = await self._session.scalar(
+            select(func.count())
+            .select_from(MessageRow)
+            .join(ConversationRow, ConversationRow.id == MessageRow.conversation_id)
+            .where(
+                ConversationRow.account_id == account_id,
+                MessageRow.direction == Direction.OUTBOUND.value,
+                MessageRow.created_at >= since,
+            )
+        )
+        return int(value or 0)
+
+
+def _number_cap(row: NumberCapRow) -> NumberCap:
+    return NumberCap(
+        account_id=row.account_id,
+        daily_reply_cap=row.daily_reply_cap,
+        kill_switch=row.kill_switch,
+        updated_at=row.updated_at,
+    )
 
 
 class PgIndependentWrites:

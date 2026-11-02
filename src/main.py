@@ -15,14 +15,17 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core import database
 from src.core.config import Settings, get_settings
+from src.core.database import get_db_session
 from src.core.http import build_http_client
 from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
@@ -116,7 +119,14 @@ def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | N
         scheduler_loop(
             scheduler,
             settings.scheduler_poll_seconds,
-            extra_steps=(settle_stale_cost_reservations_step(settings),),
+            extra_steps=tuple(
+                step
+                for step in (
+                    settle_stale_cost_reservations_step(settings),
+                    pulse_scheduler_step(settings),
+                )
+                if step is not None
+            ),
         )
     )
 
@@ -135,6 +145,30 @@ def settle_stale_cost_reservations_step(settings: Settings) -> SchedulerStep:
         )
 
     return step
+
+
+def pulse_scheduler_step(settings: Settings) -> SchedulerStep | None:
+    """SPRINT-12 B-3: third scheduler step — ``Pulse.run(now)`` every
+    ``PULSE_INTERVAL_SECONDS``. ``FEATURE_PULSE=false`` ⇒ ``None`` (nothing scheduled).
+    Check (6) reads plan counters through the entitlements adapter bound here (D-016);
+    removing ``pulse`` = delete this function and the two mounts in ``create_app``."""
+    if not settings.feature_pulse:
+        return None
+    from src.modules.entitlements.dependencies import PgPlanCounterUsageReader
+    from src.modules.pulse.scheduler_step import pulse_step
+
+    return pulse_step(
+        interval_seconds=settings.pulse_interval_seconds,
+        counters_factory=lambda session: PgPlanCounterUsageReader(session),
+    )
+
+
+def _published_post_lookup(session: Annotated[AsyncSession, Depends(get_db_session)]) -> object:
+    """SPRINT-12 B-2: module-level so FastAPI can resolve the (postponed) annotation; the
+    publishing import stays local (removability)."""
+    from src.modules.publishing.infrastructure.postgres_repository import PgPublishedPostLookup
+
+    return PgPublishedPostLookup(session)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -200,6 +234,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.dependency_overrides[whatsapp_port.get_counter_guard] = counter_guard_dependency(
         whatsapp_port.CounterQuotaExceededError, whatsapp_port.CounterPlanInactiveError
     )
+    # SPRINT-12 B-2 (D-079/D-016): bind ``whatsapp``'s consumer-owned ``PublishedPostLookup``
+    # to the publishing adapter. Removing ``publishing`` = delete these lines; the port then
+    # yields ``None`` (no attribution). The admin wa-caps route lives on the whatsapp admin
+    # router (D-082) — see whatsapp/REMOVABILITY.md.
+    from src.modules.whatsapp import lead_loop as whatsapp_lead_loop
+    from src.modules.whatsapp.router import admin_router as whatsapp_admin_router
+
+    app.dependency_overrides[whatsapp_lead_loop.get_published_post_lookup] = _published_post_lookup
+    api_v1.include_router(whatsapp_admin_router)
+    if settings.feature_pulse:
+        from src.modules.pulse.router import router as pulse_router
+
+        api_v1.include_router(pulse_router)
+    else:
+        logger.warning("FEATURE_PULSE=false — Pulse routes and scheduler step are not mounted")
     app.include_router(api_v1)
 
     @app.get("/health", tags=["System"], summary="Liveness probe")

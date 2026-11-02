@@ -18,8 +18,11 @@ from src.modules.whatsapp.domain.models import (
     ConversationStatus,
     DeliveryStatus,
     DraftStatus,
+    LeadAttribution,
+    LeadStage,
     LearningSignal,
     Message,
+    NumberCap,
     RejectionReason,
     ReplyDraft,
     WhatsAppAccount,
@@ -184,6 +187,24 @@ class WhatsAppRepository(Protocol):
     async def add_signal(self, signal: LearningSignal) -> LearningSignal: ...
 
     async def learning_signals(self, brand_id: UUID) -> list[dict[str, Any]]: ...
+
+    # --- SPRINT-12 B-2 lead loop (D-079) ---
+    async def set_lead_stage(
+        self, conversation_id: UUID, *, stage: LeadStage, actor_user_id: UUID, now: datetime
+    ) -> Conversation | None: ...
+
+    async def add_lead_attribution(self, attribution: LeadAttribution) -> bool:
+        """``False`` when the same ``(conversation, source_kind, source_ref)`` already exists."""
+        ...
+
+    # --- SPRINT-12 B-4 number caps (D-082) ---
+    async def get_number_cap(self, account_id: UUID) -> NumberCap | None: ...
+
+    async def upsert_number_cap(self, cap: NumberCap) -> NumberCap: ...
+
+    async def count_outbound_since(self, account_id: UUID, *, since: datetime) -> int:
+        """Outbound ``wa_messages`` of every conversation of the number since ``since``."""
+        ...
 
 
 class IndependentWrites(Protocol):

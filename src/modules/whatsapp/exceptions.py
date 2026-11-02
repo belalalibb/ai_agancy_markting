@@ -157,3 +157,22 @@ class DraftNotPendingError(WhatsAppError):
     def __init__(self, current_status: str) -> None:
         super().__init__()
         self.current_status = current_status
+
+
+class NumberDisabledError(WhatsAppError):
+    """SPRINT-12 B-4 (D-082): the number's ``kill_switch`` is on ⇒ 423 ``wa_number_disabled``."""
+
+    error = "wa_number_disabled"
+
+
+class DailyCapReachedError(WhatsAppError):
+    """SPRINT-12 B-4 (D-082): ``daily_reply_cap`` outbound messages already sent today (UTC)
+    ⇒ 429 ``wa_daily_cap_reached`` ``{cap, used, resets_in_seconds}``."""
+
+    error = "wa_daily_cap_reached"
+
+    def __init__(self, *, cap: int, used: int, resets_in_seconds: int) -> None:
+        super().__init__()
+        self.cap = cap
+        self.used = used
+        self.resets_in_seconds = resets_in_seconds

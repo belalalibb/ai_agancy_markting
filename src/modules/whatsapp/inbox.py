@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -46,6 +46,8 @@ from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, Wh
 from src.modules.whatsapp.exceptions import (
     AccountNotFoundError,
     ConversationNotFoundError,
+    DailyCapReachedError,
+    NumberDisabledError,
     PermanentSendError,
     RateLimitedSendError,
     ReauthRequiredError,
@@ -86,6 +88,9 @@ def preview(body: str | None) -> str | None:
         return None
     flat = " ".join(body.split())
     return flat if len(flat) <= PREVIEW_LENGTH else flat[: PREVIEW_LENGTH - 1] + "…"
+
+
+DEFAULT_DAILY_REPLY_CAP = 300  # D-082: 300 replies / number / UTC day without a caps row
 
 
 class WhatsAppInboxService:
@@ -190,6 +195,7 @@ class WhatsAppInboxService:
         now = datetime.now(tz=UTC)
         if not conv.window_open(now):
             raise WindowClosedError()
+        await self._ensure_number_cap(conv.account_id, now=now)  # D-082
         message = Message(
             conversation_id=conv.id,
             brand_id=brand_id,
@@ -227,6 +233,7 @@ class WhatsAppInboxService:
                 return SendResult(existing, duplicate=True)
         conv = await self._lock_conversation(brand_id, conversation_id)
         now = datetime.now(tz=UTC)
+        await self._ensure_number_cap(conv.account_id, now=now)  # D-082
         message = Message(
             conversation_id=conv.id,
             brand_id=brand_id,
@@ -249,6 +256,20 @@ class WhatsAppInboxService:
         return SendResult(await self._deliver(conv, message, _call))
 
     # ---------------------------------------------------------------- helpers ----
+    async def _ensure_number_cap(self, account_id: UUID, *, now: datetime) -> None:
+        """SPRINT-12 B-4 (D-082): ``kill_switch`` ⇒ 423; ``daily_reply_cap`` outbound messages
+        of the number since 00:00 UTC ⇒ 429 with the seconds until midnight UTC. A number
+        without a ``wa_number_caps`` row uses the default cap (300)."""
+        cap = await self._repo.get_number_cap(account_id)
+        if cap is not None and cap.kill_switch:
+            raise NumberDisabledError()
+        limit = cap.daily_reply_cap if cap is not None else DEFAULT_DAILY_REPLY_CAP
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        used = await self._repo.count_outbound_since(account_id, since=day_start)
+        if used >= limit:
+            resets = int((day_start + timedelta(days=1) - now).total_seconds())
+            raise DailyCapReachedError(cap=limit, used=used, resets_in_seconds=max(resets, 1))
+
     async def _lock_conversation(self, brand_id: UUID, conversation_id: UUID) -> Conversation:
         conv = await self._repo.get_conversation_for_update(brand_id, conversation_id)
         if conv is None:

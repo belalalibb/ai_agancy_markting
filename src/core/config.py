@@ -152,6 +152,15 @@ class Settings(BaseSettings):
     ai_allow_local_provider_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # SPRINT-11.1 B-2: in-process catalog snapshot TTL; ``0`` disables the cache (tests).
     ai_catalog_cache_seconds: int = Field(default=30, ge=0, le=3600)
+    # SPRINT-12 B-2 (D-079 + D-076 kill switch): ``False`` ⇒ the lead-stage route answers 404
+    # and the webhook writes no ``lead_attributions`` row — see whatsapp/REMOVABILITY.md.
+    feature_lead_loop: bool = True
+    # SPRINT-12 B-3 (D-076 kill switch): ``False`` ⇒ the Pulse scheduler step is not mounted,
+    # the routes answer 404 and nothing is written — see pulse/REMOVABILITY.md.
+    feature_pulse: bool = True
+    # SPRINT-12 B-3: minimum seconds between two Pulse runs (the step is called every
+    # scheduler cycle and skips until the interval has elapsed).
+    pulse_interval_seconds: int = Field(default=900, ge=60, le=86_400)
 
     # --- Scheduler / publishing (SPRINT-07 B3) ------------------------------------------
     # Off by default (tests, dev). The worker loop is started in ``lifespan`` only when on.

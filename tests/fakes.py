@@ -946,6 +946,9 @@ class FakeWhatsAppRepository:
         self.messages: dict[UUID, object] = {}
         self.drafts: dict[UUID, object] = {}
         self.signals: dict[UUID, object] = {}
+        self.attributions: dict[UUID, object] = {}  # SPRINT-12 B-2
+        self.attribution_keys: set[tuple[UUID, str, str]] = set()
+        self.number_caps: dict[UUID, object] = {}  # SPRINT-12 B-4
 
     # ------------------------------------------------------------- accounts ----
     async def create_account(self, account):  # noqa: ANN001, ANN201
@@ -1102,6 +1105,47 @@ class FakeWhatsAppRepository:
     async def insert_outbound(self, message):  # noqa: ANN001, ANN201
         self.messages[message.id] = message
         return message
+
+    # --- SPRINT-12 B-2 / B-4 ---
+    async def set_lead_stage(self, conversation_id: UUID, *, stage, actor_user_id, now):  # noqa: ANN001, ANN201
+        conv = self.conversations.get(conversation_id)
+        if conv is None:
+            return None
+        conv = conv.model_copy(
+            update={
+                "lead_stage": stage,
+                "lead_stage_set_by_user_id": actor_user_id,
+                "lead_stage_at": now,
+                "updated_at": now,
+            }
+        )
+        self.conversations[conversation_id] = conv
+        return conv
+
+    async def add_lead_attribution(self, attribution) -> bool:  # noqa: ANN001
+        key = (attribution.conversation_id, attribution.source_kind, attribution.source_ref)
+        if key in self.attribution_keys:
+            return False
+        self.attribution_keys.add(key)
+        self.attributions[attribution.id] = attribution
+        return True
+
+    async def get_number_cap(self, account_id: UUID):  # noqa: ANN201
+        return self.number_caps.get(account_id)
+
+    async def upsert_number_cap(self, cap):  # noqa: ANN001, ANN201
+        self.number_caps[cap.account_id] = cap
+        return cap
+
+    async def count_outbound_since(self, account_id: UUID, *, since) -> int:  # noqa: ANN001
+        conv_ids = {c.id for c in self.conversations.values() if c.account_id == account_id}
+        return sum(
+            1
+            for m in self.messages.values()
+            if m.conversation_id in conv_ids
+            and m.direction.value == "outbound"
+            and m.created_at >= since
+        )
 
     async def get_message(self, brand_id: UUID, message_id: UUID):  # noqa: ANN201
         m = self.messages.get(message_id)

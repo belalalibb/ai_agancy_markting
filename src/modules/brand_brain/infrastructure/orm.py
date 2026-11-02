@@ -189,6 +189,7 @@ class BrandRecommendationRow(Base):
 
     __tablename__ = "brand_recommendations"
     __table_args__ = (
+        UniqueConstraint("share_token_hash", name="uq_brand_recommendations_share_token_hash"),
         Index(
             "ix_brand_recommendations_brand_status_created",
             "brand_id",
@@ -247,6 +248,9 @@ class BrandRecommendationRow(Base):
     )
     provenance: Mapped[dict[str, Any]] = _jsonb("{}")
     created_at: Mapped[datetime] = _ts()
+    # SPRINT-12 (0016): public diagnosis link — sha256 of the token, never the token (Part C).
+    share_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    shared_at: Mapped[datetime | None] = _ts(nullable=True)
 
 
 class LearningSignalRow(Base):

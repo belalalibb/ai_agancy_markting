@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +26,31 @@ class ConversationStatus(StrEnum):
 class Direction(StrEnum):
     INBOUND = "inbound"
     OUTBOUND = "outbound"
+
+
+class LeadStage(StrEnum):
+    """SPRINT-12 B-2 (D-079): owner-set funnel stage of a conversation (0016 CHECK)."""
+
+    NEW = "new"
+    QUALIFIED = "qualified"
+    QUOTED = "quoted"
+    WON = "won"
+    LOST = "lost"
+    NOT_LEAD = "not_lead"
+
+
+class ObjectionCode(StrEnum):
+    """D-069: why a lead was lost — a **code**, never the customer's words."""
+
+    PRICE = "price"
+    TIMING = "timing"
+    TRUST = "trust"
+    COMPETITOR = "competitor"
+    NO_RESPONSE = "no_response"
+    OTHER = "other"
+
+
+AttributionGrade = Literal["measured", "inferred", "owner_input"]
 
 
 class MessageKind(StrEnum):
@@ -145,6 +170,10 @@ class Conversation(BaseModel):
     status: ConversationStatus = ConversationStatus.OPEN
     created_at: datetime
     updated_at: datetime
+    # SPRINT-12 B-2 (D-079)
+    lead_stage: LeadStage = LeadStage.NEW
+    lead_stage_set_by_user_id: UUID | None = None
+    lead_stage_at: datetime | None = None
 
     def window_open(self, now: datetime) -> bool:
         return self.window_expires_at is not None and now < self.window_expires_at
@@ -207,3 +236,30 @@ class LearningSignal(BaseModel):
     credential_mode: str = Field(max_length=16)
     features: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class LeadAttribution(BaseModel):
+    """SPRINT-12 B-2 (D-079): one ``lead_attributions`` row. ``signals`` = codes only (D-069);
+    ``(conversation_id, source_kind, source_ref)`` is unique ⇒ re-deliveries are no-ops."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID = Field(default_factory=uuid4)
+    brand_id: UUID
+    conversation_id: UUID
+    grade: AttributionGrade
+    source_kind: str = Field(min_length=1, max_length=16)
+    source_ref: str = Field(min_length=1, max_length=128)
+    signals: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class NumberCap(BaseModel):
+    """SPRINT-12 B-4 (D-082): per-number daily reply cap + kill switch (``wa_number_caps``)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    account_id: UUID
+    daily_reply_cap: int = Field(default=300, gt=0)
+    kill_switch: bool = False
+    updated_at: datetime

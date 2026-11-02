@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime
+import logging
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -29,7 +30,12 @@ from src.core.security import (
 from src.modules.ai_gateway.budget_guard import BudgetGuardError
 from src.modules.ai_gateway.dependencies import GuardedGateway
 from src.modules.ai_gateway.http_errors import budget_error_to_http, plan_inactive_http
-from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
+from src.modules.auth.dependencies import (
+    CurrentUser,
+    CurrentUserFresh,
+    PlatformAdmin,
+    get_rate_limiter,
+)
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.exceptions import ContentError
 from src.modules.content.router import to_http as content_to_http
@@ -50,7 +56,12 @@ from src.modules.tenancy.exceptions import BrandNotFoundError, InsufficientRoleE
 from src.modules.tenancy.router import to_http as tenancy_to_http
 from src.modules.whatsapp.client import WhatsAppCloudClient
 from src.modules.whatsapp.consent import BrandConsentReader
-from src.modules.whatsapp.domain.models import Conversation, ConversationStatus, Message
+from src.modules.whatsapp.domain.models import (
+    Conversation,
+    ConversationStatus,
+    Message,
+    NumberCap,
+)
 from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, WhatsAppRepository
 from src.modules.whatsapp.entitlements_port import (
     CounterGuard,
@@ -63,10 +74,12 @@ from src.modules.whatsapp.exceptions import (
     AccountNotFoundError,
     ConversationNotFoundError,
     CredentialsInvalidError,
+    DailyCapReachedError,
     DraftNotFoundError,
     DraftNotPendingError,
     DraftPendingError,
     NoInboundToReplyError,
+    NumberDisabledError,
     PermanentSendError,
     PhoneNumberInUseError,
     RateLimitedSendError,
@@ -76,10 +89,15 @@ from src.modules.whatsapp.exceptions import (
     WhatsAppError,
     WindowClosedError,
 )
-from src.modules.whatsapp.inbox import WhatsAppInboxService
+from src.modules.whatsapp.inbox import DEFAULT_DAILY_REPLY_CAP, WhatsAppInboxService
 from src.modules.whatsapp.infrastructure.postgres_repository import (
     PgIndependentWrites,
     PostgresWhatsAppRepository,
+)
+from src.modules.whatsapp.lead_loop import (
+    LeadLoopService,
+    PublishedPostLookup,
+    get_published_post_lookup,
 )
 from src.modules.whatsapp.schemas import (
     ApproveDraftRequest,
@@ -87,8 +105,12 @@ from src.modules.whatsapp.schemas import (
     ConversationPage,
     ConversationPublic,
     ConversationStatePublic,
+    LeadStagePublic,
+    LeadStageRequest,
     MessagePublic,
     MessagesPage,
+    NumberCapPatch,
+    NumberCapPublic,
     RejectDraftRequest,
     ReplyDraftPublic,
     SendResultPublic,
@@ -101,6 +123,8 @@ from src.modules.whatsapp.schemas import (
 )
 from src.modules.whatsapp.service import PostgresWhatsAppTokenProvider, WhatsAppAccountService
 from src.modules.whatsapp.suggestions import ReplySuggestionService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["WhatsApp — conversations (M6)"])
 
@@ -183,6 +207,17 @@ def get_suggestion_service(
 
 
 Suggestions = Annotated[ReplySuggestionService, Depends(get_suggestion_service)]
+Posts = Annotated[PublishedPostLookup | None, Depends(get_published_post_lookup)]  # SPRINT-12
+
+
+def get_lead_loop_service(
+    repo: Repo, settings: Annotated[Settings, Depends(get_settings)], posts: Posts
+) -> LeadLoopService:
+    """SPRINT-12 B-2 (D-079): the lead loop over the request repository."""
+    return LeadLoopService(repo, posts=posts, enabled=settings.feature_lead_loop)
+
+
+LeadLoop = Annotated[LeadLoopService, Depends(get_lead_loop_service)]
 
 
 async def _authorise(
@@ -264,6 +299,12 @@ def to_http(exc: WhatsAppError) -> HTTPException:
     elif isinstance(exc, DraftNotPendingError):
         code = status.HTTP_409_CONFLICT
         detail["current_status"] = exc.current_status
+    elif isinstance(exc, NumberDisabledError):  # SPRINT-12 B-4 (D-082)
+        code = status.HTTP_423_LOCKED
+    elif isinstance(exc, DailyCapReachedError):  # SPRINT-12 B-4 (D-082)
+        code = status.HTTP_429_TOO_MANY_REQUESTS
+        detail.update(cap=exc.cap, used=exc.used, resets_in_seconds=exc.resets_in_seconds)
+        headers = {"Retry-After": str(exc.resets_in_seconds)}
     else:
         code = status.HTTP_400_BAD_REQUEST
     return HTTPException(code, detail=detail, headers=headers)
@@ -693,3 +734,94 @@ async def reject_reply_draft(
     except WhatsAppError as exc:
         raise to_http(exc) from exc
     return ReplyDraftPublic.from_domain(draft, private=True)
+
+
+# --------------------------------------------------- SPRINT-12 B-2 lead loop (D-079) ---
+@router.patch(
+    f"{BRAND_PREFIX}/conversations/{{conversation_id}}/lead-stage",
+    response_model=LeadStagePublic,
+    summary="Set the conversation's lead stage (+ objection code when lost) — OWNER/MANAGER",
+    responses={
+        403: {"description": "VIEWER may not set stages"},
+        404: {"description": "brand / conversation unknown, or FEATURE_LEAD_LOOP=false"},
+    },
+)
+async def set_lead_stage(
+    brand_id: UUID,
+    conversation_id: UUID,
+    payload: LeadStageRequest,
+    actor: CurrentUser,
+    resolver: Resolver,
+    inbox: Inbox,
+    lead_loop: LeadLoop,
+) -> LeadStagePublic:
+    if not lead_loop.enabled:  # D-076 kill switch ⇒ the route does not exist
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"error": "not_found"})
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    try:
+        conv = await inbox.get_conversation(brand_id, conversation_id)
+    except WhatsAppError as exc:
+        raise to_http(exc) from exc
+    updated, code = await lead_loop.set_stage(
+        conv,
+        stage=payload.lead_stage,
+        objection_code=payload.objection_code,
+        actor_user_id=actor.user_id,
+    )
+    return LeadStagePublic(
+        conversation_id=updated.id,
+        lead_stage=updated.lead_stage,
+        lead_stage_at=updated.lead_stage_at,
+        lead_stage_set_by_user_id=updated.lead_stage_set_by_user_id,
+        objection_code=code,
+    )
+
+
+# -------------------------------------------------- SPRINT-12 B-4 number caps (D-082) ---
+admin_router = APIRouter(prefix="/admin/entitlements", tags=["Platform admin"])
+
+
+@admin_router.patch(
+    "/wa-caps/{account_id}",
+    response_model=NumberCapPublic,
+    summary="Set a WhatsApp number's daily reply cap / kill switch (platform admin, D-082)",
+    responses={404: {"description": "whatsapp_account_not_found"}},
+)
+async def patch_number_cap(
+    account_id: UUID, payload: NumberCapPatch, actor: PlatformAdmin, repo: Repo
+) -> NumberCapPublic:
+    if payload.daily_reply_cap is None and payload.kill_switch is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"error": "wa_caps_nothing_to_change"},
+        )
+    if await repo.get_account_by_id(account_id) is None:
+        raise to_http(AccountNotFoundError())
+    now = datetime.now(tz=UTC)
+    current = await repo.get_number_cap(account_id)
+    cap = NumberCap(
+        account_id=account_id,
+        daily_reply_cap=(
+            payload.daily_reply_cap
+            if payload.daily_reply_cap is not None
+            else (current.daily_reply_cap if current else DEFAULT_DAILY_REPLY_CAP)
+        ),
+        kill_switch=(
+            payload.kill_switch
+            if payload.kill_switch is not None
+            else (current.kill_switch if current else False)
+        ),
+        updated_at=now,
+    )
+    await repo.upsert_number_cap(cap)
+    used = await repo.count_outbound_since(
+        account_id, since=now.replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    logger.info(
+        "wa caps: admin=%s account=%s cap=%d kill=%s",
+        actor.user_id,
+        account_id,
+        cap.daily_reply_cap,
+        cap.kill_switch,
+    )
+    return NumberCapPublic.from_domain(cap, used_today=used)
