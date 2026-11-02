@@ -6694,3 +6694,306 @@ def test_b1_migration_0015_round_trip_on_pg() -> None:
     assert _run("SELECT COUNT(*) FROM ai_routing", scalar=True) == 0
     _seed_fresh()
     reset_db_caches()
+
+
+# =============================================================================
+# SPRINT-11.1 Part C — /admin/ai/* on real tables (Criteria #10, #12, #13, #14)
+# =============================================================================
+from decimal import Decimal  # noqa: E402
+
+from tests.conftest import OWNER_USER_ID  # noqa: E402
+
+ADMIN_AI = f"{API}/admin/ai"
+CATALOG_HOST = "https://catalog-pg.example"
+CATALOG_HOST_2 = "https://fallback-pg.example"
+PROBE_KEY = "".join(("sk-", "PLANNER-PROBE-", "pg0123456789"))  # assembled: no secret literal
+
+
+def _c_openai_ok(model: str, text_: str = "pg reply") -> dict:
+    return {
+        "model": model,
+        "choices": [{"message": {"content": text_}}],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+    }
+
+
+def _c_catalog_seed(client: TestClient, owner: dict[str, str]) -> tuple[str, str]:
+    """One encrypted-key provider + one priced model; returns ``(provider_id, model_id)``."""
+    provider = client.post(
+        f"{ADMIN_AI}/providers",
+        json={
+            "slug": "pg-main",
+            "kind": "openai_compatible",
+            "base_url": f"{CATALOG_HOST}/v1",
+            "api_key": PROBE_KEY,
+        },
+        headers=owner,
+    )
+    assert provider.status_code == 201, provider.text
+    model = client.post(
+        f"{ADMIN_AI}/models",
+        json={
+            "provider_id": provider.json()["id"],
+            "model_name": "gpt-4o-mini",
+            "pricing": {"prompt_per_1k": "0.00015", "completion_per_1k": "0.0006"},
+        },
+        headers=owner,
+    )
+    assert model.status_code == 201, model.text
+    return provider.json()["id"], model.json()["id"]
+
+
+def test_c10_admin_ai_zero_secret_on_pg(
+    integration_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Criterion #10: the raw key is never in any GET/PATCH body, in ``openapi.json`` or in the
+    log; ``ai_providers.credential_cipher`` is Fernet (``gAAAA``); the stored cipher decrypts
+    back to the key with the app's ``TokenEncryptionService`` (so the resolver can use it)."""
+    owner = _c_reset(integration_app)
+    get_settings_dep = _c_admin(integration_app)
+    caplog.set_level("INFO")
+    try:
+        with TestClient(integration_app) as client:
+            provider_id, model_id = _c_catalog_seed(client, owner)
+            bodies = [
+                client.get(f"{ADMIN_AI}/providers", headers=owner).text,
+                client.get(f"{ADMIN_AI}/models", headers=owner).text,
+                client.patch(
+                    f"{ADMIN_AI}/providers/{provider_id}", json={"enabled": True}, headers=owner
+                ).text,
+                client.get("/openapi.json").text,
+            ]
+            for body in bodies:
+                assert PROBE_KEY not in body and "sk-PLANNER" not in body
+            assert PROBE_KEY not in caplog.text
+            assert any("admin_ai action=provider.create" in r.getMessage() for r in caplog.records)
+            cipher = _run(
+                "SELECT credential_cipher FROM ai_providers WHERE id = :id",
+                {"id": UUID(provider_id)},
+                scalar=True,
+            )
+            assert isinstance(cipher, str) and cipher.startswith("gAAAA")
+            settings = integration_app.state.settings
+            svc = TokenEncryptionService(settings.token_encryption_key.get_secret_value())
+            assert svc.decrypt_token(cipher) == PROBE_KEY
+            # 404s and the CASCADE on delete are real FK behaviour on PG.
+            assert (
+                client.delete(f"{ADMIN_AI}/providers/{provider_id}", headers=owner).status_code
+                == 204
+            )
+            assert _run("SELECT COUNT(*) FROM ai_models", scalar=True) == 0
+            assert client.delete(f"{ADMIN_AI}/models/{model_id}", headers=owner).status_code == 404
+    finally:
+        integration_app.dependency_overrides.pop(get_settings_dep, None)
+
+
+def test_c12_catalog_fallback_leaves_two_cost_rows_on_pg(integration_app: FastAPI) -> None:
+    """Criterion #12 on real tables: routing [primary ⇒ fallback]; primary answers 503 ⇒ the
+    fallback is called; ``ai_cost_log`` holds two rows (``error`` then ``ok``) priced per model;
+    a 400 from the primary ⇒ **no** fallback and the reservation is refunded (no row)."""
+    from src.core.config import get_settings
+    from src.modules.ai_gateway.catalog.infrastructure.pg_repository import CATALOG_CACHE
+
+    owner = _c_reset(integration_app)
+    base = integration_app.state.settings.model_copy(
+        update={"platform_admin_user_ids": [OWNER_USER_ID], "ai_catalog_cache_seconds": 0}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: base
+    try:
+        with TestClient(integration_app) as client:
+            _, primary = _c_catalog_seed(client, owner)
+            second = client.post(
+                f"{ADMIN_AI}/providers",
+                json={
+                    "slug": "pg-fallback",
+                    "kind": "openai_compatible",
+                    "base_url": f"{CATALOG_HOST_2}/v1",
+                    "api_key": PROBE_KEY + "2",
+                },
+                headers=owner,
+            )
+            assert second.status_code == 201, second.text
+            fallback = client.post(
+                f"{ADMIN_AI}/models",
+                json={
+                    "provider_id": second.json()["id"],
+                    "model_name": "fallback-1",
+                    "pricing": {"prompt_per_1k": "0.001", "completion_per_1k": "0.002"},
+                },
+                headers=owner,
+            )
+            assert fallback.status_code == 201, fallback.text
+            put = client.put(
+                f"{ADMIN_AI}/routing/content_generation",
+                json={"models": [primary, fallback.json()["id"]]},
+                headers=owner,
+            )
+            assert put.status_code == 200, put.text
+            CATALOG_CACHE.invalidate()
+
+            # Switch the runtime resolver on for the brand-side call.
+            live = base.model_copy(update={"feature_provider_catalog_enabled": True})
+            integration_app.dependency_overrides[get_settings] = lambda: live
+            item = client.post(
+                f"{API}/brands/{BRAND_ID}/content/items",
+                json={"channel": "facebook_page", "body": "catalog fallback on pg"},
+                headers=owner,
+            )
+            assert item.status_code == 201, item.text
+            generate = f"{API}/brands/{BRAND_ID}/content/items/{item.json()['id']}/generate"
+            with respx.mock(assert_all_called=False) as mock:
+                primary_route = mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    503, json={"error": "down"}
+                )
+                fallback_route = mock.post(f"{CATALOG_HOST_2}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("fallback-1")
+                )
+                res = client.post(generate, json={"brief": "fallback brief"}, headers=owner)
+                # respx clears its call log on context exit ⇒ assert while still mocked. The
+                # HTTP facade retries a retryable 503 once itself (SPRINT-11 B) before the
+                # catalog moves on, so the primary sees ≥ 1 call and the fallback exactly 1.
+                assert primary_route.called and fallback_route.call_count == 1, res.text
+            assert res.status_code == 200, res.text
+            rows = _rows(
+                "SELECT model, outcome, estimated_cost_usd FROM ai_cost_log ORDER BY created_at"
+            )
+            assert [(r[0], r[1]) for r in rows] == [
+                ("gpt-4o-mini", "error"),
+                ("fallback-1", "ok"),
+            ]
+            # 20 * 0.001/1000 + 10 * 0.002/1000 = 0.00002 + 0.00002 = 0.00004
+            assert rows[1][2] == Decimal("0.000040")
+
+            # A 400 (bad_request) is not a fallback category ⇒ no 2nd call; the reservation
+            # never reached billing ⇒ **refunded** (row deleted, SPRINT-11 B-1) ⇒ no row.
+            _run("DELETE FROM ai_cost_log")
+            with respx.mock(assert_all_called=False) as mock:
+                primary_route = mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    400, json={"error": {"message": "bad"}}
+                )
+                never = mock.post(f"{CATALOG_HOST_2}/v1/chat/completions")
+                res = client.post(
+                    generate, json={"brief": "a brief that triggers a 400 upstream"}, headers=owner
+                )
+                assert primary_route.called, res.text
+                assert not never.called
+            assert res.status_code >= 400 and res.status_code != 503, res.text
+            assert _rows("SELECT model, outcome FROM ai_cost_log") == []
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+        CATALOG_CACHE.invalidate()
+
+
+def test_c13_provider_host_guard_on_pg(integration_app: FastAPI) -> None:
+    """Criterion #13: loopback ``base_url`` ⇒ 422 and **no row**; allow-listed ⇒ 201 and a row;
+    ``public_fetch.py`` is untouched (checked by the planner's ``git diff``)."""
+    from src.core.config import get_settings
+
+    owner = _c_reset(integration_app)
+    base = integration_app.state.settings.model_copy(
+        update={"platform_admin_user_ids": [OWNER_USER_ID]}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: base
+    try:
+        with TestClient(integration_app) as client:
+            body = {
+                "slug": "ollama",
+                "kind": "openai_compatible",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "credential_ref": "OLLAMA_KEY",
+            }
+            refused = client.post(f"{ADMIN_AI}/providers", json=body, headers=owner)
+            assert refused.status_code == 422, refused.text
+            assert refused.json()["detail"]["error"] == "provider_host_not_allowed"
+            assert _run("SELECT COUNT(*) FROM ai_providers", scalar=True) == 0
+            allowed = base.model_copy(
+                update={"ai_allow_local_provider_hosts": ["127.0.0.1:11434"]}
+            )
+            integration_app.dependency_overrides[get_settings] = lambda: allowed
+            ok = client.post(f"{ADMIN_AI}/providers", json=body, headers=owner)
+            assert ok.status_code == 201, ok.text
+            assert (
+                ok.json()["has_credential"] is True and ok.json()["credential_ref"] == "OLLAMA_KEY"
+            )
+            assert _run("SELECT credential_cipher FROM ai_providers", scalar=True) is None
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+
+
+def test_c14_probe_writes_admin_probe_row_with_null_brand_on_pg(integration_app: FastAPI) -> None:
+    """Criterion #14 on PG: success ⇒ one ``ai_cost_log`` row ``purpose='admin_probe'``,
+    ``brand_id NULL``, ``outcome='ok'`` priced from ``ai_models``; a provider 500 ⇒ 200
+    ``ok=false`` + category + an ``error`` row; the 6th probe within a minute ⇒ 429."""
+    from src.modules.auth.dependencies import get_rate_limiter
+    from src.modules.auth.infrastructure.rate_limit import InMemoryRateLimiter
+
+    owner = _c_reset(integration_app)
+    get_settings_dep = _c_admin(integration_app)
+    # The integration app wires ``FakeRateLimiter`` (never limits); the probe quota needs the
+    # real in-memory limiter to prove the 6th call within a minute is 429.
+    real_limiter = InMemoryRateLimiter()
+    integration_app.dependency_overrides[get_rate_limiter] = lambda: real_limiter
+    try:
+        with TestClient(integration_app) as client:
+            _, model_id = _c_catalog_seed(client, owner)
+            with respx.mock(assert_all_called=True) as mock:
+                mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("gpt-4o-mini", "pong")
+                )
+                res = client.post(
+                    f"{ADMIN_AI}/probe",
+                    json={"model_id": model_id, "prompt": "ping", "max_tokens": 8},
+                    headers=owner,
+                )
+            assert res.status_code == 200, res.text
+            assert res.json()["ok"] is True and res.json()["preview"] == "pong"
+            assert PROBE_KEY not in res.text
+            rows = _rows(
+                "SELECT purpose, brand_id, outcome, prompt_tokens, completion_tokens,"
+                " estimated_cost_usd, credential_mode FROM ai_cost_log"
+            )
+            assert len(rows) == 1
+            purpose, brand_id, outcome, p_tok, c_tok, cost, mode = rows[0]
+            assert (purpose, brand_id, outcome, p_tok, c_tok, mode) == (
+                "admin_probe",
+                None,
+                "ok",
+                20,
+                10,
+                "platform",
+            )
+            # 20 * 0.00015/1000 + 10 * 0.0006/1000 = 0.000003 + 0.000006 = 0.000009
+            assert cost == Decimal("0.000009")
+
+            with respx.mock(assert_all_called=True) as mock:
+                mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(500, json={"error": "x"})
+                failed = client.post(
+                    f"{ADMIN_AI}/probe",
+                    json={"model_id": model_id, "prompt": "ping"},
+                    headers=owner,
+                )
+            assert failed.status_code == 200, failed.text
+            assert failed.json()["ok"] is False
+            assert failed.json()["error_category"] == "retryable_server_error"
+            assert _rows("SELECT outcome FROM ai_cost_log ORDER BY created_at")[-1] == ("error",)
+
+            # Real in-memory limiter: 5 per minute per admin ⇒ the 6th is 429.
+            statuses = []
+            with respx.mock(assert_all_called=False) as mock:
+                mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("gpt-4o-mini")
+                )
+                for _ in range(4):
+                    statuses.append(
+                        client.post(
+                            f"{ADMIN_AI}/probe",
+                            json={"model_id": model_id, "prompt": "ping"},
+                            headers=owner,
+                        ).status_code
+                    )
+            assert statuses == [200, 200, 200, 429], statuses
+    finally:
+        integration_app.dependency_overrides.pop(get_settings_dep, None)
+        from tests.fakes import FakeRateLimiter
+
+        integration_app.dependency_overrides[get_rate_limiter] = FakeRateLimiter

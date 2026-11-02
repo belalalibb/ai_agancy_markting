@@ -145,11 +145,16 @@ def build_budget_guard(
 
 
 # --------------------------------------------------------- SPRINT-11.1 B-3 --
-def get_catalog_reader(settings: Annotated[Settings, Depends(get_settings)]) -> CatalogReader:
+def get_catalog_reader(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CatalogReader | None:
     """The cached catalog snapshot reader (D-077): no request session — it reads through an
-    independent transaction only when a snapshot is actually requested, so the switch-off
-    path performs no catalog I/O. Local import: deleting ``ai_gateway/catalog/`` and this
-    block removes the feature (D-076)."""
+    independent transaction only when a snapshot is actually requested. **Switch off ⇒
+    ``None`` before any import**, so the legacy path performs no catalog import or I/O
+    (C-3 isolation test). Local import: deleting ``ai_gateway/catalog/`` and this block
+    removes the feature (D-076)."""
+    if not settings.feature_provider_catalog_enabled:
+        return None
     from src.modules.ai_gateway.catalog.infrastructure.pg_repository import (
         CachedCatalogReader,
     )
@@ -157,7 +162,7 @@ def get_catalog_reader(settings: Annotated[Settings, Depends(get_settings)]) -> 
     return CachedCatalogReader(ttl_seconds=settings.ai_catalog_cache_seconds)
 
 
-CatalogSnapshotReader = Annotated[CatalogReader, Depends(get_catalog_reader)]
+CatalogSnapshotReader = Annotated[CatalogReader | None, Depends(get_catalog_reader)]
 
 
 def build_catalog_gateway(
@@ -220,7 +225,7 @@ async def get_budget_guard(
     ``true`` ⇒ the catalog resolver (routing + fallback + per-model prices, D-077).
     """
     request_id = request.headers.get("x-request-id")
-    if settings.feature_provider_catalog_enabled:
+    if settings.feature_provider_catalog_enabled and catalog is not None:
         return build_catalog_gateway(
             settings,
             snapshot=await catalog.snapshot(),

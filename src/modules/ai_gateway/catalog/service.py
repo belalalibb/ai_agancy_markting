@@ -100,6 +100,13 @@ class CatalogNotFoundError(CatalogError):
     status = 404
 
 
+class CatalogInvalidPricingError(CatalogError):
+    """``PATCH /models/{id}`` with a pricing shape that does not fit the model's capability."""
+
+    error = "catalog_invalid_pricing"
+    status = 422
+
+
 class CredentialUnavailableError(CatalogError, BudgetGuardError):
     """``credential_ref`` names an unset environment variable ⇒ provider unusable (503).
     Runtime error like ``NoRouteError`` ⇒ also a ``BudgetGuardError`` (B-6)."""
@@ -355,6 +362,7 @@ __all__ = [
     "CatalogConflictError",
     "CatalogError",
     "CatalogGatewayResolver",
+    "CatalogInvalidPricingError",
     "CatalogNotFoundError",
     "CatalogPriceTable",
     "CatalogReader",

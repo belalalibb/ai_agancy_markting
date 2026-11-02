@@ -181,6 +181,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # SPRINT-11 C-5 (D-073/D-076): removable — see src/modules/entitlements/REMOVABILITY.md
     api_v1.include_router(entitlements_router)
     api_v1.include_router(entitlements_admin_router)
+    # SPRINT-11.1 C-1 (D-077/D-076): /admin/ai/* — provider catalog control. Local import so
+    # deleting ``ai_gateway/catalog/`` + this block removes the feature; the kill switch
+    # ``FEATURE_PROVIDER_CATALOG_ENABLED`` only governs the *runtime* resolver, the admin
+    # routes stay available for seeding — see ai_gateway/catalog/REMOVABILITY.md.
+    from src.modules.ai_gateway.catalog.router import router as admin_ai_router
+
+    api_v1.include_router(admin_ai_router)
     # SPRINT-11.1 A-2 (E2): bind the consumer-owned ``CounterGuard`` ports of ``content`` and
     # ``whatsapp`` to the entitlements adapter. Removing ``entitlements`` = delete these two
     # lines; the ports then yield ``None`` (no quota check) — see entitlements/REMOVABILITY.md.

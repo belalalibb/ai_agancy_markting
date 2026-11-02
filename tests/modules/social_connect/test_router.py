@@ -879,6 +879,10 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
     # OWNER/MANAGER only (D-066); not credentials.
     # ``daily_tokens`` (SPRINT-11 C-1, D-073): the plan's daily LLM-token ceiling on
     # ``PlanLimits`` — an integer quota named by the directive, not a credential.
+    # ``max_tokens_cap`` (SPRINT-11.1 C-1, D-077): per-model completion-token cap on
+    # ``ModelOut`` — an integer named by the directive (§2-B-1), not a credential.
+    # ``max_tokens`` (SPRINT-11.1 C-2): the probe's completion budget (``ProbeRequest``,
+    # request-only, ``≤ 64`` by the directive) — an integer, not a credential.
     allowed = {
         "access_token",
         "token_type",
@@ -888,6 +892,8 @@ def test_openapi_has_no_token_named_fields_except_has_page_token(client: TestCli
         "completion_tokens",
         "prompt_hash",
         "daily_tokens",
+        "max_tokens_cap",
+        "max_tokens",
     }
     structural = {"required", "properties", "title", "description", "type", "format"}
 

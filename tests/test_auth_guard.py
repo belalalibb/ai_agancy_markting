@@ -54,9 +54,11 @@ def _concrete(template: str) -> str:
         "conversation_id",  # SPRINT-09
         "draft_id",
         "competitor_id",  # SPRINT-10 B-1
+        "provider_id",  # SPRINT-11.1 C-1
+        "model_id",
     ):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
-    return template
+    return template.replace("{purpose}", "content_generation")  # SPRINT-11.1 C-1
 
 
 def test_protected_route_count_is_reported() -> None:
@@ -74,7 +76,8 @@ def test_protected_route_count_is_reported() -> None:
     # SPRINT-10 B-3: +5 (diagnose, content-plan, GET recommendations, accept, dismiss) ⇒ 62
     # SPRINT-11 C-5: +4 entitlements (admin activate, admin read, brand entitlement,
     # learning-consent) ⇒ 66
-    assert PROTECTED_ROUTE_COUNT == 66, PROTECTED  # SPRINT-11: 62 + 4 entitlement routes
+    # SPRINT-11.1 C-1: +11 /admin/ai/* (providers ×4, models ×4, routing ×2, probe) ⇒ 77
+    assert PROTECTED_ROUTE_COUNT == 77, PROTECTED  # SPRINT-11.1 C-1: 66 + 11 /admin/ai/* routes
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)
