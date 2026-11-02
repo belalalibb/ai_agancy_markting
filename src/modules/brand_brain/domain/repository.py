@@ -12,7 +12,6 @@ from src.modules.brand_brain.domain.models import (
     BrandProfileRevision,
     Competitor,
     CostDay,
-    CostEntry,
     Evidence,
     LearningSignal,
     Recommendation,
@@ -52,6 +51,10 @@ class BrandBrainRepository(Protocol):
     async def delete_competitor(self, brand_id: UUID, competitor_id: UUID) -> bool: ...
 
     async def touch_competitor_refreshed(self, competitor_id: UUID, *, at: datetime) -> None: ...
+
+    async def set_competitor_notes(self, competitor_id: UUID, *, notes: str) -> None:
+        """A-4: persist the ``unavailable:<status>`` marker (or its removal) in ``notes``."""
+        ...
 
     async def lock_brand_for_competitors(self, brand_id: UUID) -> None:
         """Serialise competitor inserts per brand (``SELECT … FOR UPDATE`` on ``brands``)."""
@@ -112,9 +115,3 @@ class BrandBrainRepository(Protocol):
 
     # -------------------------------------------------- learning signals ----
     async def add_learning_signal(self, signal: LearningSignal) -> LearningSignal: ...
-
-
-class CostLogWriter(Protocol):
-    """D-072: one committed independent row per gateway call (``ai_gateway`` wrapper)."""
-
-    async def write(self, entry: CostEntry) -> None: ...

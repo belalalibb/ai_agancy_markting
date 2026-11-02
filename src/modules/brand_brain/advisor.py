@@ -25,10 +25,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy.exc import IntegrityError
 
-from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
 from src.modules.auth.domain.rate_limit import RateLimiter
+from src.modules.brand_brain.consent import BrandConsentReader, may_write_signal
 from src.modules.brand_brain.domain.models import (
     MAX_CONTENT_PLAN_ITEMS,
     MAX_DIAGNOSIS_RECOMMENDATIONS,
@@ -45,9 +46,9 @@ from src.modules.brand_brain.domain.models import (
 )
 from src.modules.brand_brain.domain.repository import BrandBrainRepository
 from src.modules.brand_brain.exceptions import (
-    BrainBudgetExceededError,
     BrainRateLimitedError,
     InvalidModelOutputError,
+    ProfileConflictError,
     RecommendationAlreadyDecidedError,
     RecommendationNotFoundError,
 )
@@ -70,6 +71,7 @@ CONTENT_PLAN_BUCKET = "brain:content-plan"
 CONTENT_PLAN_LIMIT = 5
 CONTENT_PLAN_WINDOW_SECONDS = 3600
 EVIDENCE_WINDOW_ROWS = 60
+MAX_REPLY_TEMPLATE_LEN = 600  # A-6: a ``reply_template`` body beyond this is dropped at parse
 
 # Server-side grade tags (Arabic, directive §2 B-3). Any bracketed tag the model wrote —
 # Arabic or English — is removed before ours is appended.
@@ -104,7 +106,7 @@ class _RecommendationOut(_Out):
     title: str = Field(min_length=1, max_length=MAX_RECOMMENDATION_TITLE)
     rationale: str = Field(min_length=1, max_length=MAX_RATIONALE_CHARS)
     evidence_ids: list[UUID] = Field(default_factory=list)
-    template: str | None = Field(default=None, max_length=600)
+    template: str | None = None  # A-6: length policed in diagnose() (drop, not 502)
 
 
 class DiagnosisOutput(_Out):
@@ -113,7 +115,23 @@ class DiagnosisOutput(_Out):
     summary: str = Field(min_length=1, max_length=400)
     strengths: list[_Point] = Field(default_factory=list, max_length=20)
     gaps: list[_Point] = Field(default_factory=list, max_length=20)
-    recommendations: list[_RecommendationOut] = Field(default_factory=list, max_length=20)
+    # A-7: raw rows — validated one by one in ``diagnose`` so an unknown ``kind`` drops that
+    # recommendation only (WARNING + ``dropped``) instead of failing the whole diagnosis.
+    recommendations: list[Any] = Field(default_factory=list, max_length=20)
+
+
+def parse_recommendations(raw: list[Any]) -> tuple[list[_RecommendationOut], int]:
+    """Per-recommendation validation (A-7): ``(valid, dropped)``."""
+    valid: list[_RecommendationOut] = []
+    dropped = 0
+    for row in raw:
+        try:
+            valid.append(_RecommendationOut.model_validate(row))
+        except (ValidationError, TypeError):
+            kind = row.get("kind") if isinstance(row, dict) else type(row).__name__
+            logger.warning("advisor: dropped recommendation (invalid shape) kind=%r", kind)
+            dropped += 1
+    return valid, dropped
 
 
 class _PlanItemOut(_Out):
@@ -192,15 +210,15 @@ class BrandAdvisor:
         *,
         gateway: AIGateway,
         limiter: RateLimiter,
-        budget: DailyBudget,
-        budget_reader: BudgetUsageReader,
         content: ContentService | None = None,
+        consent: BrandConsentReader | None = None,
     ) -> None:
         self._repo = repo
+        self._consent = consent  # SPRINT-11 C-6 (D-080): ``none`` ⇒ no ``learning_signals`` row
+        # SPRINT-11 B-4: ``gateway`` is the ``BudgetGuard`` (daily tokens, platform cap,
+        # ``ai_cost_log`` reservation — D-075); the advisor only rate-limits.
         self._gateway = gateway
         self._limiter = limiter
-        self._budget = budget
-        self._budget_reader = budget_reader
         self._content = content
 
     # ------------------------------------------------------------ guards ----
@@ -208,9 +226,6 @@ class BrandAdvisor:
         retry = self._limiter.hit(bucket, str(brand_id), limit, window)
         if retry is not None:
             raise BrainRateLimitedError(retry)
-        verdict = await self._budget.check(brand_id, usage_reader=self._budget_reader)
-        if not verdict.allowed:
-            raise BrainBudgetExceededError(verdict.budget, verdict.used, verdict.resets_in_seconds)
 
     async def _context(self, brand_id: UUID) -> tuple[BrandProfile, list[Evidence]]:
         profile = await self._repo.get_profile(brand_id)
@@ -307,15 +322,21 @@ class BrandAdvisor:
         strengths = _points(out.strengths)
         gaps = _points(out.gaps)
         recommendations: list[Recommendation] = []
-        dropped = 0
-        for rec in out.recommendations:
+        parsed, dropped = parse_recommendations(out.recommendations)  # A-7
+        for rec in parsed:
             cited = _cited(rec.evidence_ids)
             if not cited or len(recommendations) >= MAX_DIAGNOSIS_RECOMMENDATIONS:
                 dropped += 1
                 continue
             rec_provenance = dict(provenance)
-            if rec.kind == "reply_template" and rec.template:
-                rec_provenance["template"] = strip_fake_tags(rec.template)[:600]
+            if rec.kind == "reply_template":
+                template = strip_fake_tags(rec.template or "")
+                if not template or len(template) > MAX_REPLY_TEMPLATE_LEN:
+                    # A-6: never store an empty / oversized template body.
+                    logger.warning("advisor: dropped reply_template (empty)")
+                    dropped += 1
+                    continue
+                rec_provenance["template"] = template
             recommendations.append(
                 Recommendation(
                     brand_id=brand_id,
@@ -462,11 +483,11 @@ class BrandAdvisor:
         decided = rec.model_copy(
             update={"status": "accepted", "decided_by_user_id": actor_user_id, "decided_at": now}
         )
-        signal = await self._repo.add_learning_signal(self._signal(decided, "accepted", now))
+        signals = await self._record_signal(decided, "accepted", now)
         logger.info(
             "brain recommendation accepted: %s kind=%s by=%s", rec.id, rec.kind, actor_user_id
         )
-        return DecisionResult(recommendation=decided, profile_revision=revision, signals=[signal])
+        return DecisionResult(recommendation=decided, profile_revision=revision, signals=signals)
 
     async def dismiss(
         self, brand_id: UUID, recommendation_id: UUID, *, actor_user_id: UUID
@@ -485,11 +506,19 @@ class BrandAdvisor:
         decided = rec.model_copy(
             update={"status": "dismissed", "decided_by_user_id": actor_user_id, "decided_at": now}
         )
-        signal = await self._repo.add_learning_signal(self._signal(decided, "dismissed", now))
+        signals = await self._record_signal(decided, "dismissed", now)
         logger.info(
             "brain recommendation dismissed: %s kind=%s by=%s", rec.id, rec.kind, actor_user_id
         )
-        return DecisionResult(recommendation=decided, signals=[signal])
+        return DecisionResult(recommendation=decided, signals=signals)
+
+    async def _record_signal(
+        self, rec: Recommendation, signal: str, now: datetime
+    ) -> list[LearningSignal]:
+        """D-080: ``learning_consent='none'`` ⇒ the decision stands, no signal row."""
+        if not await may_write_signal(self._consent, rec.brand_id):
+            return []
+        return [await self._repo.add_learning_signal(self._signal(rec, signal, now))]
 
     async def _locked_proposed(self, brand_id: UUID, recommendation_id: UUID) -> Recommendation:
         rec = await self._repo.get_recommendation_for_update(brand_id, recommendation_id)
@@ -516,7 +545,11 @@ class BrandAdvisor:
                     "updated_at": now,
                 }
             )
-            await self._repo.insert_profile(updated)
+            try:
+                await self._repo.insert_profile(updated)
+            except IntegrityError as exc:
+                # A-6: a concurrent accept created the profile a moment ago ⇒ 409, not 500.
+                raise ProfileConflictError() from exc
         else:
             templates = [t for t in profile.tone.reply_templates if t != template]
             templates = ([*templates, template])[-MAX_REPLY_TEMPLATES:]

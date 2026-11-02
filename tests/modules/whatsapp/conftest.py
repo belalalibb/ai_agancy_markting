@@ -17,7 +17,12 @@ from src.modules.whatsapp.domain.models import WhatsAppAccount
 from src.modules.whatsapp.service import hash_verify_token
 
 from tests.conftest import BRAND2_ID, BRAND_ID, OWNER_ID, USER_BY_TENANT
-from tests.fakes import FakeIndependentWrites, FakeWhatsAppRepository
+from tests.fakes import (
+    FakeBrandConsentReader,
+    FakeIndependentWrites,
+    FakeStore,
+    FakeWhatsAppRepository,
+)
 
 PAYLOADS = Path(__file__).parent / "payloads"
 PHONE_NUMBER_ID = "PNID_1001"
@@ -73,14 +78,20 @@ async def wa_client(settings: Settings):  # noqa: ANN201
 
 
 @pytest.fixture
-def wa_app(app: FastAPI, wa_repo: FakeWhatsAppRepository, content_repo) -> FastAPI:  # noqa: ANN001
-    """The fake-wired app with the WhatsApp repository overridden too (B-3: the content
-    repository is linked so the shared daily token budget sums both features)."""
+def wa_app(
+    app: FastAPI,
+    wa_repo: FakeWhatsAppRepository,
+    content_repo,  # noqa: ANN001
+    store: FakeStore,
+) -> FastAPI:
+    """The fake-wired app with the WhatsApp repository overridden too (SPRINT-11 B-1: the
+    shared daily token budget is read from the one fake ``ai_cost_log``)."""
     from src.modules.whatsapp import router, webhook
 
-    app.state.budget_reader.wa_repo = wa_repo  # A-4: drafts count in the shared budget
     app.state.independent_writes = FakeIndependentWrites(wa_repo)  # A-1 (D-072)
     app.dependency_overrides[webhook._repo] = lambda: wa_repo
+    # SPRINT-11 C-6 (D-080): the webhook's consent reader over the fake brand store.
+    app.dependency_overrides[webhook._consent] = lambda: FakeBrandConsentReader(store)
     app.dependency_overrides[router.get_whatsapp_repository] = lambda: wa_repo
     app.dependency_overrides[router.get_independent_writes] = lambda: app.state.independent_writes
     return app

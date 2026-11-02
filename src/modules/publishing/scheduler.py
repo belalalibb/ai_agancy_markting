@@ -26,7 +26,7 @@ import asyncio
 import logging
 import os
 import socket
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
@@ -337,22 +337,40 @@ class _SessionPerCallTokenProvider:
 
 
 # ----------------------------------------------------------------------- loop ---
-async def scheduler_loop(scheduler: Scheduler, poll_seconds: float) -> None:
-    """Run ``run_once`` forever; a failing cycle is logged (ERROR) and counted, never fatal."""
+SchedulerStep = Callable[[datetime], Awaitable[object]]
+
+
+async def scheduler_loop(
+    scheduler: Scheduler, poll_seconds: float, *, extra_steps: Sequence[SchedulerStep] = ()
+) -> None:
+    """Run ``run_once`` forever; a failing cycle is logged (ERROR) and counted, never fatal.
+
+    SPRINT-11 B-4: ``extra_steps`` run **after** the publish step every cycle, each guarded
+    the same way (``settle_stale_reservations`` of the AI cost log is the first one)."""
     while True:
+        now = datetime.now(tz=UTC)
         try:
-            await scheduler.run_once(datetime.now(tz=UTC))
+            await scheduler.run_once(now)
         except asyncio.CancelledError:
             raise
         except Exception:
             counters.increment("scheduler_cycle_errors")
             logger.exception("scheduler cycle failed")
+        for step in extra_steps:
+            try:
+                await step(now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                counters.increment("scheduler_cycle_errors")
+                logger.exception("scheduler extra step failed")
         await asyncio.sleep(poll_seconds)
 
 
 __all__ = [
     "PostgresScheduler",
     "Scheduler",
+    "SchedulerStep",
     "default_lease_owner",
     "scheduler_loop",
 ]

@@ -183,44 +183,6 @@ class BrandEvidenceRow(Base):
     created_at: Mapped[datetime] = _ts()
 
 
-class AICostLogRow(Base):
-    """Metadata of every gateway call — **no prompt / output text column** (guarded by
-    ``test_cost_log_has_no_text_column``)."""
-
-    __tablename__ = "ai_cost_log"
-    __table_args__ = (
-        Index("ix_ai_cost_log_brand_created", "brand_id", text("created_at DESC")),
-        CheckConstraint("outcome IN ('ok', 'error')", name="ck_ai_cost_log_outcome"),
-        CheckConstraint(
-            "(outcome = 'error') = (error_category IS NOT NULL)",
-            name="ck_ai_cost_log_error_iff_category",
-        ),
-        CheckConstraint(
-            "credential_mode IN ('platform', 'user_key')", name="ck_ai_cost_log_credential_mode"
-        ),
-        CheckConstraint(
-            "(prompt_tokens IS NULL OR prompt_tokens >= 0) AND "
-            "(completion_tokens IS NULL OR completion_tokens >= 0) AND latency_ms >= 0",
-            name="ck_ai_cost_log_non_negative",
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = _uuid_pk()
-    brand_id: Mapped[uuid.UUID] = _brand_fk()
-    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
-    provider: Mapped[str] = mapped_column(String(32), nullable=False)
-    model: Mapped[str] = mapped_column(String(64), nullable=False)
-    credential_mode: Mapped[str] = mapped_column(String(16), nullable=False)
-    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
-    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
-    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
-    outcome: Mapped[str] = mapped_column(String(8), nullable=False)
-    error_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    created_at: Mapped[datetime] = _ts()
-
-
 class BrandRecommendationRow(Base):
     """B-3 (migration 0012): an AI proposal under human approval. ``evidence_ids`` ≥ 1,
     a decision needs an actor, ``materialized_item_id`` only when ``materialized``."""

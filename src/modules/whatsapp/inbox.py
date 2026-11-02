@@ -30,6 +30,7 @@ from uuid import UUID
 
 from src.core.metrics import counters
 from src.modules.whatsapp.client import WhatsAppCloudClient
+from src.modules.whatsapp.consent import BrandConsentReader
 from src.modules.whatsapp.domain.models import (
     MAX_BODY_LENGTH,
     AccountStatus,
@@ -94,11 +95,13 @@ class WhatsAppInboxService:
         client: WhatsAppCloudClient,
         tokens: PostgresWhatsAppTokenProvider,
         independent: IndependentWrites,
+        consent: BrandConsentReader | None = None,
     ) -> None:
         self._repo = repo
         self._client = client
         self._tokens = tokens
         self._independent = independent  # SPRINT-10 A-1 (D-072)
+        self._consent = consent  # SPRINT-11 C-6 (D-080)
 
     # ------------------------------------------------------------------ reads ----
     async def list_conversations(
@@ -310,7 +313,7 @@ class WhatsAppInboxService:
         and the conversation row is locked there (``FOR NO KEY UPDATE``)."""
         await self._repo.touch_outbound(conv.id, at=now)
         expired = await self._repo.expire_pending_drafts(conv.id, now=now)
-        await record_expired(self._repo, expired, now=now)
+        await record_expired(self._repo, expired, now=now, consent=self._consent)
 
     def _to_service_error(
         self, conv: Conversation, exc: WhatsAppClientError, now: datetime

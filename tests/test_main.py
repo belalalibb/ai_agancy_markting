@@ -163,9 +163,10 @@ def test_b6_u1_scheduler_loop_started_and_cancelled_when_enabled(
 
     calls: list[str] = []
 
-    async def fake_loop(scheduler: Any, poll_seconds: float) -> None:
+    async def fake_loop(scheduler: Any, poll_seconds: float, *, extra_steps=()) -> None:  # noqa: ANN001
         calls.append(type(scheduler).__name__)
         assert poll_seconds == 1
+        assert len(extra_steps) == 1  # SPRINT-11 B-4: settle_stale_reservations
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -233,7 +234,7 @@ def test_a1_u2_scheduler_enabled_with_encryption_key_creates_task(
 
     from src import main as main_module
 
-    async def fake_loop(scheduler: Any, poll_seconds: float) -> None:
+    async def fake_loop(scheduler: Any, poll_seconds: float, *, extra_steps=()) -> None:  # noqa: ANN001
         await asyncio.sleep(3600)  # cancelled by lifespan shutdown
 
     monkeypatch.setattr(main_module, "scheduler_loop", fake_loop)

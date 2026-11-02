@@ -742,6 +742,9 @@ def test_a2_u2_generate_truncates_to_channel_limit_and_records_it(
     from src.modules.ai_gateway.gateway import CompletionResult
 
     class LongProvider:
+        name = "fake"
+        model = "fake-1"
+
         async def complete(self, req):  # noqa: ANN001, ANN202
             return CompletionResult(
                 text="ن" * 2300,
@@ -1025,6 +1028,9 @@ def test_b5_gateway_errors_map_to_http_by_category(
     item_id = _create(client, owner)["id"]
 
     class Boom:
+        name = "fake"
+        model = "fake-1"
+
         def __init__(self, exc: Exception) -> None:
             self.exc = exc
 
@@ -1072,12 +1078,26 @@ def test_b5_gateway_errors_map_to_http_by_category(
         assert res.status_code == 503, res.text
         assert res.json()["detail"]["error"] == "ai_provider_not_configured"
         # and with a key the real HTTP provider is built (respx-free smoke: 502 on no network)
-        app.dependency_overrides[get_settings] = lambda: current.model_copy(
+        priced = current.model_copy(
             update={
                 "ai_provider": "openai_compatible",
                 "ai_provider_api_key": SecretStr(FAKE_AI_KEY),
                 "ai_provider_base_url": "http://127.0.0.1:9/v1",
                 "ai_http_timeout_seconds": 0.2,
+            }
+        )
+        # SPRINT-11 B-3 (D-075): a platform-paid model without a price is refused *before*
+        # the network — 503 ``ai_model_unpriced``, nothing written.
+        rows_before = len(app.state.cost_writer.entries)
+        app.dependency_overrides[get_settings] = lambda: priced
+        res = _generate(client, owner, item_id)
+        assert res.status_code == 503 and res.json()["detail"]["error"] == "ai_model_unpriced"
+        assert len(app.state.cost_writer.entries) == rows_before  # no reservation written
+        app.dependency_overrides[get_settings] = lambda: priced.model_copy(
+            update={
+                "ai_price_table_json": (
+                    '{"gpt-4o-mini": {"prompt_per_1k": "0.00015", "completion_per_1k": "0.0006"}}'
+                )
             }
         )
         res = _generate(client, owner, item_id)
@@ -1414,7 +1434,7 @@ def test_b7_u3_protected_route_count_and_openapi_operations(client: TestClient) 
     the content + publishing module exposes exactly 14 operations over 13 paths."""
     from tests.test_auth_guard import PROTECTED, PROTECTED_ROUTE_COUNT
 
-    assert PROTECTED_ROUTE_COUNT == 62, PROTECTED  # 46 + A-2 rotate + 15 brain (SPRINT-10)
+    assert PROTECTED_ROUTE_COUNT == 66, PROTECTED  # 46 + A-2 rotate + 15 brain (SPRINT-10)
     paths = client.get("/openapi.json").json()["paths"]
     content_paths = {p for p in paths if "/content/" in p}
     assert len(content_paths) == 13
@@ -1655,6 +1675,9 @@ def test_a3_u3_generate_recheck_after_gateway_returns_409_and_writes_no_revision
     uid = UUID(item_id)
 
     class MovingGateway:
+        name = "fake"
+        model = "fake-1"
+
         async def complete(self, req):  # noqa: ANN001, ANN202
             # Simulate a concurrent ``submit`` while the completion is in flight.
             current = content_repo.items[uid]

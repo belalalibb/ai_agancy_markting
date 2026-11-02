@@ -93,6 +93,7 @@ def _message(row: MessageRow) -> Message:
         sent_by_user_id=row.sent_by_user_id,
         reply_draft_id=row.reply_draft_id,
         platform_timestamp=row.platform_timestamp,
+        referral=row.referral,
         created_at=row.created_at,
     )
 
@@ -174,6 +175,19 @@ class PostgresWhatsAppRepository:
             select(WhatsAppAccountRow).where(WhatsAppAccountRow.phone_number_id == phone_number_id)
         )
         return _account(row) if row is not None else None
+
+    async def get_accounts_by_phone_number_ids(
+        self, phone_number_ids: list[str]
+    ) -> list[WhatsAppAccount]:
+        if not phone_number_ids:
+            return []
+        rows = await self._session.scalars(
+            select(WhatsAppAccountRow).where(
+                WhatsAppAccountRow.phone_number_id.in_(phone_number_ids),
+                WhatsAppAccountRow.status == AccountStatus.ACTIVE.value,
+            )
+        )
+        return [_account(r) for r in rows]
 
     async def list_active_accounts(self) -> list[WhatsAppAccount]:
         rows = await self._session.scalars(
@@ -353,6 +367,7 @@ class PostgresWhatsAppRepository:
             "sent_by_user_id": message.sent_by_user_id,
             "reply_draft_id": message.reply_draft_id,
             "platform_timestamp": message.platform_timestamp,
+            "referral": message.referral,
             "created_at": message.created_at,
         }
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -165,32 +164,6 @@ class Evidence(BaseModel):
 
 
 # ----------------------------------------------------------------- cost log --
-class CostOutcome(StrEnum):
-    OK = "ok"
-    ERROR = "error"
-
-
-class CostEntry(BaseModel):
-    """``ai_cost_log`` row — metadata only, never prompt or output text."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: UUID = Field(default_factory=uuid4)
-    brand_id: UUID
-    purpose: str = Field(max_length=32)
-    provider: str = Field(max_length=32)
-    model: str = Field(max_length=64)
-    credential_mode: str = Field(max_length=16)
-    prompt_tokens: int | None = Field(default=None, ge=0)
-    completion_tokens: int | None = Field(default=None, ge=0)
-    estimated_cost_usd: Decimal | None = Field(default=None, ge=Decimal("0"))
-    latency_ms: int = Field(ge=0)
-    prompt_version: str = Field(max_length=32)
-    outcome: CostOutcome
-    error_category: str | None = Field(default=None, max_length=32)
-    created_at: datetime
-
-
 class CostDay(BaseModel):
     """One row of ``GET /brain/cost`` (daily aggregation)."""
 

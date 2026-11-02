@@ -27,10 +27,14 @@ from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole
 from tests.fakes import (
     FakeBrandAccessGrantRepository,
     FakeBrandAccessResolver,
+    FakeBrandConsentReader,
     FakeBrandRepository,
     FakeBudgetUsageReader,
     FakeConnectedAccountRepository,
     FakeContentRepository,
+    FakeCostLogWriter,
+    FakeCounterUsageReader,
+    FakeEntitlementRepository,
     FakePasswordHasher,
     FakePublishJobRepository,
     FakeRateLimiter,
@@ -239,7 +243,11 @@ def app(
 ) -> FastAPI:
     """App wired to the fakes — isolated tests never touch PostgreSQL."""
     from src.main import create_app
-    from src.modules.ai_gateway.dependencies import get_budget_usage_reader
+    from src.modules.ai_gateway.dependencies import (
+        get_budget_usage_reader,
+        get_cost_log_writer,
+        get_entitlement_limits_reader,
+    )
     from src.modules.auth.dependencies import (
         get_password_hasher,
         get_rate_limiter,
@@ -247,9 +255,15 @@ def app(
         get_user_repository,
     )
     from src.modules.content.router import get_content_repository, get_publish_job_repository
+    from src.modules.entitlements.dependencies import (
+        get_counter_usage_reader,
+        get_entitlement_repository,
+    )
+    from src.modules.entitlements.service import PgEntitlementLimitsReader
     from src.modules.social_connect.router import get_repository, get_status_marker
     from src.modules.tenancy.dependencies import (
         get_brand_access_resolver,
+        get_brand_consent_reader,
         get_brand_repository,
         get_grant_repository,
         get_tenant_repository,
@@ -269,8 +283,13 @@ def app(
             content_repo.release_locks()
 
     application.dependency_overrides[get_content_repository] = _content_repo_unit_of_work
-    # SPRINT-10 A-4: the one shared budget reader (content + WhatsApp drafts).
-    application.state.budget_reader = FakeBudgetUsageReader(content_repo)
+    # SPRINT-11 B-1: one shared in-memory ``ai_cost_log`` (the only AI usage source) read
+    # by the one shared budget reader — content, WhatsApp and Brand Brain alike.
+    application.state.cost_writer = FakeCostLogWriter()
+    application.state.budget_reader = FakeBudgetUsageReader(
+        content_repo, application.state.cost_writer
+    )
+    application.dependency_overrides[get_cost_log_writer] = lambda: application.state.cost_writer
     application.dependency_overrides[get_budget_usage_reader] = lambda: (
         application.state.budget_reader
     )
@@ -288,6 +307,27 @@ def app(
     )
     application.dependency_overrides[get_brand_access_resolver] = lambda: FakeBrandAccessResolver(
         store
+    )
+    # SPRINT-11 C: entitlements + consent fakes over the same ``FakeStore`` brands. The
+    # ``BudgetGuard`` plan check (``get_entitlement_limits_reader``) uses the same fake repo.
+    application.state.entitlement_repo = FakeEntitlementRepository(store)
+    application.state.counter_reader = FakeCounterUsageReader()
+    application.dependency_overrides[get_entitlement_repository] = lambda: (
+        application.state.entitlement_repo
+    )
+    application.dependency_overrides[get_counter_usage_reader] = lambda: (
+        application.state.counter_reader
+    )
+    application.dependency_overrides[get_brand_consent_reader] = lambda: FakeBrandConsentReader(
+        store
+    )
+    application.dependency_overrides[get_entitlement_limits_reader] = lambda: (
+        PgEntitlementLimitsReader(
+            application.state.entitlement_repo,
+            usage_reader=application.state.budget_reader,
+            counters=application.state.counter_reader,
+            enforced=settings.feature_entitlements_enforced,
+        )
     )
     return application
 

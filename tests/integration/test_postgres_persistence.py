@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from src.core.oauth_state import OAuthStateSigner
 from src.core.security import TokenEncryptionService
@@ -523,7 +523,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -928,7 +928,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1949,7 +1949,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2019,7 +2019,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2324,13 +2324,14 @@ def test_a4_i1_list_of_25_items_uses_at_most_two_queries_on_pg(integration_app: 
     assert any("LEFT OUTER JOIN content_revisions" in s for s in content_sql)
 
 
-def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
+def test_a5_i1_token_budget_is_summed_from_ai_cost_log_only_on_pg(
     integration_app: FastAPI,
 ) -> None:
-    """A5-I1 — the shared budget reader (SPRINT-10 A-4 ``PgBudgetUsageReader``) sums
-    ``prompt_tokens + completion_tokens`` from the JSONB provenance of ``ai_generated``
-    revisions only; ``human`` rows (even with stray token keys) and rows outside the window
-    are not counted; the 429 fires on PG."""
+    """A5-I1 (SPRINT-11 B-1) — the shared budget reader (``PgBudgetUsageReader``) sums
+    ``prompt_tokens + completion_tokens`` of the **counted** ``ai_cost_log`` rows only
+    (``pending`` / ``ok`` / ``ambiguous``); ``error`` rows, rows outside the window and the
+    JSONB provenance of ``content_revisions`` (even ``ai_generated``) are **not** counted;
+    the 429 fires on PG."""
     from src.core.config import Settings
 
     _seed_fresh()
@@ -2338,56 +2339,86 @@ def test_a5_i1_token_budget_is_summed_from_jsonb_and_ignores_human_rows_on_pg(
     owner = integration_headers(settings, OWNER_ID)
     with TestClient(integration_app) as client:
         item_id = _content_create(client, owner)["id"]
-        other = _content_create(client, owner)["id"]
     now = datetime.now(tz=UTC)
-    rows = [
-        (item_id, 2, "ai_generated", 120_000, 50_000, now - timedelta(hours=1)),
-        (item_id, 3, "ai_generated", 10_000, 10_000, now - timedelta(hours=30)),  # outside
-        (other, 2, "human", 999_999, 999_999, now - timedelta(minutes=5)),  # never counted
-    ]
-    for iid, no, kind, p, c, created in rows:
-        _run(
-            "INSERT INTO content_revisions (id, item_id, revision_no, body, media_refs, "
-            "provenance, created_by_tenant_id, created_at) VALUES (:id, :item, :no, 'x', "
-            "CAST('[]' AS JSONB), CAST(:prov AS JSONB), :tenant, :created)",
-            {
-                "id": uuid4(),
-                "item": UUID(iid),
-                "no": no,
-                "prov": f'{{"kind": "{kind}", "prompt_tokens": {p}, "completion_tokens": {c}}}',
-                "tenant": OWNER_ID,
-                "created": created,
-            },
-        )
+    # provenance tokens: formerly a budget source, now ignored (would double-count).
+    _run(
+        "INSERT INTO content_revisions (id, item_id, revision_no, body, media_refs, "
+        "provenance, created_by_tenant_id, created_at) VALUES (:id, :item, 2, 'x', "
+        "CAST('[]' AS JSONB), CAST(:prov AS JSONB), :tenant, :created)",
+        {
+            "id": uuid4(),
+            "item": UUID(item_id),
+            "prov": '{"kind": "ai_generated", "prompt_tokens": 999999, "completion_tokens": 1}',
+            "tenant": OWNER_ID,
+            "created": now - timedelta(minutes=5),
+        },
+    )
+    for outcome, p, c, created in (
+        ("ok", 120_000, 50_000, now - timedelta(hours=1)),
+        ("pending", 0, 0, now - timedelta(minutes=1)),  # reserved, counted (0 tokens yet)
+        ("error", 70_000, 0, now - timedelta(hours=2)),  # never counted
+        ("ok", 10_000, 10_000, now - timedelta(hours=30)),  # outside the window
+    ):
+        _cost_row(outcome, prompt_tokens=p, completion_tokens=c, created_at=created)
 
-    async def _usage() -> int:
-        from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
-
-        eng = create_async_engine(TEST_DATABASE_URL)
-        try:
-            async with AsyncSession(eng) as session:
-                reader = PgBudgetUsageReader(session)
-                return await reader.combined_usage_since(BRAND_ID, now - timedelta(hours=24))
-        finally:
-            await eng.dispose()
-
-    assert asyncio.run(_usage()) == 170_000
-    # Lower the budget below the measured usage ⇒ 429 through the API.
+    assert _wa_combined_usage(BRAND_ID) == 170_000
+    # Lower the budget to the measured usage ⇒ 429 through the API.
     integration_app.state.settings = settings.model_copy(
         update={"ai_daily_token_budget_per_brand": 170_000}
     )
     from src.core.config import get_settings
 
     integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
-    with TestClient(integration_app) as client:
-        res = client.post(
-            f"{CONTENT}/items/{item_id}/generate",
-            json={"brief": "افتتاح فرع جديد لمقهى النيل في الزمالك"},
-            headers=owner,
-        )
+    try:
+        with TestClient(integration_app) as client:
+            res = client.post(
+                f"{CONTENT}/items/{item_id}/generate",
+                json={"brief": "افتتاح فرع جديد لمقهى النيل في الزمالك"},
+                headers=owner,
+            )
+    finally:
+        _wa_restore_budget(integration_app, settings)
     assert res.status_code == 429, res.text
     assert res.json()["detail"]["error"] == "generation_budget_exceeded"
+    assert res.json()["detail"]["limit_kind"] == "brand_daily_tokens"
     assert res.json()["detail"]["used"] == 170_000
+
+
+def _cost_row(  # noqa: PLR0913
+    outcome: str,
+    *,
+    prompt_tokens: int | None = 100,
+    completion_tokens: int | None = 50,
+    estimated_cost_usd: object = "0.0003",
+    created_at: datetime | None = None,
+    credential_mode: str = "platform",
+    purpose: str = "brand_diagnosis",
+    error_category: str | None = None,
+    brand_id: UUID | None = BRAND_ID,
+) -> UUID:
+    """Insert one ``ai_cost_log`` row directly (SPRINT-11 schema, migration 0013)."""
+    row_id = uuid4()
+    if outcome == "error" and error_category is None:
+        error_category = "timeout"
+    _run(
+        "INSERT INTO ai_cost_log (id, brand_id, purpose, provider, model, credential_mode, "
+        "prompt_tokens, completion_tokens, estimated_cost_usd, latency_ms, prompt_version, "
+        "outcome, error_category, created_at) VALUES (:id, :b, :purpose, 'fake', 'fake-1', "
+        ":mode, :p, :c, :usd, 10, 'brand_diagnosis_v1', :o, :cat, :created)",
+        {
+            "id": row_id,
+            "b": brand_id,
+            "purpose": purpose,
+            "mode": credential_mode,
+            "p": prompt_tokens,
+            "c": completion_tokens,
+            "usd": estimated_cost_usd,
+            "o": outcome,
+            "cat": error_category,
+            "created": created_at or datetime.now(tz=UTC),
+        },
+    )
+    return row_id
 
 
 # ============================================================ SPRINT-07 B1 / B2 ===
@@ -2439,7 +2470,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2568,7 +2599,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"  # SPRINT-10 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2715,7 +2746,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2765,7 +2796,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2923,7 +2954,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -2970,7 +3001,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -2999,6 +3030,9 @@ def test_a3_i1_generate_holds_no_row_lock_during_gateway_call_on_pg(
 
     class ProbingGateway:
         """Opens its own session and locks the row with NOWAIT during ``complete()``."""
+
+        name = "fake"
+        model = "fake-1"
 
         async def complete(self, req):  # noqa: ANN001, ANN202
             eng = create_async_engine(TEST_DATABASE_URL)
@@ -3136,7 +3170,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
     at 0008 and come back; no other table is touched."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     wa_tables = {
@@ -3241,7 +3275,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert wa_tables <= present
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
@@ -3302,6 +3336,66 @@ def test_b1_i1_signed_webhook_persists_inbound_and_dedupes_on_pg(
         ("wamid.PG0002", "inbound", "text", "ثانية", "received"),
     ]
     assert messages[0][5] == datetime.fromtimestamp(1761900000, tz=UTC)
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+# ============================================================ SPRINT-11 A-1 (B6) ===
+def _wa_multi_pnid_raw(ids: list[str]) -> bytes:
+    """Compact Meta-shaped payload with one ``entry`` per phone_number_id."""
+    body = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_" + "x" * 12,
+                "changes": [{"value": {"metadata": {"phone_number_id": p}}}],
+            }
+            for p in ids
+        ],
+    }
+    return json.dumps(body, separators=(",", ":")).encode()
+
+
+def test_b6_single_query_before_hmac(integration_app: FastAPI, integration_encryption) -> None:  # noqa: ANN001
+    """B6 — on PG: 8 unknown ids with an unsigned-shape header ⇒ at most ONE
+    ``whatsapp_accounts`` statement then 401; 9 ids ⇒ 400 with ZERO statements;
+    a ≈950 KiB body carrying 10,000 ids ⇒ 400 with ZERO statements (no HMAC, no DB)."""
+    from sqlalchemy import event
+    from src.core import database
+    from src.modules.whatsapp.webhook import MAX_PHONE_NUMBER_IDS
+
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    _wa_account_row(integration_encryption)
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        statements.append(statement)
+
+    bogus = {"Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + "0" * 64}
+    with TestClient(integration_app) as client:
+        engine = database.get_engine()
+        event.listen(engine.sync_engine, "before_cursor_execute", _count)
+        try:
+            eight = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS)]
+            res = client.post(WA_WEBHOOK, content=_wa_multi_pnid_raw(eight), headers=bogus)
+            assert res.status_code == 401, res.text
+            account_sql = [s for s in statements if "whatsapp_accounts" in s]
+            assert len(account_sql) <= 1, account_sql
+            assert len(statements) <= 1, statements
+
+            statements.clear()
+            nine = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS + 1)]
+            res = client.post(WA_WEBHOOK, content=_wa_multi_pnid_raw(nine), headers=bogus)
+            assert res.status_code == 400 and res.json()["detail"] == {"error": "webhook_rejected"}
+            assert statements == []
+
+            flood = _wa_multi_pnid_raw([f"PNID_{i:05d}" for i in range(10_000)])
+            assert 900 * 1024 < len(flood) < 1024 * 1024
+            res = client.post(WA_WEBHOOK, content=flood, headers=bogus)
+            assert res.status_code == 400 and res.json()["detail"] == {"error": "webhook_rejected"}
+            assert statements == []
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _count)
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -3510,7 +3604,7 @@ def test_b2_i2_send_text_persists_outbound_with_actor_and_replays_idempotently_o
 
 # ================================================================ SPRINT-09 B-3 (M6) ===
 def _wa_combined_usage(brand_id: UUID) -> int:
-    """The one ``UNION ALL`` budget query (SPRINT-10 A-4 shared reader) on the real PG."""
+    """The one budget query (shared reader over ``ai_cost_log`` — SPRINT-11 B-1) on PG."""
 
     async def _go() -> int:
         from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
@@ -4052,8 +4146,10 @@ def test_a3_i2_read_then_sent_stays_read_on_pg(
 def test_a4_i1_whatsapp_draft_tokens_block_content_generate_with_same_retry_after_on_pg(
     integration_app: FastAPI, integration_encryption: TokenEncryptionService
 ) -> None:
-    """A4-I1 — one WhatsApp draft holding ``budget + 1`` tokens ⇒ ``/generate`` **429** and
-    ``suggest-reply`` 429 with the same ``Retry-After`` (±1s) — one shared reader (N4)."""
+    """A4-I1 (SPRINT-11 B-1) — one WhatsApp ``reply_suggestion`` cost row holding
+    ``budget + 1`` tokens ⇒ ``/generate`` **429** and ``suggest-reply`` 429 with the same
+    ``Retry-After`` (±1s) — one shared source, one reader (N4). The draft's provenance
+    tokens themselves are **not** a source any more (no double counting)."""
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     account_id = _wa_account_row(integration_encryption)
@@ -4065,7 +4161,9 @@ def test_a4_i1_whatsapp_draft_tokens_block_content_generate_with_same_retry_afte
         account_id, wa_id="201111111111", last_inbound_at=now - timedelta(minutes=4)
     )
     budget = 1_000
-    _wa_draft_row(conv_a, status="expired", prompt_tokens=budget + 1)
+    _wa_draft_row(conv_a, status="expired", prompt_tokens=budget + 1)  # provenance: ignored
+    assert _wa_combined_usage(BRAND_ID) == 0
+    _cost_row("ok", purpose="reply_suggestion", prompt_tokens=budget + 1, completion_tokens=0)
     settings = _wa_override_budget(integration_app, budget)
     owner = integration_headers(settings, OWNER_ID)
     try:
@@ -4087,13 +4185,15 @@ def test_a4_i1_whatsapp_draft_tokens_block_content_generate_with_same_retry_afte
     finally:
         _wa_restore_budget(integration_app, settings)
     assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 1
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 1  # no reservation added
 
 
 def test_a4_i2_content_revision_tokens_block_whatsapp_suggest_on_pg(
     integration_app: FastAPI, integration_encryption: TokenEncryptionService
 ) -> None:
-    """A4-I2 — the reverse: one ``ai_generated`` content revision with ``budget + 1`` tokens
-    ⇒ ``suggest-reply`` 429 (and ``/generate`` 429) through the same reader."""
+    """A4-I2 (SPRINT-11 B-1) — the reverse: one ``content_draft`` cost row with
+    ``budget + 1`` tokens ⇒ ``suggest-reply`` 429 (and ``/generate`` 429) through the same
+    reader; the ``ai_generated`` revision provenance is not counted on its own."""
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     account_id = _wa_account_row(integration_encryption)
@@ -4124,6 +4224,8 @@ def test_a4_i2_content_revision_tokens_block_whatsapp_suggest_on_pg(
                     "tenant": OWNER_ID,
                 },
             )
+            assert _wa_combined_usage(BRAND_ID) == 0  # provenance alone is not a source
+            _cost_row("ok", purpose="content_draft", prompt_tokens=budget + 1, completion_tokens=0)
             sug = client.post(
                 f"{WA_BRAND}/conversations/{conv}/suggest-reply", json={}, headers=owner
             )
@@ -4193,7 +4295,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
     the pre-cleanup marks the **older** one ``expired`` and the partial unique index
     ``uq_wa_reply_drafts_one_pending`` then rejects a second pending draft."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     command.downgrade(cfg, "0009")
@@ -4215,7 +4317,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
         _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 2
     )
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     statuses = dict(_rows("SELECT id, status FROM wa_reply_drafts"))
     assert statuses[older] == "expired" and statuses[newer] == "suggested"
     assert (
@@ -4398,8 +4500,9 @@ def test_b1_i3_evidence_checks_keyset_and_refresh_from_real_tables_on_pg(
 def test_b1_i4_cost_log_feeds_budget_union_and_daily_report_on_pg(
     integration_app: FastAPI,
 ) -> None:
-    """B1-I4 — ``ai_cost_log`` rows count in the shared daily budget (``UNION ALL``) and in
-    ``GET /brain/cost`` (OWNER only); the error-iff-category CHECK holds; no text column."""
+    """B1-I4 — ``ai_cost_log`` rows count in the shared daily budget (the one source since
+    SPRINT-11 B-1; ``error`` rows excluded) and in ``GET /brain/cost`` (OWNER only); the
+    error-iff-category CHECK holds; no text column."""
     owner = _brain_owner(integration_app)
     from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
 
@@ -4436,7 +4539,7 @@ def test_b1_i4_cost_log_feeds_budget_union_and_daily_report_on_pg(
         finally:
             await eng.dispose()
 
-    assert asyncio.run(_usage()) == 300  # two rows of 150 tokens inside 24 h
+    assert asyncio.run(_usage()) == 150  # one ``ok`` row inside 24 h; ``error`` is free
 
     manager = integration_headers(integration_app.state.settings, AGENCY_ID)
     with TestClient(integration_app) as client:
@@ -4453,7 +4556,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
     """B1-M1 — ``head ⇒ 0010 ⇒ head``: the five 0011 tables disappear and come back with
     their named constraints; 0010's partial index survives the round-trip."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0011 = {
         "brand_profiles",
@@ -4474,7 +4577,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
         r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
     }
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     assert tables_0011 <= _public_tables()
     constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
     assert {
@@ -4510,9 +4613,14 @@ def test_b2_i1_competitor_refresh_writes_estimated_rows_and_timestamp_on_pg(
     from src.modules.brand_brain.router import get_public_page_source
 
     owner = _brain_owner(integration_app)
+
     # Fresh robots cache per call ⇒ the second refresh re-reads the (now closed) robots.txt.
+    # A-2: ``rival.example`` has no DNS — inject a resolver that answers a public address.
+    async def _public_resolver(host: str, port: int) -> list[tuple]:  # noqa: ANN401
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
     integration_app.dependency_overrides[get_public_page_source] = lambda: PublicPageFetcher(
-        httpx.AsyncClient(), robots_cache=_RobotsCache()
+        httpx.AsyncClient(), robots_cache=_RobotsCache(), resolver=_public_resolver
     )
     page_json = {
         "id": "777000",
@@ -4615,27 +4723,22 @@ def test_b2_i1_competitor_refresh_writes_estimated_rows_and_timestamp_on_pg(
 
 
 def test_b2_i2_cost_logging_gateway_commits_independently_on_pg(integration_app: FastAPI) -> None:
-    """B2-I2 — ``CostLoggingGateway`` + ``PgCostLogWriter`` (D-072): one row per call, the
-    failed ``user_key`` call included (``outcome='error'`` + category), priced from the
-    table; no text column holds the user key or any secret shape; ``GET /brain/cost`` sees
-    both rows."""
+    """B2-I2 (SPRINT-11 B-3) — ``BudgetGuard`` + ``PgCostLogWriter`` (D-072): the platform
+    call is reserved then settled ``ok`` (priced); the failed ``user_key`` call hit a
+    ``401`` ⇒ ``invalid_credential`` ⇒ the reservation is **refunded** (no row — the user's
+    provider did no work); no text column holds the user key or any secret shape;
+    ``GET /brain/cost`` sees the settled row."""
     from src.modules.ai_gateway.contract import AIError
-    from src.modules.ai_gateway.cost_logging import CostLoggingGateway, PriceTable
     from src.modules.ai_gateway.facades import FakeProvider, HttpOpenAICompatibleProvider
     from src.modules.ai_gateway.gateway import CompletionRequest
-    from src.modules.brand_brain.infrastructure.postgres_repository import PgCostLogWriter
     from tests.conftest import OWNER_USER_ID
 
     owner = _brain_owner(integration_app)
     user_key = "".join(("PGUSERKEY", "-", "0123456789abcdef"))
-    price_table = PriceTable.from_json(
-        '{"fake-1": {"prompt_per_1k": "0.001", "completion_per_1k": "0.002"}}'
-    )
+    prices = '{"fake-1": {"prompt_per_1k": "0.001", "completion_per_1k": "0.002"}}'
 
     async def _calls() -> None:
-        writer = PgCostLogWriter()
-        ok_gateway = CostLoggingGateway(FakeProvider(), writer, price_table=price_table)
-        ok = await ok_gateway.complete(
+        ok = await _pg_guard(FakeProvider(), prices=prices).complete(
             CompletionRequest(
                 purpose="content_plan",
                 system="s",
@@ -4653,9 +4756,8 @@ def test_b2_i2_cost_logging_gateway_commits_independently_on_pg(integration_app:
             provider = HttpOpenAICompatibleProvider(
                 base_url="https://llm.pg.example/v1", api_key=SecretStr(user_key), model="gpt-x"
             )
-            user_gateway = CostLoggingGateway(provider, writer, price_table=price_table)
             with pytest.raises(AIError):
-                await user_gateway.complete(
+                await _pg_guard(provider, prices=prices).complete(
                     CompletionRequest(
                         purpose="brand_diagnosis",
                         system="s",
@@ -4677,18 +4779,16 @@ def test_b2_i2_cost_logging_gateway_commits_independently_on_pg(integration_app:
 
     rows = _rows(
         "SELECT purpose, provider, model, credential_mode, outcome, error_category, "
-        "prompt_version, prompt_tokens, estimated_cost_usd FROM ai_cost_log "
+        "prompt_version, prompt_tokens, estimated_cost_usd, settled_at FROM ai_cost_log "
         "WHERE brand_id = :b ORDER BY created_at",
         {"b": BRAND_ID},
     )
-    assert len(rows) == 2
-    ok_row, err_row = rows
+    assert len(rows) == 1  # the refunded user_key reservation is gone
+    (ok_row,) = rows
     assert ok_row[0:5] == ("content_plan", "fake", "fake-1", "platform", "ok")
     assert ok_row[5] is None and ok_row[6] == "content_plan_v1"
     assert ok_row[7] is not None and ok_row[8] is not None and ok_row[8] > 0
-    assert err_row[0:5] == ("brand_diagnosis", "openai_compatible", "gpt-x", "user_key", "error")
-    assert err_row[5] is not None and err_row[6] == "brand_diagnosis_v1"
-    assert err_row[8] is None
+    assert ok_row[9] is not None
 
     text_columns = [
         c
@@ -4707,8 +4807,486 @@ def test_b2_i2_cost_logging_gateway_commits_independently_on_pg(integration_app:
         report = client.get(f"{BRAIN_PG}/cost", headers=owner)
         assert report.status_code == 200, report.text
         body = report.json()
-        assert body["total_calls"] == 2
-        assert sum(item["errors"] for item in body["items"]) == 1
+        assert body["total_calls"] == 1
+        assert sum(item["errors"] for item in body["items"]) == 0
+    reset_db_caches()
+
+
+# ============================================================================
+# SPRINT-11 Part B — finance (D-075): reserve-before-call, fail-closed pricing, platform cap
+# ============================================================================
+FIN_PRICES = '{"fake-1": {"prompt_per_1k": "0.001", "completion_per_1k": "0.002"}}'
+
+
+def _pg_guard(  # noqa: PLR0913
+    inner,  # noqa: ANN001
+    *,
+    prices: str = FIN_PRICES,
+    daily_budget: int = 1_000_000,
+    cap: str = "25",
+    strict: bool = True,
+    limits=None,  # noqa: ANN001
+    clock=None,  # noqa: ANN001
+):  # noqa: ANN202
+    """A ``BudgetGuard`` on the real ``PgCostLogWriter`` + a fresh PG budget reader."""
+    from decimal import Decimal
+
+    from src.modules.ai_gateway.budget import DailyBudget
+    from src.modules.ai_gateway.budget_guard import BudgetGuard, utcnow
+    from src.modules.ai_gateway.infrastructure.pg_cost_log import PgCostLogWriter
+    from src.modules.ai_gateway.pricing import PriceTable
+
+    writer = PgCostLogWriter()
+    return BudgetGuard(
+        inner,
+        writer=writer,
+        price_table=PriceTable.from_json(prices),
+        daily_budget=DailyBudget(daily_budget),
+        platform_daily_usd_cap=Decimal(cap),
+        usage_reader=_PgWriterUsageReader(writer),
+        limits_reader=limits,
+        strict_pricing=strict,
+        clock=clock or utcnow,
+    )
+
+
+class _PgWriterUsageReader:
+    """``BudgetUsageReader`` over ``PgCostLogWriter.brand_tokens_since`` (independent
+    sessions — usable outside a request)."""
+
+    def __init__(self, writer) -> None:  # noqa: ANN001
+        self._writer = writer
+
+    async def combined_usage_since(self, brand_id: UUID, since: datetime) -> int:
+        return await self._writer.brand_tokens_since(brand_id, since)
+
+    async def oldest_generation_since(self, brand_id: UUID, since: datetime) -> datetime | None:
+        return None
+
+
+def _fin_request(**overrides: object):  # noqa: ANN202
+    from src.modules.ai_gateway.gateway import CompletionRequest
+
+    base: dict = {
+        "purpose": "content_plan",
+        "system": "s",
+        "user": "u" * 600,  # ≈150 prompt tokens estimated
+        "brand_id": BRAND_ID,
+        "tenant_id": OWNER_ID,
+        "prompt_version": "content_plan_v1",
+    }
+    base.update(overrides)
+    return CompletionRequest(**base)
+
+
+def _fin_rows() -> list[tuple]:
+    return _rows(
+        "SELECT outcome, credential_mode, prompt_tokens, completion_tokens, "
+        "estimated_cost_usd, error_category, settled_at, brand_id FROM ai_cost_log "
+        "ORDER BY created_at"
+    )
+
+
+def _fin_reset(integration_app: FastAPI) -> None:
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    reset_db_caches()
+
+
+def test_b1_content_plan_counts_once(integration_app: FastAPI) -> None:
+    """One call with a provider reporting 150 tokens ⇒ the budget reader sees **150**
+    (not 1,200 — no more ``UNION ALL`` over provenance + cost log)."""
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+
+    _fin_reset(integration_app)
+
+    class P:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            return CompletionResult(
+                text="x",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=100, completion_tokens=50),
+            )
+
+    asyncio.run(_pg_guard(P()).complete(_fin_request()))
+    reset_db_caches()
+    assert _wa_combined_usage(BRAND_ID) == 150
+    (row,) = _fin_rows()
+    assert row[0] == "ok" and row[2] == 100 and row[3] == 50
+    assert float(row[4]) == pytest.approx(0.0002)  # 100×0.001/1k + 50×0.002/1k
+
+
+def test_b1_reserve_row_exists_before_provider_call(integration_app: FastAPI) -> None:
+    """A ``pending`` row is committed on its own transaction **before** the provider is
+    called (D-072) and carries the conservative reservation estimate."""
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+
+    _fin_reset(integration_app)
+    seen: dict = {}
+
+    class Probing:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            eng = create_async_engine(TEST_DATABASE_URL)
+            try:
+                async with AsyncSession(eng) as session:
+                    rows = (
+                        await session.execute(
+                            text("SELECT outcome, estimated_cost_usd FROM ai_cost_log")
+                        )
+                    ).all()
+            finally:
+                await eng.dispose()
+            seen["rows"] = [tuple(r) for r in rows]
+            return CompletionResult(
+                text="x",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=1, completion_tokens=1),
+            )
+
+    asyncio.run(_pg_guard(Probing()).complete(_fin_request(max_tokens=1000)))
+    reset_db_caches()
+    assert len(seen["rows"]) == 1 and seen["rows"][0][0] == "pending"
+    reserved = float(seen["rows"][0][1])
+    assert reserved == pytest.approx(150 * 0.001 / 1000 + 1000 * 0.002 / 1000, rel=0.05)
+    (row,) = _fin_rows()
+    assert row[0] == "ok" and row[6] is not None  # settled_at set
+    assert float(row[4]) < reserved  # settled to the real usage
+
+
+def test_b1_timeout_settles_error_not_refund(integration_app: FastAPI) -> None:
+    from src.modules.ai_gateway.contract import AIError, ErrorCategory
+
+    _fin_reset(integration_app)
+
+    class Slow:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            raise AIError(ErrorCategory.TIMEOUT)
+
+    with pytest.raises(AIError):
+        asyncio.run(_pg_guard(Slow()).complete(_fin_request()))
+    reset_db_caches()
+    (row,) = _fin_rows()
+    assert row[0] == "error" and row[5] == "timeout"
+    assert row[2] >= 1 and row[3] == 0 and row[4] is not None  # conservative prompt estimate
+    assert _wa_combined_usage(BRAND_ID) == 0  # error rows are free for the brand budget
+
+
+def test_b1_invalid_credential_refunds(integration_app: FastAPI) -> None:
+    from src.modules.ai_gateway.contract import AIError, ErrorCategory
+
+    _fin_reset(integration_app)
+
+    class Denied:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            raise AIError(ErrorCategory.INVALID_CREDENTIAL)
+
+    with pytest.raises(AIError):
+        asyncio.run(_pg_guard(Denied()).complete(_fin_request()))
+    reset_db_caches()
+    assert _fin_rows() == []
+
+
+def test_b1_unpriced_model_platform_503_no_call_no_row(integration_app: FastAPI) -> None:
+    """``openai_compatible`` platform key + a model missing from the price table ⇒ 503
+    ``ai_model_unpriced`` through the API: respx sees **0** calls, the table has **0** rows."""
+    from src.core.config import get_settings
+
+    _fin_reset(integration_app)
+    settings = integration_app.state.settings
+    platform_key = "".join(("PGPLATFORM", "-", "fedcba9876543210"))
+    integration_app.state.settings = settings.model_copy(
+        update={
+            "ai_provider": "openai_compatible",
+            "ai_provider_api_key": SecretStr(platform_key),
+            "ai_provider_base_url": "https://llm.pg.example/v1",
+            "ai_default_model": "gpt-unpriced",
+            "ai_price_table_json": FIN_PRICES,
+        }
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    try:
+        with respx.mock(assert_all_called=False) as router, TestClient(integration_app) as client:
+            route = router.post("https://llm.pg.example/v1/chat/completions").mock(
+                return_value=httpx.Response(200, json={})
+            )
+            item_id = _content_create(client, owner)["id"]
+            res = client.post(
+                f"{CONTENT}/items/{item_id}/generate",
+                json={"brief": "اكتب منشوراً قصيراً عن العرض الجديد"},
+                headers=owner,
+            )
+        assert res.status_code == 503, res.text
+        assert res.json()["detail"]["error"] == "ai_model_unpriced"
+        assert route.call_count == 0
+    finally:
+        _wa_restore_budget(integration_app, settings)
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 0
+
+
+def test_b1_zero_price_is_valid(integration_app: FastAPI) -> None:
+    from src.modules.ai_gateway.facades import FakeProvider
+
+    _fin_reset(integration_app)
+    zero = '{"fake-1": {"prompt_per_1k": "0", "completion_per_1k": "0"}}'
+    asyncio.run(_pg_guard(FakeProvider(), prices=zero).complete(_fin_request()))
+    reset_db_caches()
+    (row,) = _fin_rows()
+    assert row[0] == "ok" and float(row[4]) == 0.0
+
+
+def test_b1_user_key_unpriced_passes_null_cost(integration_app: FastAPI) -> None:
+    from src.modules.ai_gateway.facades import FakeProvider
+
+    _fin_reset(integration_app)
+    asyncio.run(
+        _pg_guard(FakeProvider(), prices="").complete(_fin_request(credential_mode="user_key"))
+    )
+    reset_db_caches()
+    (row,) = _fin_rows()
+    assert row[0] == "ok" and row[1] == "user_key" and row[4] is None
+
+
+def test_b1_platform_cap_503_with_retry_after(integration_app: FastAPI) -> None:
+    """Platform spend in the last 24 h ≥ ``PLATFORM_DAILY_USD_CAP`` ⇒ 503
+    ``platform_budget_exhausted`` + ``Retry-After`` through the API; no row, no call."""
+    from src.core.config import get_settings
+
+    _fin_reset(integration_app)
+    _cost_row("ok", estimated_cost_usd="20", created_at=datetime.now(tz=UTC) - timedelta(hours=1))
+    _cost_row("ambiguous", estimated_cost_usd="5", prompt_tokens=None, completion_tokens=None)
+    _cost_row("error", estimated_cost_usd="100")  # errors never count towards the cap
+    _cost_row("ok", estimated_cost_usd="100", created_at=datetime.now(tz=UTC) - timedelta(days=2))
+    settings = integration_app.state.settings
+    from decimal import Decimal
+
+    integration_app.state.settings = settings.model_copy(
+        update={"platform_daily_usd_cap": Decimal("25")}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    try:
+        with TestClient(integration_app) as client:
+            item_id = _content_create(client, owner)["id"]
+            res = client.post(
+                f"{CONTENT}/items/{item_id}/generate",
+                json={"brief": "اكتب منشوراً قصيراً عن العرض الجديد"},
+                headers=owner,
+            )
+        assert res.status_code == 503, res.text
+        assert res.json()["detail"]["error"] == "platform_budget_exhausted"
+        assert int(res.headers["Retry-After"]) >= 1
+    finally:
+        _wa_restore_budget(integration_app, settings)
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 4
+
+
+def test_b1_user_key_not_counted_in_platform_cap(integration_app: FastAPI) -> None:
+    from src.modules.ai_gateway.budget_guard import PlatformBudgetExhaustedError
+    from src.modules.ai_gateway.facades import FakeProvider
+    from src.modules.ai_gateway.infrastructure.pg_cost_log import PgCostLogWriter
+
+    _fin_reset(integration_app)
+    _cost_row("ok", estimated_cost_usd="30", credential_mode="user_key")
+    since = datetime.now(tz=UTC) - timedelta(hours=24)
+    assert asyncio.run(PgCostLogWriter().platform_usd_since(since)) == 0
+    reset_db_caches()  # the cached session factory is bound to the previous loop
+    # the platform call still passes …
+    asyncio.run(_pg_guard(FakeProvider(), cap="25").complete(_fin_request()))
+    reset_db_caches()
+    # … until platform spend itself reaches the cap
+    _cost_row("ok", estimated_cost_usd="25")
+    with pytest.raises(PlatformBudgetExhaustedError):
+        asyncio.run(_pg_guard(FakeProvider(), cap="25").complete(_fin_request()))
+    reset_db_caches()
+    # a user_key call is never blocked by the platform cap
+    asyncio.run(
+        _pg_guard(FakeProvider(), cap="25").complete(_fin_request(credential_mode="user_key"))
+    )
+    reset_db_caches()
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 4
+
+
+def test_b1_fake_provider_ci_path(integration_app: FastAPI) -> None:
+    """``AI_PROVIDER=fake`` without ``AI_PRICE_TABLE_JSON`` ⇒ ``/generate`` works (the
+    ``fake-1`` model is priced 0/0 automatically) and one ``ok`` row costs 0."""
+    _fin_reset(integration_app)
+    settings = integration_app.state.settings
+    assert settings.ai_provider == "fake" and settings.ai_price_table_json == ""
+    owner = integration_headers(settings, OWNER_ID)
+    with TestClient(integration_app) as client:
+        item_id = _content_create(client, owner)["id"]
+        res = client.post(
+            f"{CONTENT}/items/{item_id}/generate",
+            json={"brief": "اكتب منشوراً قصيراً عن العرض الجديد"},
+            headers=owner,
+        )
+    assert res.status_code == 200, res.text
+    (row,) = _fin_rows()
+    assert row[0] == "ok" and row[1] == "platform" and float(row[4]) == 0.0
+
+
+def test_b1_writer_failure_platform_503_user_key_continues(integration_app: FastAPI) -> None:
+    """The cost log is unreachable ⇒ platform-paid call is refused with
+    ``CostLogUnavailableError`` (503) **before** the provider; a ``user_key`` call continues."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.modules.ai_gateway.budget import DailyBudget, NullBudgetUsageReader
+    from src.modules.ai_gateway.budget_guard import BudgetGuard, CostLogUnavailableError
+    from src.modules.ai_gateway.facades import FakeProvider
+    from src.modules.ai_gateway.infrastructure.pg_cost_log import PgCostLogWriter
+    from src.modules.ai_gateway.pricing import PriceTable
+
+    _fin_reset(integration_app)
+    bad_url = TEST_DATABASE_URL.rsplit("/", 1)[0] + "/does_not_exist_db"
+    broken_engine = create_async_engine(bad_url)
+    writer = PgCostLogWriter(session_factory=async_sessionmaker(broken_engine))
+    provider = FakeProvider()
+
+    def _guard() -> BudgetGuard:
+        from decimal import Decimal
+
+        return BudgetGuard(
+            provider,
+            writer=writer,
+            price_table=PriceTable.from_json(FIN_PRICES),
+            daily_budget=DailyBudget(1_000_000),
+            platform_daily_usd_cap=Decimal("25"),
+            usage_reader=NullBudgetUsageReader(),
+        )
+
+    try:
+        with pytest.raises(CostLogUnavailableError):
+            asyncio.run(_guard().complete(_fin_request()))
+        assert provider.calls == []
+        result = asyncio.run(_guard().complete(_fin_request(credential_mode="user_key")))
+        assert result.provider == "fake" and len(provider.calls) == 1
+    finally:
+        asyncio.run(broken_engine.dispose())
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 0
+
+
+def test_b1_brand_delete_sets_null(integration_app: FastAPI) -> None:
+    """D-081: deleting the brand keeps the financial rows with ``brand_id IS NULL``."""
+    _fin_reset(integration_app)
+    _cost_row("ok")
+    _cost_row("error")
+    _run("DELETE FROM brands WHERE id = :b", {"b": BRAND_ID})
+    rows = _fin_rows()
+    assert len(rows) == 2 and all(r[7] is None for r in rows)
+    delete_rule = _run(
+        "SELECT confdeltype FROM pg_constraint WHERE conname = 'fk_ai_cost_log_brand_id'",
+        scalar=True,
+    )
+    assert delete_rule in (b"n", "n")  # SET NULL ("char" arrives as bytes under asyncpg)
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+
+
+def test_b1_settle_stale(integration_app: FastAPI) -> None:
+    """A ``pending`` row 90 s old with a 30 s timeout ⇒ ``ambiguous`` (``settled_at`` set)
+    and counted in the platform cap; a fresh ``pending`` row is left alone."""
+    from src.modules.ai_gateway.budget_guard import settle_stale_reservations
+    from src.modules.ai_gateway.infrastructure.pg_cost_log import PgCostLogWriter
+
+    _fin_reset(integration_app)
+    now = datetime.now(tz=UTC)
+    stale = _cost_row(
+        "pending",
+        prompt_tokens=None,
+        completion_tokens=None,
+        estimated_cost_usd="3",
+        created_at=now - timedelta(seconds=90),
+    )
+    fresh = _cost_row(
+        "pending",
+        prompt_tokens=None,
+        completion_tokens=None,
+        estimated_cost_usd="2",
+        created_at=now - timedelta(seconds=10),
+    )
+    writer = PgCostLogWriter()
+    count = asyncio.run(settle_stale_reservations(writer, now=now, timeout_seconds=30))
+    reset_db_caches()  # each ``asyncio.run`` needs a factory bound to its own loop
+    assert count == 1
+    outcomes = dict(_rows("SELECT id, outcome FROM ai_cost_log"))
+    assert outcomes[stale] == "ambiguous" and outcomes[fresh] == "pending"
+    assert (
+        _run("SELECT settled_at FROM ai_cost_log WHERE id = :id", {"id": stale}, scalar=True)
+        is not None
+    )
+    usd = asyncio.run(writer.platform_usd_since(now - timedelta(hours=24)))
+    reset_db_caches()
+    assert float(usd) == 5.0  # both pending and ambiguous count conservatively
+    assert asyncio.run(settle_stale_reservations(writer, now=now, timeout_seconds=30)) == 0
+    reset_db_caches()
+
+
+def test_b1_migration_0013_round_trip_on_pg() -> None:
+    """``head ⇒ 0012 ⇒ head``: nullable ``brand_id`` / SET NULL FK / new columns / indexes /
+    widened outcome CHECK disappear and come back; orphaned rows are deleted on downgrade
+    (documented) and unsettled reservations are mapped to ``error``."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    orphan = _cost_row("ok", brand_id=None)
+    pending = _cost_row("pending", prompt_tokens=None, completion_tokens=None)
+    kept = _cost_row("ok")
+
+    def _indexes() -> set[str]:
+        sql = "SELECT indexname FROM pg_indexes WHERE tablename = 'ai_cost_log'"
+        return {i for (i,) in _rows(sql)}
+
+    def _columns() -> set[str]:
+        sql = "SELECT column_name FROM information_schema.columns WHERE table_name = 'ai_cost_log'"
+        return {c for (c,) in _rows(sql)}
+
+    assert {"ix_ai_cost_log_mode_created", "ix_ai_cost_log_pending"} <= _indexes()
+    assert {"settled_at", "request_id"} <= _columns()
+    command.downgrade(cfg, "0012")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert not {"ix_ai_cost_log_mode_created", "ix_ai_cost_log_pending"} & _indexes()
+    assert not {"settled_at", "request_id"} & _columns()
+    ids = {i: o for i, o in _rows("SELECT id, outcome FROM ai_cost_log")}
+    assert orphan not in ids and ids[kept] == "ok" and ids[pending] == "error"
+    assert (
+        _run(
+            "SELECT is_nullable FROM information_schema.columns WHERE table_name = 'ai_cost_log' "
+            "AND column_name = 'brand_id'",
+            scalar=True,
+        )
+        == "NO"
+    )
+    with pytest.raises(IntegrityError, match="ck_ai_cost_log_outcome"):
+        _cost_row("pending", prompt_tokens=None, completion_tokens=None)  # fits VARCHAR(8)
+    with pytest.raises(DBAPIError):  # 9 chars > VARCHAR(8) on the 0012 schema
+        _cost_row("ambiguous")
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert {"ix_ai_cost_log_mode_created", "ix_ai_cost_log_pending"} <= _indexes()
+    assert {"settled_at", "request_id"} <= _columns()
+    _cost_row("ambiguous")  # accepted again
+    _cost_row("ok", brand_id=None)
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
     reset_db_caches()
 
 
@@ -5051,7 +5629,7 @@ def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
     """B3-M1 — ``head ⇒ 0011 ⇒ head``: the two 0012 tables disappear and come back with
     their named constraints and indexes; 0011's tables survive the round-trip."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0012 = {"brand_recommendations", "learning_signals"}
 
@@ -5064,7 +5642,7 @@ def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
     assert not tables_0012 & _public_tables()
     assert {"brand_profiles", "brand_evidence", "ai_cost_log"} <= _public_tables()
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0012"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
     assert tables_0012 <= _public_tables()
     constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
     assert {
@@ -5084,3 +5662,577 @@ def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
         "ix_brand_recommendations_brand_status_created",
         "ix_learning_signals_brand_purpose_created",
     } <= indexes
+
+
+# ============================================================================
+# SPRINT-11 Part C — entitlements (D-073), consent (D-080), referral (D-078), 0014
+# ============================================================================
+ENT_ADMIN = f"{API}/admin/entitlements"
+
+
+def _c_reset(integration_app: FastAPI) -> dict[str, str]:
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    reset_db_caches()
+    return integration_headers(integration_app.state.settings, OWNER_ID)
+
+
+def _c_admin(integration_app: FastAPI):  # noqa: ANN202
+    """Make the seeded OWNER user a platform admin for the life of one test."""
+    from src.core.config import get_settings
+    from tests.conftest import OWNER_USER_ID
+
+    settings = integration_app.state.settings
+    admin = settings.model_copy(update={"platform_admin_user_ids": [OWNER_USER_ID]})
+    integration_app.dependency_overrides[get_settings] = lambda: admin
+    return get_settings
+
+
+def _c_events(brand_id: UUID | None = None) -> list[tuple]:
+    where = "WHERE brand_id = :b" if brand_id is not None else "WHERE brand_id IS NULL"
+    return _rows(
+        f"SELECT kind, payload, actor_user_id FROM entitlement_events {where} ORDER BY created_at",  # noqa: S608
+        {"b": brand_id} if brand_id is not None else {},
+    )
+
+
+def test_c1_migration_0014_round_trip_on_pg() -> None:
+    """``head ⇒ 0013 ⇒ head`` and ``head ⇒ 0012 ⇒ head``: the two 0014 tables, the three new
+    columns and their named constraints disappear and come back; 0013 survives."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    tables_0014 = {"brand_entitlements", "entitlement_events"}
+
+    def _public_tables() -> set[str]:
+        return {t for (t,) in _rows("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+
+    def _columns(table: str) -> set[str]:
+        sql = "SELECT column_name FROM information_schema.columns WHERE table_name = :t"
+        return {c for (c,) in _rows(sql, {"t": table})}
+
+    def _constraints() -> set[str]:
+        return {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
+
+    named = {
+        "ck_brand_entitlements_plan",
+        "ck_brand_entitlements_limits",
+        "ck_entitlement_events_kind",
+        "ck_entitlement_events_payload",
+        "fk_brands_referred_by_brand_id",
+        "ck_brands_referred_by_not_self",
+        "ck_brands_learning_consent",
+    }
+    assert tables_0014 <= _public_tables()
+    assert {"referred_by_brand_id", "learning_consent"} <= _columns("brands")
+    assert "referral" in _columns("wa_messages")
+    assert named <= _constraints()
+    for target in ("0013", "0012"):
+        command.downgrade(cfg, target)
+        assert _run("SELECT version_num FROM alembic_version", scalar=True) == target
+        assert not tables_0014 & _public_tables()
+        assert not {"referred_by_brand_id", "learning_consent"} & _columns("brands")
+        assert "referral" not in _columns("wa_messages")
+        assert not named & _constraints()
+        assert "ai_cost_log" in _public_tables()
+        command.upgrade(cfg, "head")
+        assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+        assert tables_0014 <= _public_tables()
+        assert named <= _constraints()
+    indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
+    assert "ix_entitlement_events_brand_created" in indexes
+    assert (
+        _run(
+            "SELECT column_default FROM information_schema.columns WHERE table_name = 'brands' "
+            "AND column_name = 'learning_consent'",
+            scalar=True,
+        )
+        == "'signals_only'::character varying"
+    )
+    with pytest.raises(IntegrityError, match="ck_brands_learning_consent"):
+        _run(
+            "INSERT INTO brands (id, owner_tenant_id, slug, name, learning_consent) "
+            "VALUES (:id, :t, 'bad-consent', 'x', 'everything')",
+            {"id": uuid4(), "t": OWNER_ID},
+        )
+    _seed_fresh()
+    reset_db_caches()
+
+
+def test_c4_activate_extend_suspend_and_admin_guard_on_pg(integration_app: FastAPI) -> None:
+    """C-3/C-4 on real rows: non-admin ⇒ 403; implicit trial before any row; activate ⇒
+    ``activated`` + row; second activate ⇒ ``extended`` with ``active_until`` pushed from the
+    previous end (not from now); suspended ⇒ 429 ``plan_inactive`` on generation."""
+    owner = _c_reset(integration_app)
+    with TestClient(integration_app) as client:
+        denied = client.post(
+            f"{ENT_ADMIN}/activate",
+            json={"brand_id": str(BRAND_ID), "plan": "starter", "months": 1},
+            headers=owner,
+        )
+        assert denied.status_code == 403, denied.text
+        assert denied.json()["detail"]["error"] == "platform_admin_required"
+        key = _c_admin(integration_app)
+        try:
+            implicit = client.get(f"{ENT_ADMIN}/{BRAND_ID}", headers=owner)
+            assert implicit.status_code == 200, implicit.text
+            assert implicit.json()["plan"] == "trial" and implicit.json()["is_active"] is True
+            assert _run("SELECT COUNT(*) FROM brand_entitlements", scalar=True) == 0
+
+            first = client.post(
+                f"{ENT_ADMIN}/activate",
+                json={"brand_id": str(BRAND_ID), "plan": "starter", "months": 2, "note": "pay-1"},
+                headers=owner,
+            )
+            assert first.status_code == 200, first.text
+            body = first.json()
+            assert body["plan"] == "starter" and body["is_active"] is True
+            assert body["limits"]["daily_tokens"] == 60_000
+            until_1 = datetime.fromisoformat(body["active_until"])
+            assert timedelta(days=59) < until_1 - datetime.now(tz=UTC) < timedelta(days=61)
+            assert [e["kind"] for e in body["events"]] == ["activated"]
+
+            second = client.post(
+                f"{ENT_ADMIN}/activate",
+                json={"brand_id": str(BRAND_ID), "plan": "starter", "months": 1},
+                headers=owner,
+            )
+            assert second.status_code == 200, second.text
+            until_2 = datetime.fromisoformat(second.json()["active_until"])
+            assert timedelta(days=29) < until_2 - until_1 < timedelta(days=31)
+            assert [e["kind"] for e in second.json()["events"]] == ["extended", "activated"]
+
+            missing = client.post(
+                f"{ENT_ADMIN}/activate",
+                json={"brand_id": str(uuid4()), "plan": "growth", "months": 1},
+                headers=owner,
+            )
+            assert missing.status_code == 404 and missing.json()["detail"]["error"] == (
+                "brand_not_found"
+            )
+            public = client.get(f"{API}/brands/{BRAND_ID}/entitlement", headers=owner)
+            assert public.status_code == 200, public.text
+            assert public.json()["plan"] == "starter"
+            assert set(public.json()["usage"]) == {
+                "daily_tokens",
+                "monthly_posts",
+                "monthly_wa_conversations",
+            }
+            assert "events" not in public.json() and "referred_by_brand_id" not in public.json()
+        finally:
+            integration_app.dependency_overrides.pop(key, None)
+    rows = _rows("SELECT plan, is_active, (limits->>'daily_tokens')::int FROM brand_entitlements")
+    assert rows == [("starter", True, 60_000)]
+    assert [k for (k, _p, _a) in _c_events(BRAND_ID)] == ["activated", "extended"]
+    assert all(a == USER_BY_TENANT[OWNER_ID] for (_k, _p, a) in _c_events(BRAND_ID))
+    payload = _c_events(BRAND_ID)[0][1]
+    assert payload["plan"] == "starter" and payload["months"] == 2 and payload["note"] == "pay-1"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+
+def test_c4_suspended_plan_refuses_generation_with_plan_inactive_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """``EntitlementService.suspend`` on PG ⇒ ``is_active=false`` + ``suspended`` event; the
+    real ``PgEntitlementLimitsReader`` then makes the guard raise 429 ``plan_inactive``
+    (same ``generation_budget_exceeded`` code, D-067) **before** any provider call."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.modules.ai_gateway.budget_guard import EntitlementLimitError
+    from src.modules.entitlements.domain.models import Plan
+    from src.modules.entitlements.infrastructure.postgres_repository import (
+        PgCounterUsageReader,
+        PgEntitlementRepository,
+    )
+    from src.modules.entitlements.service import EntitlementService, PgEntitlementLimitsReader
+
+    _c_reset(integration_app)
+    calls: list = []
+
+    class Probe:
+        name = "probe"
+        model = "fake-1"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            calls.append(req)
+            raise AssertionError("provider must not be called")
+
+    async def _go() -> None:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            factory = async_sessionmaker(eng, expire_on_commit=False)
+            async with factory() as session:
+                repo = PgEntitlementRepository(session)
+                service = EntitlementService(repo)
+                await service.activate(
+                    BRAND_ID, Plan.GROWTH, 1, actor_user_id=USER_BY_TENANT[OWNER_ID]
+                )
+                await service.suspend(
+                    BRAND_ID, actor_user_id=USER_BY_TENANT[OWNER_ID], reason="chargeback"
+                )
+                await session.commit()
+            async with factory() as session:
+                reader = PgEntitlementLimitsReader(
+                    PgEntitlementRepository(session),
+                    usage_reader=_PgWriterUsageReader(_pg_guard(Probe())._writer),
+                    counters=PgCounterUsageReader(session),
+                )
+                with pytest.raises(EntitlementLimitError) as info:
+                    await _pg_guard(Probe(), limits=reader).complete(_fin_request())
+                assert info.value.limit_kind == "plan_inactive"
+                assert info.value.resets_in_seconds >= 3600
+                # Refused before reserve ⇒ no ai_cost_log row for the plan_inactive call.
+                assert await session.scalar(text("SELECT COUNT(*) FROM ai_cost_log")) == 0
+                # Kill switch ⇒ allowed through to the provider (which we make fail loudly).
+                off = PgEntitlementLimitsReader(
+                    PgEntitlementRepository(session),
+                    usage_reader=_PgWriterUsageReader(_pg_guard(Probe())._writer),
+                    enforced=False,
+                )
+                with pytest.raises(AssertionError, match="provider must not be called"):
+                    await _pg_guard(Probe(), limits=off).complete(_fin_request())
+        finally:
+            await eng.dispose()
+
+    asyncio.run(_go())
+    assert len(calls) == 1
+    rows = _rows("SELECT plan, is_active FROM brand_entitlements")
+    assert rows == [("growth", False)]
+    kinds = [k for (k, _p, _a) in _c_events(BRAND_ID)]
+    assert kinds == ["activated", "suspended"]
+    assert _c_events(BRAND_ID)[1][1] == {"reason": "chargeback"}
+    # Only the kill-switch call reached the provider ⇒ exactly one (settled) cost row.
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 1
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    reset_db_caches()
+
+
+def test_c4_concurrent_first_activations_credit_referrer_exactly_once_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """D-078: BRAND2 was referred by BRAND; two **concurrent** first activations on separate
+    sessions serialise on ``SELECT … FOR UPDATE`` ⇒ one ``activated`` + one ``extended`` and
+    exactly **one** ``referral_credit`` event for the referrer (no automatic credit applied).
+    Deleting the referred brand keeps its events with ``brand_id IS NULL`` (D-081) and
+    cascades its ``brand_entitlements`` row."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.modules.entitlements.domain.models import Plan
+    from src.modules.entitlements.infrastructure.postgres_repository import (
+        PgEntitlementRepository,
+    )
+    from src.modules.entitlements.service import EntitlementService
+
+    _c_reset(integration_app)
+    _run(
+        "UPDATE brands SET referred_by_brand_id = :ref WHERE id = :b",
+        {"ref": BRAND_ID, "b": BRAND2_ID},
+    )
+    with pytest.raises(IntegrityError, match="ck_brands_referred_by_not_self"):
+        _run("UPDATE brands SET referred_by_brand_id = :b WHERE id = :b", {"b": BRAND_ID})
+
+    async def _go() -> None:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            factory = async_sessionmaker(eng, expire_on_commit=False)
+
+            async def _activate(plan: Plan) -> None:
+                async with factory() as session:
+                    service = EntitlementService(PgEntitlementRepository(session))
+                    await service.activate(
+                        BRAND2_ID, plan, 1, actor_user_id=USER_BY_TENANT[OWNER_ID]
+                    )
+                    await session.commit()
+
+            await asyncio.gather(_activate(Plan.STARTER), _activate(Plan.STARTER))
+            async with factory() as session:
+                repo = PgEntitlementRepository(session)
+                ent = await repo.get(BRAND2_ID)
+                assert ent is not None and ent.referred_by_brand_id == BRAND_ID
+                assert await repo.has_event(BRAND_ID, "referral_credit") is True
+                assert await repo.has_event(BRAND2_ID, "referral_credit") is False
+                newest_first = await repo.list_events(BRAND2_ID, limit=20)
+                assert [e.kind for e in newest_first] == ["extended", "activated"]
+                assert await repo.lock_brand(uuid4()) is None
+        finally:
+            await eng.dispose()
+
+    asyncio.run(_go())
+    referred = [k for (k, _p, _a) in _c_events(BRAND2_ID)]
+    assert referred == ["activated", "extended"]
+    credits = _c_events(BRAND_ID)
+    assert [k for (k, _p, _a) in credits] == ["referral_credit"]
+    assert credits[0][1] == {
+        "referred_brand_id": str(BRAND2_ID),
+        "percent": 10,
+        "plan": "starter",
+        "months": 1,
+    }
+    # The active window is 60 days (two × 30 d), not 30: the second call extended.
+    (until,) = _rows(
+        "SELECT active_until FROM brand_entitlements WHERE brand_id = :b", {"b": BRAND2_ID}
+    )[0]
+    assert timedelta(days=59) < until - datetime.now(tz=UTC) < timedelta(days=61)
+    # No credit was *applied* anywhere (D-078: event only).
+    (ref_rows,) = _rows(
+        "SELECT COUNT(*) FROM brand_entitlements WHERE brand_id = :b", {"b": BRAND_ID}
+    )[0]
+    assert ref_rows == 0
+
+    _run("DELETE FROM brands WHERE id = :b", {"b": BRAND2_ID})
+    assert _run("SELECT COUNT(*) FROM brand_entitlements", scalar=True) == 0
+    orphaned = [k for (k, _p, _a) in _c_events(None)]
+    assert orphaned == ["activated", "extended"]
+    assert _run("SELECT COUNT(*) FROM entitlement_events", scalar=True) == 3
+    rules = {
+        n: d
+        for (n, d) in _rows(
+            "SELECT conname, confdeltype FROM pg_constraint WHERE conname IN "
+            "('entitlement_events_brand_id_fkey', 'brand_entitlements_brand_id_fkey', "
+            "'fk_brands_referred_by_brand_id')"
+        )
+    }
+    assert rules["entitlement_events_brand_id_fkey"] in (b"n", "n")  # SET NULL
+    assert rules["brand_entitlements_brand_id_fkey"] in (b"c", "c")  # CASCADE
+    assert rules["fk_brands_referred_by_brand_id"] in (b"n", "n")  # SET NULL
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    reset_db_caches()
+
+
+def test_c1_counters_and_plan_daily_tokens_on_real_tables_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """``PgCounterUsageReader`` counts ``approval_events(action='approved')`` per brand and
+    ``wa_conversations`` within the window; ``check_counter`` raises the counter's
+    ``limit_kind`` once ``used >= budget``; the **plan** ``daily_tokens`` (from the row) refuses
+    the next call with ``plan_daily_tokens`` while the global setting is still generous."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from src.modules.ai_gateway.budget_guard import EntitlementLimitError
+    from src.modules.ai_gateway.facades import FakeProvider
+    from src.modules.entitlements.domain.models import Plan, PlanLimits
+    from src.modules.entitlements.infrastructure.postgres_repository import (
+        PgCounterUsageReader,
+        PgEntitlementRepository,
+    )
+    from src.modules.entitlements.service import (
+        EntitlementService,
+        PgEntitlementLimitsReader,
+        current_usage,
+    )
+
+    _c_reset(integration_app)
+    now = datetime.now(tz=UTC)
+    for brand, age_days in ((BRAND_ID, 1), (BRAND_ID, 2), (BRAND_ID, 45), (BRAND2_ID, 1)):
+        item_id, rev_id = uuid4(), uuid4()
+        _run(
+            "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
+            "VALUES (:id, :b, :t, 'facebook_page', 'draft')",
+            {"id": item_id, "b": brand, "t": OWNER_ID},
+        )
+        _run(
+            "INSERT INTO content_revisions (id, item_id, revision_no, body, provenance, "
+            "created_by_tenant_id) VALUES (:id, :item, 1, 'b', CAST(:prov AS JSONB), :t)",
+            {"id": rev_id, "item": item_id, "prov": json.dumps({"kind": "human"}), "t": OWNER_ID},
+        )
+        for action in ("approved", "rejected"):
+            _run(
+                "INSERT INTO approval_events (id, item_id, revision_id, action, actor_tenant_id, "
+                "actor_user_id, created_at) VALUES (:id, :item, :rev, :a, :t, :u, :at)",
+                {
+                    "id": uuid4(),
+                    "item": item_id,
+                    "rev": rev_id,
+                    "a": action,
+                    "t": OWNER_ID,
+                    "u": USER_BY_TENANT[OWNER_ID],
+                    "at": now - timedelta(days=age_days),
+                },
+            )
+    account_id = _wa_account_row(integration_encryption)
+    _wa_conversation_row(account_id, wa_id="201000000001", last_inbound_at=now)
+    _run(
+        "UPDATE wa_conversations SET created_at = :old WHERE wa_id = '201000000001'",
+        {"old": now - timedelta(days=40)},
+    )
+    _wa_conversation_row(account_id, wa_id="201000000002", last_inbound_at=now)
+    _cost_row("ok", prompt_tokens=400, completion_tokens=200)  # 600 tokens today for BRAND
+
+    async def _go() -> None:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            factory = async_sessionmaker(eng, expire_on_commit=False)
+            async with factory() as session:
+                counters = PgCounterUsageReader(session)
+                since = now - timedelta(days=30)
+                assert await counters.monthly_used(BRAND_ID, "monthly_posts", since=since) == 2
+                assert await counters.monthly_used(BRAND2_ID, "monthly_posts", since=since) == 1
+                assert (
+                    await counters.monthly_used(BRAND_ID, "monthly_wa_conversations", since=since)
+                    == 1
+                )
+                service = EntitlementService(PgEntitlementRepository(session))
+                await service.activate(
+                    BRAND_ID, Plan.STARTER, 1, actor_user_id=USER_BY_TENANT[OWNER_ID]
+                )
+                tight = PlanLimits(
+                    daily_tokens=500,
+                    monthly_posts=2,
+                    monthly_wa_conversations=5,
+                    max_brands=1,
+                    seats=1,
+                )
+                ent = await service.set_limits_override(
+                    BRAND_ID, tight, actor_user_id=USER_BY_TENANT[OWNER_ID]
+                )
+                await session.commit()
+                assert ent.limits == tight and ent.plan is Plan.STARTER
+            async with factory() as session:
+                usage_reader = _PgWriterUsageReader(_pg_guard(FakeProvider())._writer)
+                counters = PgCounterUsageReader(session)
+                reader = PgEntitlementLimitsReader(
+                    PgEntitlementRepository(session), usage_reader=usage_reader, counters=counters
+                )
+                with pytest.raises(EntitlementLimitError) as posts:
+                    await reader.check_counter(BRAND_ID, "monthly_posts")
+                assert posts.value.limit_kind == "monthly_posts"
+                assert posts.value.budget == 2 and posts.value.used == 2
+                await reader.check_counter(BRAND_ID, "monthly_wa_conversations")  # 1 < 5
+                with pytest.raises(EntitlementLimitError) as tokens:
+                    await _pg_guard(FakeProvider(), limits=reader).complete(_fin_request())
+                assert tokens.value.limit_kind == "plan_daily_tokens"
+                assert tokens.value.budget == 500 and tokens.value.used == 600
+                ent = await PgEntitlementRepository(session).get(BRAND_ID)
+                assert ent is not None
+                usage = await current_usage(
+                    ent, usage_reader=usage_reader, counters=counters, now=datetime.now(tz=UTC)
+                )
+                assert usage == {
+                    "daily_tokens": 600,
+                    "monthly_posts": 2,
+                    "monthly_wa_conversations": 1,
+                }
+        finally:
+            await eng.dispose()
+
+    asyncio.run(_go())
+    kinds = [k for (k, _p, _a) in _c_events(BRAND_ID)]
+    assert kinds == ["activated", "limits_overridden"]
+    assert _c_events(BRAND_ID)[1][1]["limits"]["daily_tokens"] == 500
+    # The refused plan_daily_tokens call wrote no row: still the single seeded cost row.
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 1
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    reset_db_caches()
+
+
+def test_c6_c7_consent_none_blocks_signals_and_ctwa_referral_persists_on_pg(
+    integration_app: FastAPI,
+    integration_encryption: TokenEncryptionService,
+    graph_mock: respx.MockRouter,
+) -> None:
+    """C-6 on PG: ``PATCH /brands/{id}/learning-consent`` ⇒ ``none`` (BrandOut echoes it; VIEWER
+    ⇒ 403); afterwards a reject writes **no** ``wa_learning_signals`` row and a brain
+    dismiss writes **no** ``learning_signals`` row — both decisions still land. C-7: a CTWA
+    inbound stores the trimmed ``referral`` JSONB and the API exposes it."""
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    _seed_fresh()
+    reset_db_caches()
+    _wa_account_row(integration_encryption)
+    graph_mock.post(WA_MESSAGES_PATH).mock(
+        return_value=httpx.Response(
+            200, json={"messaging_product": "whatsapp", "messages": [{"id": "wamid.PGC6"}]}
+        )
+    )
+    settings = integration_app.state.settings
+    owner = integration_headers(settings, OWNER_ID)
+    stranger = integration_headers(settings, STRANGER_ID)
+    now_ts = int(datetime.now(tz=UTC).timestamp())
+    ctwa = _wa_payload("wamid.PG_C7_IN", ts=now_ts, body="جاي من الإعلان")
+    ctwa["entry"][0]["changes"][0]["value"]["messages"][0]["referral"] = {
+        "source_url": "https://fb.me/ad-pg",
+        "source_id": 123,
+        "source_type": "ad",
+        "headline": "h" * 600,
+        "ctwa_clid": "clid-pg",
+        "image_url": "dropped",
+    }
+    with TestClient(integration_app) as client:
+        # --- C-7: referral persisted + exposed -------------------------------------------
+        inbound = _wa_post(client, ctwa)
+        assert inbound.status_code == 200 and inbound.json()["inbound"] == 1, inbound.text
+        (conv_id,) = _rows("SELECT id FROM wa_conversations")[0]
+        (stored,) = _rows("SELECT referral FROM wa_messages WHERE wamid = 'wamid.PG_C7_IN'")[0]
+        assert stored["source_id"] == "123" and len(stored["headline"]) == 512
+        assert "image_url" not in stored
+        listed = client.get(f"{WA_BRAND}/conversations/{conv_id}/messages", headers=owner)
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["items"][0]["referral"]["ctwa_clid"] == "clid-pg"
+
+        # --- C-6: consent route (GRANT_ROLES only) ------------------------------------------
+        granted = client.post(
+            f"{API}/brands/{BRAND_ID}/grants",
+            json={"grantee_tenant_id": str(STRANGER_ID), "role": "viewer"},
+            headers=owner,
+        )
+        assert granted.status_code == 201, granted.text
+        forbidden = client.patch(
+            f"{API}/brands/{BRAND_ID}/learning-consent",
+            json={"learning_consent": "none"},
+            headers=stranger,
+        )
+        assert forbidden.status_code == 403, forbidden.text
+        before = client.get(f"{API}/brands/{BRAND_ID}", headers=owner).json()
+        assert before["learning_consent"] == "signals_only"
+        changed = client.patch(
+            f"{API}/brands/{BRAND_ID}/learning-consent",
+            json={"learning_consent": "none"},
+            headers=owner,
+        )
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["learning_consent"] == "none"
+        assert (
+            _run("SELECT learning_consent FROM brands WHERE id = :b", {"b": BRAND_ID}, scalar=True)
+            == "none"
+        )
+        after = client.get(f"{API}/brands/{BRAND_ID}", headers=owner).json()
+        assert after["learning_consent"] == "none"
+        # VIEWER still reads it (D-080 is per-brand, not secret) but cannot change it.
+        assert client.get(f"{API}/brands/{BRAND_ID}", headers=stranger).status_code == 200
+
+        # WhatsApp: suggest ⇒ reject decides the draft, writes no wa_learning_signals row.
+        suggested = client.post(
+            f"{WA_BRAND}/conversations/{conv_id}/suggest-reply", json={}, headers=owner
+        )
+        assert suggested.status_code == 201, suggested.text
+        rejected = client.post(
+            f"{WA_BRAND}/reply-drafts/{suggested.json()['id']}/reject",
+            json={"reason": "off_tone"},
+            headers=owner,
+        )
+        assert rejected.status_code == 200 and rejected.json()["status"] == "rejected"
+
+        # Brand Brain: diagnose ⇒ dismiss decides the row, writes no learning_signals row.
+        rows = _brain_evidence_rows(client, owner)
+        payload = {
+            "summary": "s",
+            "strengths": [],
+            "gaps": [],
+            "recommendations": [
+                {
+                    "kind": "gap_action",
+                    "title": "d",
+                    "rationale": "r",
+                    "evidence_ids": [rows[0]["id"]],
+                }
+            ],
+        }
+        _brain_scripted_gateway(integration_app, payload)
+        created = client.post(f"{BRAIN_PG}/diagnose", headers=owner)
+        assert created.status_code == 200, created.text
+        rec_id = created.json()["recommendations"][0]["id"]
+        dismissed = client.post(f"{BRAIN_PG}/recommendations/{rec_id}/dismiss", headers=owner)
+        assert dismissed.status_code == 200 and dismissed.json()["status"] == "dismissed"
+
+    assert _rows("SELECT status FROM wa_reply_drafts") == [("rejected",)]
+    assert _run("SELECT COUNT(*) FROM wa_learning_signals", scalar=True) == 0
+    assert _rows("SELECT status FROM brand_recommendations") == [("dismissed",)]
+    assert _run("SELECT COUNT(*) FROM learning_signals", scalar=True) == 0
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    reset_db_caches()

@@ -168,6 +168,9 @@ class Message(BaseModel):
     sent_by_user_id: UUID | None = None
     reply_draft_id: UUID | None = None
     platform_timestamp: datetime | None = None
+    # SPRINT-11 C-7: Meta Click-to-WhatsApp ``referral`` object (known keys only, each text
+    # trimmed to 512 chars) — ``None`` for organic / outbound messages.
+    referral: dict[str, Any] | None = None
     created_at: datetime
 
 

@@ -200,6 +200,14 @@ class FakeBrandRepository:
                 out.append((self._s.brands[g.brand_id], BrandRole(g.role.value)))
         return out
 
+    async def set_learning_consent(self, brand_id: UUID, consent: str) -> Brand | None:
+        brand = self._s.brands.get(brand_id)
+        if brand is None:
+            return None
+        updated = brand.model_copy(update={"learning_consent": consent})
+        self._s.brands[brand_id] = updated
+        return updated
+
 
 class FakeBrandAccessGrantRepository:
     def __init__(self, store: FakeStore) -> None:
@@ -649,36 +657,34 @@ class FakeContentRepository:
 
 
 class FakeBudgetUsageReader:
-    """In-memory ``BudgetUsageReader`` (SPRINT-10 A-4) mirroring the PG ``UNION ALL``: the
-    ``ai_generated`` content revisions **plus** every WhatsApp reply draft of the brand."""
+    """In-memory ``BudgetUsageReader`` (SPRINT-11 B-1) mirroring the PG reader: usage is the
+    sum of the **counted** ``ai_cost_log`` rows (``pending`` / ``ok`` / ``ambiguous``) held
+    by the shared :class:`FakeCostLogWriter`. ``content_repo.token_usage_override`` still
+    forces a value (the 429 tests)."""
 
-    def __init__(self, content_repo: FakeContentRepository, wa_repo=None) -> None:  # noqa: ANN001
+    def __init__(self, content_repo: FakeContentRepository, writer=None) -> None:  # noqa: ANN001
         self.content_repo = content_repo
-        self.wa_repo = wa_repo
+        self.writer: FakeCostLogWriter = writer or FakeCostLogWriter()
 
     def _rows(self, brand_id: UUID, since):  # noqa: ANN001, ANN202
-        rows = [
-            (r.provenance, r.created_at)
-            for r in self.content_repo._ai_revisions_since(brand_id, since)
+        return [
+            e
+            for e in self.writer.entries
+            if e.brand_id == brand_id
+            and e.created_at >= since
+            and e.outcome.value in ("pending", "ok", "ambiguous")
         ]
-        if self.wa_repo is not None:
-            rows += [
-                (d.provenance, d.created_at)
-                for d in self.wa_repo.drafts.values()
-                if d.brand_id == brand_id and d.created_at >= since
-            ]
-        return rows
 
     async def combined_usage_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
         if self.content_repo.token_usage_override is not None:
             return self.content_repo.token_usage_override
         return sum(
-            int(prov.get("prompt_tokens") or 0) + int(prov.get("completion_tokens") or 0)
-            for prov, _ in self._rows(brand_id, since)
+            int(e.prompt_tokens or 0) + int(e.completion_tokens or 0)
+            for e in self._rows(brand_id, since)
         )
 
     async def oldest_generation_since(self, brand_id: UUID, since):  # noqa: ANN001, ANN201
-        return min((at for _, at in self._rows(brand_id, since)), default=None)
+        return min((e.created_at for e in self._rows(brand_id, since)), default=None)
 
 
 class FakePublishJobRepository:
@@ -969,6 +975,13 @@ class FakeWhatsAppRepository:
         return next(
             (a for a in self.accounts.values() if a.phone_number_id == phone_number_id), None
         )
+
+    async def get_accounts_by_phone_number_ids(self, phone_number_ids: list[str]):  # noqa: ANN201
+        return [
+            a
+            for a in self.accounts.values()
+            if a.phone_number_id in phone_number_ids and a.status.value == "active"
+        ]
 
     async def list_active_accounts(self):  # noqa: ANN201
         return [a for a in self.accounts.values() if a.status.value == "active"]
@@ -1332,7 +1345,6 @@ class FakeBrandBrainRepository(_FakeRecommendationMixin):
             BrandProfile,
             BrandProfileRevision,
             Competitor,
-            CostEntry,
             Evidence,
         )
 
@@ -1340,7 +1352,7 @@ class FakeBrandBrainRepository(_FakeRecommendationMixin):
         self.revisions: list[BrandProfileRevision] = []
         self.competitors: dict[UUID, Competitor] = {}
         self.evidence: dict[UUID, Evidence] = {}
-        self.cost_entries: list[CostEntry] = []
+        self.cost_entries: list[Any] = []  # CostEntry rows mirrored by FakeCostLogWriter
         self.locked_brands: list[UUID] = []
         self.insert_profile_error: Exception | None = None
         # B-3
@@ -1410,6 +1422,10 @@ class FakeBrandBrainRepository(_FakeRecommendationMixin):
     async def touch_competitor_refreshed(self, competitor_id: UUID, *, at) -> None:  # noqa: ANN001
         c = self.competitors[competitor_id]
         self.competitors[competitor_id] = c.model_copy(update={"refreshed_at": at})
+
+    async def set_competitor_notes(self, competitor_id: UUID, *, notes: str) -> None:
+        c = self.competitors[competitor_id]
+        self.competitors[competitor_id] = c.model_copy(update={"notes": notes})
 
     async def lock_brand_for_competitors(self, brand_id: UUID) -> None:
         self.locked_brands.append(brand_id)
@@ -1494,16 +1510,112 @@ class FakeBrandBrainRepository(_FakeRecommendationMixin):
 
 
 class FakeCostLogWriter:
-    """Records :class:`CostEntry` rows (B-2: wired into ``CostLoggingGateway``)."""
+    """In-memory :class:`CostLogWriter` (SPRINT-11 B-1): reserve ⇒ settle / refund, plus the
+    two aggregate reads the ``BudgetGuard`` needs. ``fail`` makes every method raise (the
+    writer-failure tests); ``on_reserve`` is an optional hook (reserve-before-call tests)."""
 
     def __init__(self, repo: FakeBrandBrainRepository | None = None) -> None:
         self.repo = repo
         self.entries: list[Any] = []
+        self.fail: Exception | None = None
+        self.on_reserve: Any = None
+        self.settled: list[UUID] = []
+        self.refunded: list[UUID] = []
 
-    async def write(self, entry) -> None:  # noqa: ANN001
-        self.entries.append(entry)
+    def _check(self) -> None:
+        if self.fail is not None:
+            raise self.fail
+
+    def _find(self, entry_id: UUID):  # noqa: ANN202
+        return next((e for e in self.entries if e.id == entry_id), None)
+
+    def _sync_repo(self) -> None:
         if self.repo is not None:
-            self.repo.cost_entries.append(entry)
+            self.repo.cost_entries = list(self.entries)
+
+    async def reserve(self, entry) -> UUID:  # noqa: ANN001
+        self._check()
+        self.entries.append(entry)
+        self._sync_repo()
+        if self.on_reserve is not None:
+            await self.on_reserve(entry)
+        return entry.id
+
+    async def settle(  # noqa: PLR0913
+        self,
+        entry_id: UUID,
+        *,
+        prompt_tokens,  # noqa: ANN001
+        completion_tokens,  # noqa: ANN001
+        estimated_cost_usd,  # noqa: ANN001
+        latency_ms: int,
+        outcome,  # noqa: ANN001
+        error_category,  # noqa: ANN001
+    ) -> None:
+        self._check()
+        entry = self._find(entry_id)
+        if entry is None:
+            return
+        updated = entry.model_copy(
+            update={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "estimated_cost_usd": estimated_cost_usd,
+                "latency_ms": max(0, latency_ms),
+                "outcome": outcome,
+                "error_category": error_category,
+                "settled_at": datetime.now(tz=UTC),
+            }
+        )
+        self.entries[self.entries.index(entry)] = updated
+        self.settled.append(entry_id)
+        self._sync_repo()
+
+    async def refund(self, entry_id: UUID) -> None:
+        self._check()
+        self.entries = [e for e in self.entries if e.id != entry_id]
+        self.refunded.append(entry_id)
+        self._sync_repo()
+
+    async def platform_usd_since(self, since):  # noqa: ANN001, ANN201
+        from decimal import Decimal
+
+        self._check()
+        return sum(
+            (
+                e.estimated_cost_usd
+                for e in self.entries
+                if e.credential_mode == "platform"
+                and e.created_at >= since
+                and e.outcome.value in ("pending", "ok", "ambiguous")
+                and e.estimated_cost_usd is not None
+            ),
+            Decimal("0"),
+        )
+
+    async def brand_tokens_since(self, brand_id: UUID, since) -> int:  # noqa: ANN001
+        self._check()
+        return sum(
+            int(e.prompt_tokens or 0) + int(e.completion_tokens or 0)
+            for e in self.entries
+            if e.brand_id == brand_id
+            and e.created_at >= since
+            and e.outcome.value in ("pending", "ok", "ambiguous")
+        )
+
+    async def settle_stale(self, older_than) -> int:  # noqa: ANN001
+        from src.modules.ai_gateway.cost_log import CostOutcome
+
+        self._check()
+        count = 0
+        for idx, e in enumerate(self.entries):
+            if e.outcome is CostOutcome.PENDING and e.created_at < older_than:
+                self.entries[idx] = e.model_copy(
+                    update={"outcome": CostOutcome.AMBIGUOUS, "settled_at": datetime.now(tz=UTC)}
+                )
+                count += 1
+        self._sync_repo()
+        return count
 
 
 class FakeInternalMetricsReader:
@@ -1527,3 +1639,65 @@ class FakeInternalMetricsReader:
     async def read(self, brand_id: UUID, *, now):  # noqa: ANN001, ANN201
         self.calls.append(brand_id)
         return self.metrics
+
+
+# ------------------------------------------------------------ entitlements (SPRINT-11 C) --
+class FakeBrandConsentReader:
+    """``BrandConsentReader`` (whatsapp/brand_brain protocols) over the fake brand store."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+
+    async def learning_consent(self, brand_id: UUID) -> str:
+        brand = self._s.brands.get(brand_id)
+        return brand.learning_consent if brand is not None else "signals_only"
+
+
+class FakeEntitlementRepository:
+    """In-memory ``EntitlementRepository``; brands come from the shared ``FakeStore``."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._s = store
+        self.entitlements: dict[UUID, Any] = {}
+        self.events: list[Any] = []
+        self.locks: list[UUID] = []
+
+    async def lock_brand(self, brand_id: UUID):  # noqa: ANN201
+        self.locks.append(brand_id)
+        return await self.brand_ref(brand_id)
+
+    async def brand_ref(self, brand_id: UUID):  # noqa: ANN201
+        from src.modules.entitlements.domain.repository import BrandRef
+
+        brand = self._s.brands.get(brand_id)
+        if brand is None:
+            return None
+        return BrandRef(id=brand.id, referred_by_brand_id=brand.referred_by_brand_id)
+
+    async def get(self, brand_id: UUID):  # noqa: ANN201
+        return self.entitlements.get(brand_id)
+
+    async def upsert(self, entitlement):  # noqa: ANN001, ANN201
+        self.entitlements[entitlement.brand_id] = entitlement
+        return entitlement
+
+    async def add_event(self, event):  # noqa: ANN001, ANN201
+        self.events.append(event)
+        return event
+
+    async def has_event(self, brand_id: UUID, kind: str) -> bool:
+        return any(e.brand_id == brand_id and e.kind == kind for e in self.events)
+
+    async def list_events(self, brand_id: UUID, *, limit: int) -> list[Any]:
+        mine = [e for e in self.events if e.brand_id == brand_id]
+        return sorted(mine, key=lambda e: e.created_at, reverse=True)[:limit]
+
+
+class FakeCounterUsageReader:
+    """``CounterUsageReader`` with per-brand/per-counter overrides."""
+
+    def __init__(self) -> None:
+        self.used: dict[tuple[UUID, str], int] = {}
+
+    async def monthly_used(self, brand_id: UUID, counter: str, *, since) -> int:  # noqa: ANN001
+        return self.used.get((brand_id, counter), 0)

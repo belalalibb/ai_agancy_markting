@@ -26,12 +26,18 @@ from src.core.security import (
     TokenEncryptionService,
     get_token_encryption_service,
 )
-from src.modules.ai_gateway.dependencies import BudgetReader, Gateway
+from src.modules.ai_gateway.budget_guard import BudgetGuardError
+from src.modules.ai_gateway.dependencies import GuardedGateway
+from src.modules.ai_gateway.http_errors import budget_error_to_http
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.exceptions import ContentError
 from src.modules.content.router import to_http as content_to_http
-from src.modules.tenancy.dependencies import get_brand_access_resolver, get_brand_repository
+from src.modules.tenancy.dependencies import (
+    get_brand_access_resolver,
+    get_brand_consent_reader,
+    get_brand_repository,
+)
 from src.modules.tenancy.domain.access import (
     CONNECTION_WRITE_ROLES,
     GRANT_ROLES,
@@ -43,6 +49,7 @@ from src.modules.tenancy.domain.repository import BrandRepository
 from src.modules.tenancy.exceptions import BrandNotFoundError, InsufficientRoleError, TenancyError
 from src.modules.tenancy.router import to_http as tenancy_to_http
 from src.modules.whatsapp.client import WhatsAppCloudClient
+from src.modules.whatsapp.consent import BrandConsentReader
 from src.modules.whatsapp.domain.models import Conversation, ConversationStatus, Message
 from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, WhatsAppRepository
 from src.modules.whatsapp.exceptions import (
@@ -129,6 +136,7 @@ Independent = Annotated[IndependentWrites, Depends(get_independent_writes)]
 Client = Annotated[WhatsAppCloudClient, Depends(get_whatsapp_client)]
 Encryption = Annotated[TokenEncryptionService, Depends(get_encryption)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
+Consent = Annotated[BrandConsentReader, Depends(get_brand_consent_reader)]  # C-6 (D-080)
 Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
 LimitQuery = Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)]
 CursorQuery = Annotated[str | None, Query(max_length=128)]
@@ -142,10 +150,10 @@ def get_account_service(
 
 
 def get_inbox_service(
-    repo: Repo, client: Client, encryption: Encryption, independent: Independent
+    repo: Repo, client: Client, encryption: Encryption, independent: Independent, consent: Consent
 ) -> WhatsAppInboxService:
     return WhatsAppInboxService(
-        repo, client, PostgresWhatsAppTokenProvider(repo, encryption), independent
+        repo, client, PostgresWhatsAppTokenProvider(repo, encryption), independent, consent
     )
 
 
@@ -156,22 +164,15 @@ BrandRepo = Annotated[BrandRepository, Depends(get_brand_repository)]
 
 def get_suggestion_service(
     repo: Repo,
-    budget_reader: BudgetReader,
-    gateway: Gateway,
+    gateway: GuardedGateway,
     inbox: Inbox,
     limiter: Limiter,
     independent: Independent,
-    settings: Annotated[Settings, Depends(get_settings)],
+    consent: Consent,
 ) -> ReplySuggestionService:
-    return ReplySuggestionService(
-        repo,
-        budget_reader,
-        gateway,
-        inbox,
-        limiter,
-        independent,
-        daily_token_budget=settings.ai_daily_token_budget_per_brand,
-    )
+    """SPRINT-11 B-4: the gateway is the ``BudgetGuard`` (daily tokens + platform cap +
+    ``ai_cost_log`` reservation — D-075)."""
+    return ReplySuggestionService(repo, gateway, inbox, limiter, independent, consent)
 
 
 Suggestions = Annotated[ReplySuggestionService, Depends(get_suggestion_service)]
@@ -577,8 +578,10 @@ async def suggest_reply(
         )
     except WhatsAppError as exc:
         raise to_http(exc) from exc
-    except ContentError as exc:  # rate limit / budget — same codes as SPRINT-07 A-5
+    except ContentError as exc:  # rate limit — same codes as SPRINT-07 A-5
         raise content_to_http(exc) from exc
+    except BudgetGuardError as exc:  # SPRINT-11 B-3 (D-075): budget / cap / pricing
+        raise budget_error_to_http(exc) from exc
     return ReplyDraftPublic.from_domain(draft, private=True)
 
 

@@ -28,6 +28,7 @@ from src.modules.tenancy.domain.repository import (
 from src.modules.tenancy.infrastructure.postgres_repository import (
     PostgresBrandAccessGrantRepository,
     PostgresBrandAccessResolver,
+    PostgresBrandConsentReader,
     PostgresBrandRepository,
     PostgresTenantRepository,
 )
@@ -62,3 +63,11 @@ def get_brand_access_resolver(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> BrandAccessResolver:
     return PostgresBrandAccessResolver(session)
+
+
+def get_brand_consent_reader(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PostgresBrandConsentReader:
+    """SPRINT-11 C-6 (D-080): ``learning_consent`` for the signal writers of ``whatsapp`` and
+    ``brand_brain`` (each declares its own ``BrandConsentReader`` protocol)."""
+    return PostgresBrandConsentReader(session)

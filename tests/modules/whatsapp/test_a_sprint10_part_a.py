@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from uuid import uuid4
 
 import httpx
 import pytest
@@ -22,14 +21,17 @@ from src.modules.whatsapp.client import WhatsAppCloudClient
 from src.modules.whatsapp.domain.models import (
     DELIVERY_RANK,
     DeliveryStatus,
-    Direction,
-    MessageKind,
     delivery_transition_allowed,
 )
 from src.modules.whatsapp.exceptions import CredentialsInvalidError, PhoneNumberInUseError
 from src.modules.whatsapp.service import WhatsAppAccountService
 from src.modules.whatsapp.suggestions import resolve_language
-from src.modules.whatsapp.webhook import MAX_BODY_BYTES, WEBHOOK_PATH, compute_signature
+from src.modules.whatsapp.webhook import (
+    MAX_BODY_BYTES,
+    MAX_PHONE_NUMBER_IDS,
+    WEBHOOK_PATH,
+    compute_signature,
+)
 
 from tests.conftest import AGENCY_ID, BRAND_ID, OWNER_ID, STRANGER_ID, USER_BY_TENANT, grant
 from tests.fakes import FakeStore, FakeWhatsAppRepository
@@ -180,13 +182,13 @@ def test_a5_u1_body_over_one_mib_is_413_with_zero_repository_calls(
 ) -> None:
     counters.reset()
     calls = {"n": 0}
-    original = wa_repo.get_account_by_phone_number_id
+    original = wa_repo.get_accounts_by_phone_number_ids
 
-    async def _counting(pid: str):  # noqa: ANN202
+    async def _counting(pids: list[str]):  # noqa: ANN202
         calls["n"] += 1
-        return await original(pid)
+        return await original(pids)
 
-    monkeypatch.setattr(wa_repo, "get_account_by_phone_number_id", _counting)
+    monkeypatch.setattr(wa_repo, "get_accounts_by_phone_number_ids", _counting)
     raw = b"{" + b" " * MAX_BODY_BYTES + b"}"  # 1 MiB + 2 bytes
     with TestClient(wa_app) as client:
         res = client.post(
@@ -231,6 +233,104 @@ def test_a5_u2_malformed_signature_header_is_401_before_json_loads(
     assert loads["n"] == 0
     assert len(wa_repo.messages) == 0
     assert counters["wa_webhook_rejected"] == 1
+
+
+# ------------------------------------------------------------- SPRINT-11 B6 (A-1) ---
+def _multi_pnid_payload(ids: list[str]) -> bytes:
+    """One ``entry`` per id, compact JSON (≈95 B/id ⇒ 10,000 ids ≈ 950 KiB < 1 MiB)."""
+    base = load_payload("inbound_text")
+    base["entry"] = [
+        {"id": "WABA_" + "x" * 12, "changes": [{"value": {"metadata": {"phone_number_id": pid}}}]}
+        for pid in ids
+    ]
+    return json.dumps(base, separators=(",", ":")).encode()
+
+
+def _install_repo_spy(wa_repo: FakeWhatsAppRepository, monkeypatch) -> dict[str, int]:  # noqa: ANN001
+    calls = {"n": 0}
+    original = wa_repo.get_accounts_by_phone_number_ids
+
+    async def _counting(pids: list[str]):  # noqa: ANN202
+        calls["n"] += 1
+        return await original(pids)
+
+    monkeypatch.setattr(wa_repo, "get_accounts_by_phone_number_ids", _counting)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        [],
+        [f"PNID_{i}" for i in range(MAX_PHONE_NUMBER_IDS + 1)],
+        [f"PNID_{i:05d}" for i in range(10_000)],  # ≈950 KiB payload (B6 probe)
+    ],
+    ids=["zero-ids", "nine-ids", "ten-thousand-ids"],
+)
+def test_b6_u1_id_cardinality_outside_1_to_8_is_400_with_zero_queries(
+    wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, wa_account, monkeypatch, ids: list[str]
+) -> None:
+    """B6 — ``len(ids) == 0`` or ``> MAX_PHONE_NUMBER_IDS`` ⇒ 400 ``webhook_rejected`` before
+    any repository read; the (valid) signature is never needed."""
+    counters.reset()
+    calls = _install_repo_spy(wa_repo, monkeypatch)
+    raw = _multi_pnid_payload(ids)
+    assert len(raw) < MAX_BODY_BYTES
+    with TestClient(wa_app) as client:
+        res = client.post(
+            WEBHOOK,
+            content=raw,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": compute_signature(APP_SECRET, raw),
+            },
+        )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == {"error": "webhook_rejected"}
+    assert calls["n"] == 0
+    assert counters["wa_webhook_rejected"] == 1
+
+
+def test_b6_u2_eight_unknown_ids_use_one_query_then_401(
+    wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, wa_account, monkeypatch
+) -> None:
+    """B6 — exactly ``MAX_PHONE_NUMBER_IDS`` ids ⇒ one bulk lookup; no match ⇒ 401."""
+    counters.reset()
+    calls = _install_repo_spy(wa_repo, monkeypatch)
+    ids = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS)]
+    raw = _multi_pnid_payload(ids)
+    with TestClient(wa_app) as client:
+        res = client.post(
+            WEBHOOK,
+            content=raw,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": "sha256=" + "0" * 64,
+            },
+        )
+    assert res.status_code == 401
+    assert res.json()["detail"] == {"error": "webhook_unverified"}
+    assert calls["n"] == 1
+
+
+def test_b6_u3_known_id_among_eight_still_verifies_and_processes(
+    wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, wa_account, monkeypatch
+) -> None:
+    """B6 — the real account id mixed with 7 unknown ids: one query, HMAC verified, 200."""
+    calls = _install_repo_spy(wa_repo, monkeypatch)
+    ids = [f"UNKNOWN_{i}" for i in range(MAX_PHONE_NUMBER_IDS - 1)] + [PHONE_NUMBER_ID]
+    raw = _multi_pnid_payload(ids)
+    with TestClient(wa_app) as client:
+        res = client.post(
+            WEBHOOK,
+            content=raw,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": compute_signature(APP_SECRET, raw),
+            },
+        )
+    assert res.status_code == 200, res.text
+    assert calls["n"] == 1
 
 
 # ------------------------------------------------------------------------ A6-U1 ---
@@ -321,19 +421,24 @@ async def test_a4_daily_budget_verdict_and_retry_after_from_shared_reader() -> N
 async def test_a4_wa_draft_tokens_block_content_generate_in_the_fake_world(
     wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, auth_headers, roles: None, wa_account
 ) -> None:
-    """Fake mirror of A4-I1: one WhatsApp draft with ``budget + 1`` tokens ⇒ ``/generate`` 429."""
-    from src.modules.whatsapp.domain.models import ReplyDraft
+    """Fake mirror of A4-I1 (SPRINT-11 B-1): one WhatsApp suggestion settled in the shared
+    ``ai_cost_log`` with ``budget + 1`` tokens ⇒ ``/generate`` **and** ``/suggest`` 429."""
+    from src.modules.ai_gateway.cost_log import CostEntry, CostOutcome
 
     conv = await _seed_conversation(wa_repo, wa_account.id)
-    inbound = next(m for m in wa_repo.messages.values() if m.direction is Direction.INBOUND)
-    assert inbound.kind is MessageKind.TEXT
-    await wa_repo.create_draft(
-        ReplyDraft(
-            conversation_id=conv.id,
+    budget = wa_app.state.settings.ai_daily_token_budget_per_brand
+    await wa_app.state.cost_writer.reserve(
+        CostEntry(
             brand_id=BRAND_ID,
-            in_reply_to_message_id=inbound.id,
-            suggested_body="x",
-            provenance={"kind": "ai_suggested", "prompt_tokens": 10**9, "completion_tokens": 1},
+            purpose="reply_suggestion",
+            provider="fake",
+            model="fake-1",
+            credential_mode="platform",
+            prompt_tokens=budget,
+            completion_tokens=1,
+            latency_ms=1,
+            prompt_version="reply_suggestion_v1",
+            outcome=CostOutcome.OK,
             created_at=datetime.now(tz=UTC),
         )
     )
@@ -352,9 +457,8 @@ async def test_a4_wa_draft_tokens_block_content_generate_in_the_fake_world(
         )
         assert res.status_code == 429, res.text
         assert res.json()["detail"]["error"] == "generation_budget_exceeded"
+        assert res.json()["detail"]["limit_kind"] == "brand_daily_tokens"
         assert "Retry-After" in res.headers
         again = _suggest(client, owner, conv.id)
-        assert (
-            again.status_code == 409
-        )  # pending draft exists (A-5 uniqueness) — budget not reached
-        _ = uuid4()
+        assert again.status_code == 429  # the same shared allowance
+    assert not wa_repo.drafts

@@ -6,13 +6,18 @@ per-file-ignores). Everything it does is bounded on purpose:
 * host must be in the competitor's ``allowed_hosts`` (owner-entered) — else ``host_not_allowed``;
 * closed platforms (:data:`BLOCKED_PLATFORM_HOSTS`) are refused **before any network call**
   — ``blocked_platform``;
+* the host is resolved first (``getaddrinfo``, injectable) and **every** address must be
+  ``is_global`` — loopback / private / link-local / ULA / reserved ⇒ ``private_address``,
+  unresolvable ⇒ ``host_not_allowed`` — again before any network call (SPRINT-11 A-2);
 * ``robots.txt`` is fetched first (cached 1 h in memory per host) and ``Disallow`` for
   ``User-Agent: *`` **or** ours is honoured — ``robots_disallow``;
 * identifying ``User-Agent`` :data:`USER_AGENT`; ``GET`` only; no cookies; no JavaScript;
   redirects are **not** followed (a cross-host redirect is a refusal, same-host 3xx counts as
   ``non_html``); 10 s total timeout — ``timeout``;
 * response body streamed and cut at :data:`MAX_BYTES` (512 KiB) — ``too_large``;
-* only ``text/html`` is parsed, with the stdlib :mod:`html.parser` — ``non_html``.
+* only ``text/html`` is parsed, with the stdlib :mod:`html.parser` — ``non_html``;
+* an error page (``status >= 400``) is **not** evidence — ``unavailable`` (SPRINT-11 A-4);
+* ``robots.txt`` itself is streamed and cut at :data:`ROBOTS_MAX_BYTES` (SPRINT-11 A-3).
 
 A refusal is **data**, not an error: the caller records it as ``estimated`` evidence with
 ``value={"unavailable": reason}`` so the diagnosis can say "we could not look" instead of
@@ -21,12 +26,15 @@ guessing.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
+import socket
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from typing import Final, Literal
+from typing import Any, Final, Literal
 from urllib import robotparser
 from urllib.parse import urlsplit
 
@@ -47,8 +55,18 @@ TEXT_EXCERPT_CHARS: Final = 4000
 ROBOTS_MAX_BYTES: Final = 64 * 1024
 
 RefusalReason = Literal[
-    "host_not_allowed", "robots_disallow", "too_large", "timeout", "non_html", "blocked_platform"
+    "host_not_allowed",
+    "robots_disallow",
+    "too_large",
+    "timeout",
+    "non_html",
+    "blocked_platform",
+    "private_address",
+    "unavailable",
 ]
+
+# ``getaddrinfo``-shaped resolver: ``(host, port) -> [(family, type, proto, canonname, sockaddr)]``
+Resolver = Callable[[str, int], Awaitable[list[tuple[Any, ...]]]]
 
 __all__ = [
     "BLOCKED_PLATFORM_HOSTS",
@@ -57,14 +75,19 @@ __all__ = [
     "PublicFetchRefused",
     "PublicPage",
     "PublicPageFetcher",
+    "Resolver",
+    "default_resolver",
     "default_robots_cache",
 ]
 
 
 class PublicFetchRefused(Exception):  # noqa: N818 - name mandated by CURRENT_DIRECTIVE §2 B-2
-    def __init__(self, reason: RefusalReason, *, host: str | None = None) -> None:
+    def __init__(
+        self, reason: RefusalReason, *, host: str | None = None, status: int | None = None
+    ) -> None:
         self.reason: RefusalReason = reason
         self.host = host
+        self.status = status  # A-4: HTTP status behind an ``unavailable`` refusal
         super().__init__(f"public fetch refused: {reason}")
 
 
@@ -166,6 +189,25 @@ def default_robots_cache() -> _RobotsCache:
     return _DEFAULT_ROBOTS_CACHE
 
 
+# --------------------------------------------------------------- resolver --
+async def default_resolver(host: str, port: int) -> list[tuple[Any, ...]]:
+    loop = asyncio.get_running_loop()
+    return await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+
+def _is_global_address(sockaddr: tuple[Any, ...]) -> bool:
+    """``is_global`` **and** not multicast / reserved: :mod:`ipaddress` reports multicast
+    (``224.0.0.0/4``, ``ff00::/8``) and the NAT64 prefix (``64:ff9b::/96``, which can wrap a
+    private IPv4) as *global*; the directive lists multicast as non-global, so both are
+    refused explicitly (SPRINT-11 §6 deviation note)."""
+    raw = str(sockaddr[0]).split("%", 1)[0]  # drop an IPv6 scope id
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    return ip.is_global and not ip.is_multicast and not ip.is_reserved
+
+
 # ----------------------------------------------------------------- fetcher --
 class PublicPageFetcher:
     def __init__(
@@ -174,10 +216,24 @@ class PublicPageFetcher:
         *,
         robots_cache: _RobotsCache | None = None,
         clock: Callable[[], float] = time.monotonic,
+        resolver: Resolver | None = None,
     ) -> None:
         self._http = http_client
         self._robots = robots_cache if robots_cache is not None else _DEFAULT_ROBOTS_CACHE
         self._clock = clock
+        self._resolver: Resolver = resolver if resolver is not None else default_resolver
+
+    async def _assert_public_address(self, host: str, port: int) -> None:
+        """A-2 (SSRF): resolve first; unresolvable ⇒ ``host_not_allowed``; **any** address that
+        is not ``is_global`` ⇒ ``private_address``. Runs before robots *and* the page."""
+        try:
+            infos = await self._resolver(host, port)
+        except (OSError, ValueError) as exc:
+            raise PublicFetchRefused("host_not_allowed", host=host) from exc
+        if not infos:
+            raise PublicFetchRefused("host_not_allowed", host=host)
+        if not all(_is_global_address(info[4]) for info in infos):
+            raise PublicFetchRefused("private_address", host=host)
 
     @staticmethod
     def _headers() -> dict[str, str]:
@@ -204,6 +260,9 @@ class PublicPageFetcher:
         if parts.port not in (None, 80, 443):
             raise PublicFetchRefused("host_not_allowed", host=host)
 
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        await self._assert_public_address(parts.hostname, port)
+
         origin = f"{parts.scheme}://{parts.hostname}"
         robots = await self._robots_for(host, origin)
         if not _robots_allows(robots, url):
@@ -217,21 +276,36 @@ class PublicPageFetcher:
         if cached is not None:
             return cached.parser
         parser: robotparser.RobotFileParser | None = None
+        status: int | None = None
+        body = b""
         try:
-            response = await self._http.get(
+            # A-3: streamed — read at most ROBOTS_MAX_BYTES, then close the response.
+            async with self._http.stream(
+                "GET",
                 f"{origin}/robots.txt",
                 headers=self._headers(),
                 timeout=httpx.Timeout(TIMEOUT_SECONDS),
                 follow_redirects=False,
-            )
+            ) as response:
+                status = response.status_code
+                if status == 200:
+                    received: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        received.append(chunk)
+                        size += len(chunk)
+                        if size >= ROBOTS_MAX_BYTES:
+                            break
+                    await response.aclose()
+                    body = b"".join(received)[:ROBOTS_MAX_BYTES]
         except httpx.TimeoutException as exc:
             raise PublicFetchRefused("timeout", host=host) from exc
         except httpx.HTTPError:
-            response = None  # unreachable robots ⇒ treat as absent (standard practice)
-        if response is not None and response.status_code == 200:
+            status = None  # unreachable robots ⇒ treat as absent (standard practice)
+        if status == 200:
             parser = robotparser.RobotFileParser()
-            parser.parse(response.text[:ROBOTS_MAX_BYTES].splitlines())
-        elif response is not None and response.status_code in (401, 403):
+            parser.parse(body.decode("utf-8", errors="replace").splitlines())
+        elif status in (401, 403):
             # A robots.txt we are not allowed to read ⇒ assume everything is disallowed.
             parser = robotparser.RobotFileParser()
             parser.parse(["User-agent: *", "Disallow: /"])
@@ -252,6 +326,8 @@ class PublicPageFetcher:
                 status = response.status_code
                 if 300 <= status < 400:
                     raise PublicFetchRefused("non_html", host=host)
+                if status >= 400:  # A-4: an error page is not evidence
+                    raise PublicFetchRefused("unavailable", host=host, status=status)
                 content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
                 if content_type.lower() not in ("text/html", "application/xhtml+xml"):
                     raise PublicFetchRefused("non_html", host=host)

@@ -46,6 +46,12 @@ class WhatsAppRepository(Protocol):
         self, phone_number_id: str
     ) -> WhatsAppAccount | None: ...
 
+    async def get_accounts_by_phone_number_ids(
+        self, phone_number_ids: list[str]
+    ) -> list[WhatsAppAccount]:
+        """B6: one query for all ids (``phone_number_id = ANY(:ids) AND is_active``)."""
+        ...
+
     async def list_active_accounts(self) -> list[WhatsAppAccount]: ...
 
     async def set_account_status(

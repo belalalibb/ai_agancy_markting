@@ -231,6 +231,46 @@ def test_refresh_roles_404_and_rate_limit(
     assert COMPETITOR_REFRESH_LIMIT == 10
 
 
+# ------------------------------------------------- SPRINT-11 A-4 (B2-ج) --
+def test_a4_error_page_is_not_evidence_status_lands_in_notes(
+    brain_app: FastAPI, brain_repo: FakeBrandBrainRepository, owner_headers
+) -> None:
+    """A-4 — the public page answers 503 ⇒ **zero** new ``public_page_summary`` rows, the
+    response is 200 with ``status == "unavailable"``, and ``notes`` carries
+    ``unavailable:503``; a later 200 clears the marker and keeps the owner's text."""
+    web = ScriptedWeb(PublicFetchRefused("unavailable", host="beanery.com", status=503))
+    brain_app.dependency_overrides[router.get_graph_page_source] = lambda: None
+    brain_app.dependency_overrides[router.get_public_page_source] = lambda: web
+    competitor = _competitor(brain_repo, facebook_page_id=None, notes="owner note")
+    client = TestClient(brain_app)
+    before = len(brain_repo.evidence)
+    response = client.post(_url(competitor.id), headers=owner_headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "unavailable" and body["collected"] == 0 and body["metrics"] == []
+    assert len(brain_repo.evidence) == before
+    assert brain_repo.competitors[competitor.id].notes == "owner note\nunavailable:503"
+    assert brain_repo.competitors[competitor.id].refreshed_at is not None
+
+    web.result = _public_page()
+    ok = client.post(_url(competitor.id), headers=owner_headers)
+    assert ok.status_code == 200 and ok.json()["status"] == "ok"
+    assert ok.json()["metrics"] == ["public_page_summary"]
+    assert brain_repo.competitors[competitor.id].notes == "owner note"
+
+
+def test_a4_with_fetch_status_respects_notes_cap() -> None:
+    from src.modules.brand_brain.service import COMPETITOR_NOTES_MAX, with_fetch_status
+
+    long = "n" * COMPETITOR_NOTES_MAX
+    marked = with_fetch_status(long, 404)
+    assert len(marked) <= COMPETITOR_NOTES_MAX and marked.endswith("\nunavailable:404")
+    assert with_fetch_status(marked, 500).endswith("\nunavailable:500")
+    assert with_fetch_status(marked, 500).count("unavailable:") == 1
+    assert with_fetch_status("unavailable:503", None) == ""
+    assert with_fetch_status("", 503) == "unavailable:503"
+
+
 # ------------------------------------------------- refresher unit (edge cases) --
 async def test_refresher_graph_not_public_fields_and_bad_website() -> None:
     repo = FakeBrandBrainRepository()
@@ -238,7 +278,7 @@ async def test_refresher_graph_not_public_fields_and_bad_website() -> None:
     graph = ScriptedGraph(
         _page(fan_count=None, followers_count=None, category=None, website="not a host")
     )
-    rows = await CompetitorRefresher(repo, graph=graph, web=None).refresh(competitor)
+    rows = (await CompetitorRefresher(repo, graph=graph, web=None).refresh(competitor)).rows
     assert [r.metric for r in rows] == ["followers_count", "fan_count", "page_category"]
     assert all(r.value == {"unavailable": "not_public"} for r in rows)
 
@@ -247,7 +287,7 @@ async def test_refresher_graph_error_without_code() -> None:
     repo = FakeBrandBrainRepository()
     competitor = _competitor(repo, website_host=None, allowed_hosts=[])
     graph = ScriptedGraph(MetaGraphError("boom"))
-    rows = await CompetitorRefresher(repo, graph=graph, web=None).refresh(competitor)
+    rows = (await CompetitorRefresher(repo, graph=graph, web=None).refresh(competitor)).rows
     assert rows[0].value == {"unavailable": "graph_error"}
 
 

@@ -19,7 +19,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.modules.tenancy.domain.access import BrandRole
-from src.modules.tenancy.domain.models import Brand, BrandAccessGrant, GrantRole, Tenant
+from src.modules.tenancy.domain.models import (
+    DEFAULT_LEARNING_CONSENT,
+    Brand,
+    BrandAccessGrant,
+    GrantRole,
+    Tenant,
+)
 from src.modules.tenancy.exceptions import (
     BrandSlugTakenError,
     GrantAlreadyActiveError,
@@ -70,6 +76,8 @@ class PostgresBrandRepository:
                 owner_tenant_id=brand.owner_tenant_id,
                 slug=brand.slug,
                 name=brand.name,
+                learning_consent=brand.learning_consent,
+                referred_by_brand_id=brand.referred_by_brand_id,
             )
             .on_conflict_do_nothing()
             .returning(BrandRow.id)
@@ -116,6 +124,17 @@ class PostgresBrandRepository:
         )
         result.extend((_brand(row), BrandRole(role)) for row, role in granted.all())
         return result
+
+    async def set_learning_consent(self, brand_id: UUID, consent: str) -> Brand | None:
+        row = (
+            await self._session.execute(
+                update(BrandRow)
+                .where(BrandRow.id == brand_id)
+                .values(learning_consent=consent)
+                .returning(BrandRow)
+            )
+        ).scalar_one_or_none()
+        return _brand(row) if row else None
 
 
 class PostgresBrandAccessGrantRepository:
@@ -230,6 +249,21 @@ class PostgresBrandAccessResolver:
         return BrandRole(role) if role else None
 
 
+class PostgresBrandConsentReader:
+    """SPRINT-11 C-6 (D-080): implements the ``BrandConsentReader`` protocols declared by
+    ``whatsapp.consent`` and ``brand_brain.consent``. Unknown brand ⇒ the default
+    ``signals_only`` (the caller has already proven the brand exists)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def learning_consent(self, brand_id: UUID) -> str:
+        value = await self._session.scalar(
+            select(BrandRow.learning_consent).where(BrandRow.id == brand_id)
+        )
+        return value or DEFAULT_LEARNING_CONSENT
+
+
 # ------------------------------------------------------------------ mappers --
 def _tenant(row: TenantRow) -> Tenant:
     return Tenant(
@@ -247,6 +281,8 @@ def _brand(row: BrandRow) -> Brand:
         owner_tenant_id=row.owner_tenant_id,
         slug=row.slug,
         name=row.name,
+        learning_consent=row.learning_consent or DEFAULT_LEARNING_CONSENT,
+        referred_by_brand_id=row.referred_by_brand_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

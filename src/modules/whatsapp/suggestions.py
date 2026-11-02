@@ -6,9 +6,9 @@ path (:meth:`WhatsAppInboxService.send_text`) with ``messages.reply_draft_id`` l
 ``reject``. Every decision writes one :class:`LearningSignal` made of **features only**
 (:mod:`src.modules.whatsapp.signals`): the text never lands in the signals table.
 
-Budget: the daily token budget is the one SPRINT-07 A-5 introduced
-(``AI_DAILY_TOKEN_BUDGET_PER_BRAND``) read through the **single** shared reader of SPRINT-10
-A-4 (:mod:`src.modules.ai_gateway.budget`), so every AI feature shares one allowance (N4).
+Budget: since SPRINT-11 B-4 the injected ``gateway`` is the
+:class:`~src.modules.ai_gateway.budget_guard.BudgetGuard` — daily tokens, the platform USD cap
+and the ``ai_cost_log`` reservation are enforced there for every AI feature alike (D-075).
 """
 
 from __future__ import annotations
@@ -22,13 +22,10 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 
 from src.core.metrics import counters
-from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
 from src.modules.auth.domain.rate_limit import RateLimiter
-from src.modules.content.exceptions import (
-    GenerationBudgetExceededError,
-    GenerationRateLimitedError,
-)
+from src.modules.content.exceptions import GenerationRateLimitedError
+from src.modules.whatsapp.consent import BrandConsentReader, may_write_signal
 from src.modules.whatsapp.domain.models import (
     Direction,
     DraftStatus,
@@ -80,21 +77,20 @@ class ReplySuggestionService:
     def __init__(
         self,
         repo: WhatsAppRepository,
-        budget_reader: BudgetUsageReader,
         gateway: AIGateway,
         inbox: WhatsAppInboxService,
         limiter: RateLimiter,
         independent: IndependentWrites,
-        *,
-        daily_token_budget: int,
+        consent: BrandConsentReader | None = None,
     ) -> None:
         self._repo = repo
-        self._budget_reader = budget_reader
+        self._consent = consent  # SPRINT-11 C-6 (D-080): ``none`` ⇒ no new signal rows
+        # SPRINT-11 B-4: ``gateway`` is the ``BudgetGuard`` — daily tokens, platform cap and
+        # the ``ai_cost_log`` row are enforced there (D-075), not in this service.
         self._gateway = gateway
         self._inbox = inbox
         self._limiter = limiter
         self._independent = independent  # SPRINT-10 A-1 (D-072)
-        self._budget = DailyBudget(daily_token_budget)  # SPRINT-10 A-4 (N4)
 
     # ---------------------------------------------------------------- suggest ----
     async def suggest(
@@ -120,7 +116,6 @@ class ReplySuggestionService:
         )
         if retry_after is not None:
             raise GenerationRateLimitedError(retry_after)
-        await self._check_token_budget(brand_id)
 
         recent = await self._repo.recent_messages(conv.id, limit=DEFAULT_MAX_TURNS)
         transcript = [(m.direction.value, m.body) for m in reversed(recent)]
@@ -199,14 +194,6 @@ class ReplySuggestionService:
         )
         return draft
 
-    async def _check_token_budget(self, brand_id: UUID) -> None:
-        """A-5 budget shared by every AI feature through the one A-4 reader."""
-        verdict = await self._budget.check(brand_id, usage_reader=self._budget_reader)
-        if not verdict.allowed:
-            raise GenerationBudgetExceededError(
-                verdict.budget, verdict.used, verdict.resets_in_seconds
-            )
-
     # ---------------------------------------------------------------- decide -----
     async def get_pending_or_raise(self, brand_id: UUID, draft_id: UUID) -> ReplyDraft:
         """The ``suggested`` draft — else 404 ``whatsapp_draft_not_found`` or 409
@@ -237,7 +224,14 @@ class ReplySuggestionService:
 
         async def _decide(repo: WhatsAppRepository) -> ReplyDraft:
             return await self._decide_and_record(
-                repo, brand_id, draft, body=body, edited=edited, actor=actor_user_id, now=now
+                repo,
+                brand_id,
+                draft,
+                body=body,
+                edited=edited,
+                actor=actor_user_id,
+                now=now,
+                consent=self._consent,
             )
 
         decided = await self._independent.run(_decide)
@@ -265,6 +259,7 @@ class ReplySuggestionService:
         edited: bool,
         actor: UUID,
         now: datetime,
+        consent: BrandConsentReader | None = None,
     ) -> ReplyDraft:
         """Runs on the independent session: lock ⇒ re-check ``suggested`` ⇒ decide ⇒ signal."""
         locked = await _lock_pending(repo, brand_id, draft.id)
@@ -276,16 +271,17 @@ class ReplySuggestionService:
             decided_at=now,
         )
         decided = await _reload(repo, brand_id, locked.id)
-        await repo.add_signal(
-            build_signal(
-                decided,
-                Signal.APPROVED_AFTER_EDIT if edited else Signal.APPROVED_UNCHANGED,
-                edit_distance_ratio=edit_distance_ratio(draft.suggested_body, body)
-                if edited
-                else 0.0,
-                now=now,
+        if await may_write_signal(consent, brand_id):
+            await repo.add_signal(
+                build_signal(
+                    decided,
+                    Signal.APPROVED_AFTER_EDIT if edited else Signal.APPROVED_UNCHANGED,
+                    edit_distance_ratio=edit_distance_ratio(draft.suggested_body, body)
+                    if edited
+                    else 0.0,
+                    now=now,
+                )
             )
-        )
         return decided
 
     async def reject(
@@ -306,7 +302,8 @@ class ReplySuggestionService:
                 rejection_reason=reason,
             )
             decided = await _reload(repo, brand_id, locked.id)
-            await repo.add_signal(build_signal(decided, Signal.REJECTED, now=now))
+            if await may_write_signal(self._consent, brand_id):
+                await repo.add_signal(build_signal(decided, Signal.REJECTED, now=now))
             return decided
 
         decided = await self._independent.run(_reject)

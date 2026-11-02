@@ -21,24 +21,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
 from src.core.http import HttpClient
-from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget
+from src.modules.ai_gateway.budget import BudgetUsageReader, EntitlementLimitsReader
+from src.modules.ai_gateway.budget_guard import BudgetGuardError
 from src.modules.ai_gateway.contract import AIError
-from src.modules.ai_gateway.cost_logging import CostLoggingGateway, PriceTable
-from src.modules.ai_gateway.dependencies import get_ai_gateway, get_budget_usage_reader
+from src.modules.ai_gateway.cost_log import CostLogWriter
+from src.modules.ai_gateway.dependencies import (
+    build_budget_guard,
+    get_ai_gateway,
+    get_budget_usage_reader,
+    get_cost_log_writer,
+    get_entitlement_limits_reader,
+)
 from src.modules.ai_gateway.exceptions import AIProviderNotConfiguredError
 from src.modules.ai_gateway.facades import HttpOpenAICompatibleProvider
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
+from src.modules.ai_gateway.http_errors import budget_error_to_http
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.brand_brain.advisor import BrandAdvisor
-from src.modules.brand_brain.domain.repository import (
-    BrandBrainRepository,
-    CostLogWriter,
-    EvidenceCursor,
-)
+from src.modules.brand_brain.consent import BrandConsentReader
+from src.modules.brand_brain.domain.repository import BrandBrainRepository, EvidenceCursor
 from src.modules.brand_brain.exceptions import (
     BlockedPlatformHostError,
-    BrainBudgetExceededError,
     BrainRateLimitedError,
     BrandBrainError,
     CompetitorExistsError,
@@ -47,6 +51,7 @@ from src.modules.brand_brain.exceptions import (
     InvalidHostError,
     InvalidIfMatchError,
     InvalidModelOutputError,
+    ProfileConflictError,
     ProfileVersionConflictError,
     RecommendationAlreadyDecidedError,
     RecommendationNotFoundError,
@@ -55,7 +60,6 @@ from src.modules.brand_brain.exceptions import (
 )
 from src.modules.brand_brain.infrastructure.internal_metrics import PgInternalMetricsReader
 from src.modules.brand_brain.infrastructure.postgres_repository import (
-    PgCostLogWriter,
     PostgresBrandBrainRepository,
 )
 from src.modules.brand_brain.public_fetch import PublicPageFetcher
@@ -91,7 +95,7 @@ from src.modules.brand_brain.service import (
 from src.modules.content.router import get_content_service
 from src.modules.content.service import ContentService
 from src.modules.social_connect.meta_client import MetaGraphClient
-from src.modules.tenancy.dependencies import get_brand_access_resolver
+from src.modules.tenancy.dependencies import get_brand_access_resolver, get_brand_consent_reader
 from src.modules.tenancy.domain.access import (
     CONNECTION_WRITE_ROLES,
     GRANT_ROLES,
@@ -136,10 +140,6 @@ def get_public_page_source(http_client: HttpClient) -> PublicPageSource:
     return PublicPageFetcher(http_client)
 
 
-def get_cost_log_writer() -> CostLogWriter:
-    return PgCostLogWriter()
-
-
 Repo = Annotated[BrandBrainRepository, Depends(get_brain_repository)]
 MetricsReader = Annotated[InternalMetricsReader, Depends(get_internal_metrics_reader)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
@@ -147,6 +147,8 @@ Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
 GraphSource = Annotated[GraphPageSource | None, Depends(get_graph_page_source)]
 WebSource = Annotated[PublicPageSource, Depends(get_public_page_source)]
 CostWriter = Annotated[CostLogWriter, Depends(get_cost_log_writer)]
+BudgetReader = Annotated[BudgetUsageReader, Depends(get_budget_usage_reader)]
+LimitsReader = Annotated[EntitlementLimitsReader | None, Depends(get_entitlement_limits_reader)]
 LimitQuery = Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)]
 CursorQuery = Annotated[str | None, Query(max_length=128)]
 IfMatch = Annotated[str | None, Header(alias="If-Match")]
@@ -189,11 +191,15 @@ def build_brain_gateway(
     writer: CostLogWriter,
     user_key: str | None,
     http_client: object | None,
+    usage_reader: BudgetUsageReader,
+    limits_reader: EntitlementLimitsReader | None = None,
+    request_id: str | None = None,
 ) -> AIGateway:
     """B-2: ``X-AI-Key`` ⇒ a per-request ``openai_compatible`` provider on the **user's** key
     (``credential_mode=user_key``, memory only); otherwise the platform gateway. Either way
-    the call is wrapped by :class:`CostLoggingGateway`. **No fallback** from ``user_key`` to
-    ``platform``: a failure is returned as is, with ``credential_mode=user_key``."""
+    the call is wrapped by the SPRINT-11 :class:`BudgetGuard` (the one write path into
+    ``ai_cost_log`` — D-075). **No fallback** from ``user_key`` to ``platform``: a failure is
+    returned as is, with ``credential_mode=user_key``."""
     if user_key is None:
         inner = platform
     else:
@@ -204,8 +210,13 @@ def build_brain_gateway(
             http_client=http_client,  # type: ignore[arg-type]
             timeout_seconds=settings.ai_http_timeout_seconds,
         )
-    return CostLoggingGateway(
-        inner, writer, price_table=PriceTable.from_json(settings.ai_price_table_json)
+    return build_budget_guard(
+        inner,
+        settings,
+        writer=writer,
+        usage_reader=usage_reader,
+        limits_reader=limits_reader,
+        request_id=request_id,
     )
 
 
@@ -213,6 +224,8 @@ def get_brain_gateway(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     writer: CostWriter,
+    usage_reader: BudgetReader,
+    limits_reader: LimitsReader,
     x_ai_key: AIKeyHeader = None,
 ) -> AIGateway:
     """``X-AI-Key`` present ⇒ the platform gateway is **not even built**; absent ⇒ the
@@ -220,36 +233,38 @@ def get_brain_gateway(
     http_client = getattr(request.app.state, "http_client", None)
     platform = _NO_PLATFORM if x_ai_key is not None else get_ai_gateway(request, settings)
     return build_brain_gateway(
-        settings, platform=platform, writer=writer, user_key=x_ai_key, http_client=http_client
+        settings,
+        platform=platform,
+        writer=writer,
+        user_key=x_ai_key,
+        http_client=http_client,
+        usage_reader=usage_reader,
+        limits_reader=limits_reader,
+        request_id=request.headers.get("x-request-id"),
     )
 
 
 BrainGateway = Annotated[AIGateway, Depends(get_brain_gateway)]
-BudgetReader = Annotated[BudgetUsageReader, Depends(get_budget_usage_reader)]
 Content = Annotated[ContentService, Depends(get_content_service)]
 RecommendationStatusQuery = Annotated[
     Literal["proposed", "accepted", "dismissed", "materialized"] | None, Query(alias="status")
 ]
 
 
+Consent = Annotated[BrandConsentReader, Depends(get_brand_consent_reader)]  # C-6 (D-080)
+
+
 def get_brain_advisor(
     repo: Repo,
     gateway: BrainGateway,
     limiter: Limiter,
-    budget_reader: BudgetReader,
     content: Content,
-    settings: Annotated[Settings, Depends(get_settings)],
+    consent: Consent,
 ) -> BrandAdvisor:
     """B-3: the same request session for recommendations + content drafts; the gateway is
-    the B-2 cost-logging one (platform or ``X-AI-Key``); the budget is the shared A-4 one."""
-    return BrandAdvisor(
-        repo,
-        gateway=gateway,
-        limiter=limiter,
-        budget=DailyBudget(settings.ai_daily_token_budget_per_brand),
-        budget_reader=budget_reader,
-        content=content,
-    )
+    the ``BudgetGuard``-wrapped one (platform or ``X-AI-Key``) — SPRINT-11 B-4. C-6: the
+    consent reader gates ``learning_signals`` writes (D-080)."""
+    return BrandAdvisor(repo, gateway=gateway, limiter=limiter, content=content, consent=consent)
 
 
 Advisor = Annotated[BrandAdvisor, Depends(get_brain_advisor)]
@@ -286,10 +301,6 @@ def to_http(exc: BrandBrainError) -> HTTPException:
     elif isinstance(exc, RefreshRateLimitedError | BrainRateLimitedError):
         code = status.HTTP_429_TOO_MANY_REQUESTS
         headers = {"Retry-After": str(int(exc.retry_after_seconds))}
-    elif isinstance(exc, BrainBudgetExceededError):
-        code = status.HTTP_429_TOO_MANY_REQUESTS
-        detail.update(budget=exc.budget, used=exc.used, resets_in_seconds=exc.resets_in_seconds)
-        headers = {"Retry-After": str(int(exc.resets_in_seconds))}
     elif isinstance(exc, InvalidModelOutputError):
         code = status.HTTP_502_BAD_GATEWAY
         detail["category"] = "invalid_output"
@@ -298,6 +309,8 @@ def to_http(exc: BrandBrainError) -> HTTPException:
     elif isinstance(exc, RecommendationAlreadyDecidedError):
         code = status.HTTP_409_CONFLICT
         detail["status"] = exc.status
+    elif isinstance(exc, ProfileConflictError):
+        code = status.HTTP_409_CONFLICT  # A-6: retry — the profile was created concurrently
     else:
         code = status.HTTP_400_BAD_REQUEST
     return HTTPException(code, detail=detail, headers=headers)
@@ -382,14 +395,19 @@ async def put_profile(
 @router.get(
     f"{BRAIN_PREFIX}/profile/revisions",
     response_model=RevisionsPage,
-    summary="Profile revisions (newest first) — all roles",
+    summary="Profile revisions (newest first) — all roles (VIEWER without banned_phrases)",
 )
 async def list_revisions(
     brand_id: UUID, actor: CurrentUser, resolver: Resolver, service: Service
 ) -> RevisionsPage:
-    await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
-    revisions = await service.list_revisions(brand_id)
-    return RevisionsPage(items=[RevisionPublic.from_domain(r) for r in revisions])
+    role = await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
+    private = role in PRIVATE_ROLES  # A-5: same projection as GET /profile
+    return RevisionsPage(
+        items=[
+            RevisionPublic.from_domain(r, private=private)
+            for r in await service.list_revisions(brand_id)
+        ]
+    )
 
 
 # --------------------------------------------------------------- competitors --
@@ -472,12 +490,16 @@ async def refresh_competitor(
     as ``{"unavailable": reason}``; ``competitor_refreshed_at`` is bumped."""
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     try:
-        rows = await service.refresh_competitor(brand_id, competitor_id)
+        outcome = await service.refresh_competitor(brand_id, competitor_id)
     except BrandBrainError as exc:
         raise to_http(exc) from exc
+    rows = outcome.rows
     observed = rows[0].observed_at if rows else datetime.now(tz=UTC)
     return RefreshResult(
-        collected=len(rows), metrics=[r.metric for r in rows], observed_at=observed
+        collected=len(rows),
+        metrics=[r.metric for r in rows],
+        observed_at=observed,
+        status=outcome.status,  # type: ignore[arg-type]
     )
 
 
@@ -601,6 +623,8 @@ async def diagnose(
         )
     except BrandBrainError as exc:
         raise to_http(exc) from exc
+    except BudgetGuardError as exc:  # SPRINT-11 B-3 (D-075)
+        raise budget_error_to_http(exc) from exc
     except AIError as exc:
         raise _ai_to_http(exc) from exc
     private = role in PRIVATE_ROLES
@@ -615,6 +639,7 @@ async def diagnose(
             RecommendationPublic.from_domain(r, private=private) for r in result.recommendations
         ],
         recommendations_dropped=result.recommendations_dropped,
+        dropped=result.recommendations_dropped,
         prompt_version=result.prompt_version,
     )
 
@@ -648,6 +673,8 @@ async def content_plan(
         )
     except BrandBrainError as exc:
         raise to_http(exc) from exc
+    except BudgetGuardError as exc:  # SPRINT-11 B-3 (D-075)
+        raise budget_error_to_http(exc) from exc
     except AIError as exc:
         raise _ai_to_http(exc) from exc
     return ContentPlanPublic(

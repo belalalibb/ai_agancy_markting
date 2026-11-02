@@ -2,9 +2,9 @@
 against the scripted :class:`StubSession` (same pattern as ``social_connect`` / ``tenancy``).
 
 SPRINT-10 Part A: the CI ``unit`` job runs without PostgreSQL, so statement composition
-(brand scoping, lock modes, ``ON CONFLICT`` targets, keyset predicates, ``UNION ALL`` budget
-sources) and row→domain mapping are asserted here; the integration suite runs the same
-adapters on PostgreSQL 16/17.
+(brand scoping, lock modes, ``ON CONFLICT`` targets, keyset predicates, the single
+``ai_cost_log`` budget source) and row→domain mapping are asserted here; the integration
+suite runs the same adapters on PostgreSQL 16/17.
 """
 
 from __future__ import annotations
@@ -179,6 +179,7 @@ async def test_account_create_update_and_reads() -> None:
             StubResult(scalar=None),  # get_account (missing)
             StubResult(scalar=row),  # get_account_by_phone_number_id
             StubResult(scalars=[row]),  # list_active_accounts
+            StubResult(scalars=[row]),  # get_accounts_by_phone_number_ids (B6)
             StubResult(),  # set_account_status
         ]
     )
@@ -207,9 +208,18 @@ async def test_account_create_update_and_reads() -> None:
     assert "whatsapp_accounts.phone_number_id =" in compiled(session.executed[3][0])
     assert [a.id for a in await repo.list_active_accounts()] == [ACCOUNT_ID]
     assert "whatsapp_accounts.status =" in compiled(session.executed[4][0])
+    # B6: one ``IN (...)`` query filtered on active status; empty input ⇒ no query at all.
+    assert [a.id for a in await repo.get_accounts_by_phone_number_ids(["10001", "x"])] == [
+        ACCOUNT_ID
+    ]
+    bulk_sql = compiled(session.executed[5][0])
+    assert "whatsapp_accounts.phone_number_id IN" in bulk_sql
+    assert "whatsapp_accounts.status =" in bulk_sql
+    assert await repo.get_accounts_by_phone_number_ids([]) == []
+    assert len(session.executed) == 6
 
     await repo.set_account_status(ACCOUNT_ID, AccountStatus.DISABLED, now=NOW)
-    status_sql = compiled(session.executed[5][0])
+    status_sql = compiled(session.executed[6][0])
     assert status_sql.startswith("UPDATE whatsapp_accounts")
     assert "status=" in status_sql and "updated_at=" in status_sql
 
@@ -626,8 +636,10 @@ async def test_postgres_status_marker_uses_an_independent_transaction() -> None:
     assert sql.startswith("UPDATE social_connections") and "social_connections.brand_id =" in sql
 
 
-# ------------------------------------------------------- budget reader (A-4) --
-async def test_pg_budget_reader_unions_every_ai_source() -> None:
+# ------------------------------------------------ budget reader (A-4 / SPRINT-11 B-1) --
+async def test_pg_budget_reader_reads_ai_cost_log_only() -> None:
+    """SPRINT-11 B-1: one source — ``ai_cost_log`` counted rows; no ``UNION ALL`` over
+    provenance, ``error`` rows excluded."""
     session = StubSession(
         [StubResult(scalar=1234), StubResult(scalar=None), StubResult(scalar=NOW)]
     )
@@ -636,13 +648,14 @@ async def test_pg_budget_reader_unions_every_ai_source() -> None:
 
     assert await reader.combined_usage_since(BRAND_ID, since) == 1234
     sql = compiled(session.executed[0][0])
-    assert "UNION ALL" in sql
-    assert "FROM content_revisions JOIN content_items" in sql
-    assert "FROM wa_reply_drafts" in sql
-    assert "content_items.brand_id =" in sql and "wa_reply_drafts.brand_id =" in sql
-    assert "'ai_generated'" in sql or "ai_generated" in str(
-        session.executed[0][0].compile().params
-    )
+    assert "UNION" not in sql
+    assert "content_revisions" not in sql and "wa_reply_drafts" not in sql
+    assert "FROM ai_cost_log" in sql and "ai_cost_log.brand_id =" in sql
+    assert "ai_cost_log.outcome IN" in sql
+    params = session.executed[0][0].compile().params
+    flat = [x for v in params.values() for x in (v if isinstance(v, list | tuple) else [v])]
+    assert {"pending", "ok", "ambiguous"} <= set(flat)
+    assert "error" not in flat
     assert "sum(" in sql and "coalesce(" in sql
 
     assert await reader.combined_usage_since(BRAND_ID, since) == 0  # NULL sum ⇒ 0

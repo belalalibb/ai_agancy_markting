@@ -38,6 +38,11 @@ class BrandRow(Base):
     __table_args__ = (
         UniqueConstraint("owner_tenant_id", "slug", name="uq_brands_owner_slug"),
         Index("ix_brands_owner_tenant_id", "owner_tenant_id"),
+        CheckConstraint("referred_by_brand_id <> id", name="ck_brands_referred_by_not_self"),
+        CheckConstraint(
+            "learning_consent IN ('signals_only', 'none', 'full')",
+            name="ck_brands_learning_consent",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -46,6 +51,13 @@ class BrandRow(Base):
     )
     slug: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # SPRINT-11 C-2 (migration 0014).
+    learning_consent: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="signals_only"
+    )
+    referred_by_brand_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("brands.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )

@@ -12,6 +12,7 @@ from datetime import datetime
 
 from src.core.metrics import counters
 from src.modules.whatsapp import signals
+from src.modules.whatsapp.consent import BrandConsentReader, may_write_signal
 from src.modules.whatsapp.domain.models import LearningSignal, ReplyDraft, Signal
 from src.modules.whatsapp.domain.repository import WhatsAppRepository
 from src.modules.whatsapp.prompts import REPLY_PROMPT_VERSION
@@ -41,13 +42,21 @@ def build_signal(
 
 
 async def record_expired(
-    repo: WhatsAppRepository, expired: list[ReplyDraft], *, now: datetime
+    repo: WhatsAppRepository,
+    expired: list[ReplyDraft],
+    *,
+    now: datetime,
+    consent: BrandConsentReader | None = None,
 ) -> int:
     """One ``expired`` signal per draft that just left ``suggested`` — called by the webhook
     (newer inbound arrived) and by the inbox (a human replied manually). D-069: a
-    non-decision is a signal too. Returns the number of signals written."""
+    non-decision is a signal too. SPRINT-11 C-6 (D-080): brands with
+    ``learning_consent='none'`` get **no** signal row. Returns the number written."""
+    written = 0
     for draft in expired:
-        await repo.add_signal(build_signal(draft, Signal.EXPIRED, now=now))
-    if expired:
-        counters.increment("wa_draft_expired", len(expired))
-    return len(expired)
+        if await may_write_signal(consent, draft.brand_id):
+            await repo.add_signal(build_signal(draft, Signal.EXPIRED, now=now))
+            written += 1
+    if written:
+        counters.increment("wa_draft_expired", written)
+    return written

@@ -1,5 +1,7 @@
-"""PostgreSQL implementation of :class:`BrandBrainRepository` (migration 0011) and the
-independent :class:`PgCostLogWriter` (D-072 — one committed row per gateway call)."""
+"""PostgreSQL implementation of :class:`BrandBrainRepository` (migration 0011).
+
+``cost_by_day`` reads ``ai_cost_log`` through the row owned by ``ai_gateway`` (SPRINT-11
+B-1, D-016 — the cost log writer lives in ``ai_gateway.infrastructure.pg_cost_log``)."""
 
 from __future__ import annotations
 
@@ -9,16 +11,15 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import Date, and_, case, cast, delete, func, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.database import get_session_factory, independent_session
+from src.modules.ai_gateway.infrastructure.pg_cost_log import AICostLogRow
 from src.modules.brand_brain.domain.models import (
     Audience,
     BrandProfile,
     BrandProfileRevision,
     Competitor,
     CostDay,
-    CostEntry,
     Evidence,
     EvidenceKindsSummary,
     Goal,
@@ -29,7 +30,6 @@ from src.modules.brand_brain.domain.models import (
 )
 from src.modules.brand_brain.domain.repository import EvidenceCursor
 from src.modules.brand_brain.infrastructure.orm import (
-    AICostLogRow,
     BrandCompetitorRow,
     BrandEvidenceRow,
     BrandProfileRevisionRow,
@@ -333,6 +333,13 @@ class PostgresBrandBrainRepository(_RecommendationMixin):
             .values(competitor_refreshed_at=at)
         )
 
+    async def set_competitor_notes(self, competitor_id: UUID, *, notes: str) -> None:
+        await self._session.execute(
+            update(BrandCompetitorRow)
+            .where(BrandCompetitorRow.id == competitor_id)
+            .values(notes=notes)
+        )
+
     async def lock_brand_for_competitors(self, brand_id: UUID) -> None:
         # ``FOR NO KEY UPDATE`` on the brand row: serialises the count-then-insert of
         # competitors per brand without blocking FK ``KEY SHARE`` takers (lesson of A-1).
@@ -447,34 +454,3 @@ class PostgresBrandBrainRepository(_RecommendationMixin):
             )
             for r in rows
         ]
-
-
-class PgCostLogWriter:
-    """D-072: the cost row is committed on its own session, so it survives a failed request
-    (and a failed gateway call is recorded as ``outcome='error'``)."""
-
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession] | None = None) -> None:
-        self._session_factory = session_factory
-
-    async def write(self, entry: CostEntry) -> None:
-        factory = self._session_factory or get_session_factory()
-        async with independent_session(factory) as session:
-            session.add(
-                AICostLogRow(
-                    id=entry.id,
-                    brand_id=entry.brand_id,
-                    purpose=entry.purpose,
-                    provider=entry.provider,
-                    model=entry.model,
-                    credential_mode=entry.credential_mode,
-                    prompt_tokens=entry.prompt_tokens,
-                    completion_tokens=entry.completion_tokens,
-                    estimated_cost_usd=entry.estimated_cost_usd,
-                    latency_ms=entry.latency_ms,
-                    prompt_version=entry.prompt_version,
-                    outcome=entry.outcome.value,
-                    error_category=entry.error_category,
-                    created_at=entry.created_at,
-                )
-            )
-            await session.flush()
