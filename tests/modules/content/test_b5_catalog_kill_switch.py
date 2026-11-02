@@ -25,7 +25,7 @@ from src.modules.ai_gateway.catalog.domain import (
     Provider,
     Route,
 )
-from src.modules.ai_gateway.dependencies import get_catalog_reader
+from src.modules.ai_gateway.dependencies import get_catalog_reader, get_host_resolver
 
 from tests.conftest import BRAND_ID, OWNER_ID
 from tests.modules.content.test_router import Headers, _create, _generate
@@ -101,11 +101,17 @@ def switchable(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAP
     reader = _StaticReader(_full_catalog())
     app.state.catalog_reader = reader
     app.dependency_overrides[get_catalog_reader] = lambda: reader
+
+    async def _public(host: str, port: int) -> list[tuple]:  # SPRINT-12 A-4: mock getaddrinfo
+        return [(2, 1, 6, "", ("104.18.6.192", port))]
+
+    app.dependency_overrides[get_host_resolver] = lambda: _public
     monkeypatch.setenv("CATALOG_TEST_PROVIDER_KEY", "".join(("sk-", "catalogkey")))
     try:
         yield app
     finally:
         app.dependency_overrides.pop(get_catalog_reader, None)
+        app.dependency_overrides.pop(get_host_resolver, None)
         if base:
             app.dependency_overrides[get_settings] = base
         else:
@@ -163,6 +169,8 @@ def test_switch_on_routes_through_catalog_provider(
     # priced from ai_models: 12 * 0.001/1k + 7 * 0.002/1k
     assert rows[-1].estimated_cost_usd == Decimal("0.000026")
     assert rows[-1].brand_id == BRAND_ID
+    # SPRINT-12 A-5 (H5): the cost row carries the resolved ``provider_id/model_name`` key
+    assert rows[-1].model.endswith(f"/{MODEL}") and "/" in rows[-1].model
 
 
 def test_switch_on_with_empty_catalog_is_503_before_any_network(

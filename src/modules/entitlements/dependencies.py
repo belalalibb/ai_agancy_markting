@@ -71,19 +71,30 @@ class PlanCounterGuard:
     """Concrete adapter for the consumer-owned ``CounterGuard`` protocols of ``content``
     (``ensure_can_approve_post``) and ``whatsapp`` (``ensure_within_conversation_quota``).
 
-    It raises the **consumer's** ``CounterQuotaExceededError`` class (passed in by ``src/main.py``
-    at bind time) so neither consumer ever imports this module (D-016 / D-076).
+    It raises the **consumer's** ``CounterQuotaExceededError`` / ``CounterPlanInactiveError``
+    classes (passed in by ``src/main.py`` at bind time) so neither consumer ever imports this
+    module (D-016 / D-076). SPRINT-12 A-1 (H1): ``plan_inactive`` is translated too — the
+    consumer maps it to **402 ``entitlement_plan_inactive``** (the webhook to a 200 flag).
     """
 
-    def __init__(self, limits: PgEntitlementLimitsReader, *, exceeded: type[Exception]) -> None:
+    def __init__(
+        self,
+        limits: PgEntitlementLimitsReader,
+        *,
+        exceeded: type[Exception],
+        inactive: type[Exception] | None = None,
+    ) -> None:
         self._limits = limits
         self._exceeded = exceeded
+        self._inactive = inactive
 
     async def _ensure(self, brand_id: UUID, counter: str, *, reserve: int) -> None:
         try:
             await self._limits.check_counter(brand_id, counter, reserve=reserve)  # type: ignore[arg-type]
         except EntitlementLimitError as exc:
-            if exc.limit_kind != counter:  # plan_inactive keeps its 429 contract
+            if exc.limit_kind == "plan_inactive" and self._inactive is not None:
+                raise self._inactive(plan=exc.plan, active_until=exc.active_until) from exc
+            if exc.limit_kind != counter:  # plan_inactive without a consumer class ⇒ raw
                 raise
             raise self._exceeded(counter, limit=exc.budget or 0, used=exc.used or 0) from exc
 
@@ -97,11 +108,13 @@ class PlanCounterGuard:
         await self._ensure(brand_id, "monthly_wa_conversations", reserve=0)
 
 
-def counter_guard_dependency(exceeded: type[Exception]) -> Callable[..., PlanCounterGuard]:
+def counter_guard_dependency(
+    exceeded: type[Exception], inactive: type[Exception] | None = None
+) -> Callable[..., PlanCounterGuard]:
     """Build the FastAPI dependency ``src/main.py`` installs as the override of a consumer's
-    ``get_counter_guard`` (one per consumer, each with its own exception class)."""
+    ``get_counter_guard`` (one per consumer, each with its own exception classes)."""
 
     def _get(limits: Limits) -> PlanCounterGuard:
-        return PlanCounterGuard(limits, exceeded=exceeded)
+        return PlanCounterGuard(limits, exceeded=exceeded, inactive=inactive)
 
     return _get

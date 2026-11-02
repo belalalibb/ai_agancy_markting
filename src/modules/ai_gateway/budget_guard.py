@@ -119,7 +119,9 @@ class PlatformBudgetExhaustedError(BudgetGuardError):
 
 class EntitlementLimitError(BudgetGuardError):
     """A plan limit (D-073) refuses the call ⇒ 429 ``generation_budget_exceeded`` with
-    ``limit_kind`` = ``plan_inactive`` / ``plan_daily_tokens`` / …"""
+    ``limit_kind`` = ``plan_daily_tokens`` / ``monthly_*``. SPRINT-12 A-1 (H1):
+    ``limit_kind == "plan_inactive"`` ⇒ **402 ``entitlement_plan_inactive``** carrying
+    ``plan`` / ``active_until`` (the client distinguishes *pay* from *wait*)."""
 
     error = "generation_budget_exceeded"
 
@@ -130,12 +132,20 @@ class EntitlementLimitError(BudgetGuardError):
         budget: int | None = None,
         used: int | None = None,
         resets_in_seconds: int = PLATFORM_CAP_RETRY_SECONDS,
+        plan: str | None = None,
+        active_until: str | None = None,
     ) -> None:
         super().__init__(f"plan limit reached: {limit_kind}")
         self.limit_kind = limit_kind
         self.budget = budget
         self.used = used
         self.resets_in_seconds = max(1, int(resets_in_seconds))
+        self.plan = plan
+        self.active_until = active_until
+
+    @property
+    def is_plan_inactive(self) -> bool:
+        return self.limit_kind == "plan_inactive"
 
 
 class CostLogUnavailableError(BudgetGuardError):

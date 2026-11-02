@@ -36,12 +36,28 @@ def test_brand_budget_is_429_with_limit_kind_and_retry_after() -> None:
 
 
 def test_entitlement_limit_is_429_with_plan_limit_kind() -> None:
-    bare = budget_error_to_http(EntitlementLimitError("plan_inactive"))
+    bare = budget_error_to_http(EntitlementLimitError("plan_daily_tokens"))
     assert bare.status_code == 429
     assert bare.detail["error"] == "generation_budget_exceeded"
-    assert bare.detail["limit_kind"] == "plan_inactive"
+    assert bare.detail["limit_kind"] == "plan_daily_tokens"
     assert "budget" not in bare.detail and "used" not in bare.detail
     assert bare.headers == {"Retry-After": str(PLATFORM_CAP_RETRY_SECONDS)}
+
+
+def test_plan_inactive_is_402_entitlement_plan_inactive_without_retry_after() -> None:
+    """SPRINT-12 A-1 (H1): *pay*, not *wait* — 402 with ``plan`` / ``active_until``."""
+    exc = EntitlementLimitError("plan_inactive", plan="growth", active_until="2026-12-01T00:00:00")
+    assert exc.is_plan_inactive is True
+    http = budget_error_to_http(exc)
+    assert http.status_code == 402
+    assert http.detail == {
+        "error": "entitlement_plan_inactive",
+        "message": "the brand's plan is suspended or expired — renew it to continue",
+        "plan": "growth",
+        "active_until": "2026-12-01T00:00:00",
+    }
+    assert http.headers is None
+    assert EntitlementLimitError("monthly_posts").is_plan_inactive is False
 
     full = budget_error_to_http(
         EntitlementLimitError("plan_daily_tokens", budget=20_000, used=20_001, resets_in_seconds=5)

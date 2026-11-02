@@ -26,8 +26,10 @@ from src.modules.ai_gateway.budget_guard import BudgetGuardError
 from src.modules.ai_gateway.contract import AIError
 from src.modules.ai_gateway.cost_log import CostLogWriter
 from src.modules.ai_gateway.dependencies import (
+    CatalogSnapshotReader,
+    HostResolver,
     build_budget_guard,
-    get_ai_gateway,
+    get_budget_guard,
     get_budget_usage_reader,
     get_cost_log_writer,
     get_entitlement_limits_reader,
@@ -220,24 +222,30 @@ def build_brain_gateway(
     )
 
 
-def get_brain_gateway(
+async def get_brain_gateway(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     writer: CostWriter,
     usage_reader: BudgetReader,
     limits_reader: LimitsReader,
+    catalog: CatalogSnapshotReader = None,
+    resolver: HostResolver = None,
     x_ai_key: AIKeyHeader = None,
 ) -> AIGateway:
-    """``X-AI-Key`` present ⇒ the platform gateway is **not even built**; absent ⇒ the
-    configured platform gateway (503 ``ai_provider_not_configured`` when none)."""
-    http_client = getattr(request.app.state, "http_client", None)
-    platform = _NO_PLATFORM if x_ai_key is not None else get_ai_gateway(request, settings)
+    """``X-AI-Key`` present ⇒ the platform gateway is **not even built** (no catalog, no
+    fallback — D-077); absent ⇒ **the same ``get_budget_guard`` every AI consumer uses**
+    (SPRINT-12 A-3 / H3: the catalog resolver when ``FEATURE_PROVIDER_CATALOG_ENABLED``,
+    else the configured platform gateway — 503 ``ai_provider_not_configured`` when none)."""
+    if x_ai_key is None:
+        return await get_budget_guard(
+            request, settings, writer, usage_reader, limits_reader, catalog, resolver
+        )
     return build_brain_gateway(
         settings,
-        platform=platform,
+        platform=_NO_PLATFORM,
         writer=writer,
         user_key=x_ai_key,
-        http_client=http_client,
+        http_client=getattr(request.app.state, "http_client", None),
         usage_reader=usage_reader,
         limits_reader=limits_reader,
         request_id=request.headers.get("x-request-id"),

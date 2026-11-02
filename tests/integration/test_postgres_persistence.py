@@ -6750,6 +6750,7 @@ def test_c10_admin_ai_zero_secret_on_pg(
     log; ``ai_providers.credential_cipher`` is Fernet (``gAAAA``); the stored cipher decrypts
     back to the key with the app's ``TokenEncryptionService`` (so the resolver can use it)."""
     owner = _c_reset(integration_app)
+    _a_public_resolver(integration_app)  # SPRINT-12 A-4: DNS names resolve (mock)
     get_settings_dep = _c_admin(integration_app)
     caplog.set_level("INFO")
     try:
@@ -6795,6 +6796,7 @@ def test_c12_catalog_fallback_leaves_two_cost_rows_on_pg(integration_app: FastAP
     from src.modules.ai_gateway.catalog.infrastructure.pg_repository import CATALOG_CACHE
 
     owner = _c_reset(integration_app)
+    _a_public_resolver(integration_app)  # SPRINT-12 A-4: DNS names resolve (mock)
     base = integration_app.state.settings.model_copy(
         update={"platform_admin_user_ids": [OWNER_USER_ID], "ai_catalog_cache_seconds": 0}
     )
@@ -6857,10 +6859,12 @@ def test_c12_catalog_fallback_leaves_two_cost_rows_on_pg(integration_app: FastAP
             rows = _rows(
                 "SELECT model, outcome, estimated_cost_usd FROM ai_cost_log ORDER BY created_at"
             )
-            assert [(r[0], r[1]) for r in rows] == [
+            # SPRINT-12 A-5 (H5): cost rows carry the resolved ``provider_id/model_name`` key
+            assert [(r[0].split("/", 1)[1], r[1]) for r in rows] == [
                 ("gpt-4o-mini", "error"),
                 ("fallback-1", "ok"),
             ]
+            assert len({r[0].split("/", 1)[0] for r in rows}) == 2  # two distinct providers
             # 20 * 0.001/1000 + 10 * 0.002/1000 = 0.00002 + 0.00002 = 0.00004
             assert rows[1][2] == Decimal("0.000040")
 
@@ -6928,6 +6932,7 @@ def test_c14_probe_writes_admin_probe_row_with_null_brand_on_pg(integration_app:
     from src.modules.auth.infrastructure.rate_limit import InMemoryRateLimiter
 
     owner = _c_reset(integration_app)
+    _a_public_resolver(integration_app)  # SPRINT-12 A-4: DNS names resolve (mock)
     get_settings_dep = _c_admin(integration_app)
     # The integration app wires ``FakeRateLimiter`` (never limits); the probe quota needs the
     # real in-memory limiter to prove the 6th call within a minute is 429.
@@ -6997,3 +7002,467 @@ def test_c14_probe_writes_admin_probe_row_with_null_brand_on_pg(integration_app:
         from tests.fakes import FakeRateLimiter
 
         integration_app.dependency_overrides[get_rate_limiter] = FakeRateLimiter
+
+
+# =============================================================================
+# SPRINT-12 Part A — H1–H6 closures proven on PG 17 (CURRENT_DIRECTIVE §2 Part A)
+# =============================================================================
+def _a_suspend_brand(plan: str = "starter") -> None:
+    """``brand_entitlements.is_active=false`` for BRAND_ID (the review's H1 scenario) — the
+    real row layout: ``limits`` is one JSONB object (``PlanLimits.model_dump()``)."""
+    from src.modules.entitlements.domain.models import DEFAULT_LIMITS, Plan
+
+    _run(
+        "INSERT INTO brand_entitlements (brand_id, plan, limits, active_until, is_active, "
+        "updated_at) VALUES (:b, :p, CAST(:l AS jsonb), NULL, false, now())",
+        {"b": BRAND_ID, "p": plan, "l": json.dumps(DEFAULT_LIMITS[Plan(plan)].model_dump())},
+    )
+
+
+def _a_public_resolver(integration_app: FastAPI) -> None:
+    """A-4: scripted ``getaddrinfo`` — every DNS name is one public address (no real lookups)."""
+    from src.modules.ai_gateway.dependencies import get_host_resolver
+
+    async def _public(host: str, port: int) -> list[tuple]:
+        return [(2, 1, 6, "", ("104.18.6.192", port))]
+
+    integration_app.dependency_overrides[get_host_resolver] = lambda: _public
+
+
+def test_a1_suspended_brand_webhook_200_stores_and_flags_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """H1 (a): a **new** conversation for a suspended brand ⇒ webhook **200** (never 5xx to
+    Meta), the ``wa_conversations`` + ``wa_messages`` rows are stored, and the conversation is
+    flagged under ``plan_inactive`` in the payload (``quota_exceeded`` stays empty)."""
+    _c_reset(integration_app)
+    _wa_account_row(integration_encryption)
+    _a_suspend_brand()
+    ts = int(datetime.now(tz=UTC).timestamp())
+    with TestClient(integration_app) as client:
+        res = _wa_post(client, _wa_payload("wamid.h1.new", ts=ts))
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["inbound"] == 1 and body["quota_exceeded"] == []
+        assert len(body["plan_inactive"]) == 1
+        conv_id = UUID(body["plan_inactive"][0])
+        # a second message in the same conversation is stored too (not new ⇒ no flag)
+        again = _wa_post(client, _wa_payload("wamid.h1.second", ts=ts + 1))
+        assert again.status_code == 200 and again.json()["plan_inactive"] == []
+    assert _run("SELECT COUNT(*) FROM wa_conversations", scalar=True) == 1
+    assert _run("SELECT COUNT(*) FROM wa_messages", scalar=True) == 2
+    assert _run(
+        "SELECT wa_id FROM wa_conversations WHERE id = :c", {"c": conv_id}, scalar=True
+    ) == (WA_CUSTOMER)
+    _a_truncate()
+
+
+def test_a1_suspended_brand_five_outbound_paths_402_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """H1 (b): every outbound / costly route of a suspended brand ⇒ **402
+    ``entitlement_plan_inactive`` {plan, active_until}`` — never 429, never 500 — and nothing
+    is written: ``approve_item``, ``send_text``, ``send_template``, ``suggest_reply``,
+    ``content/generate``, ``brain/diagnose``."""
+    owner = _c_reset(integration_app)
+    account_id = _wa_account_row(integration_encryption)
+    conv_id = _wa_conversation_row(
+        account_id, wa_id=WA_CUSTOMER, last_inbound_at=datetime.now(tz=UTC)
+    )
+    with TestClient(integration_app) as client:
+        item = _content_create(client, owner)
+        submitted = client.post(f"{CONTENT}/items/{item['id']}/submit", headers=owner)
+        assert submitted.status_code == 200, submitted.text
+        draft = _content_create(client, owner)  # ``generate`` is only legal from ``draft``
+        _a_suspend_brand("growth")
+        reset_db_caches()
+        wa = f"{API}/brands/{BRAND_ID}/whatsapp/conversations/{conv_id}"
+        with respx.mock(assert_all_called=False) as mock:
+            mock.route(url__regex=r".*").mock(return_value=httpx.Response(500, json={}))
+            attempts = {
+                "approve_item": client.post(
+                    f"{CONTENT}/items/{item['id']}/approve", headers=owner
+                ),
+                "send_text": client.post(f"{wa}/messages", json={"body": "hi"}, headers=owner),
+                "send_template": client.post(
+                    f"{wa}/template",
+                    json={"name": "hello_world", "language_code": "en_US"},
+                    headers=owner,
+                ),
+                "suggest_reply": client.post(f"{wa}/suggest-reply", headers=owner),
+                "generate": client.post(
+                    f"{CONTENT}/items/{draft['id']}/generate",
+                    json={"brief": "منشور ترويجي قصير عن العرض"},
+                    headers=owner,
+                ),
+                "brain_diagnose": client.post(f"{BRAIN_PG}/diagnose", headers=owner),
+            }
+            assert not any(route.called for route in mock.routes)
+    for name, res in attempts.items():
+        assert res.status_code == 402, (name, res.status_code, res.text)
+        detail = res.json()["detail"]
+        assert detail["error"] == "entitlement_plan_inactive", name
+        assert detail["plan"] == "growth" and detail["active_until"] is None, name
+        assert "Retry-After" not in res.headers, name
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 0
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 0
+    assert _run("SELECT COUNT(*) FROM wa_messages WHERE direction = 'outbound'", scalar=True) == 0
+    assert (
+        _run(
+            "SELECT status FROM content_items WHERE id = :i", {"i": UUID(item["id"])}, scalar=True
+        )
+        == "pending_approval"
+    )
+    _a_truncate()
+
+
+def test_a2_stranger_with_zero_quota_gets_404_not_402_on_pg(integration_app: FastAPI) -> None:
+    """H2: ``approve_item`` authorises **before** the quota check — a STRANGER on a brand with
+    ``monthly_posts = 0`` ⇒ **404 ``brand_not_found``** (no plan-state oracle); the OWNER on the
+    same brand ⇒ 402 ``entitlement_quota_exceeded``."""
+    owner = _c_reset(integration_app)
+    stranger = integration_headers(integration_app.state.settings, STRANGER_ID)
+    with TestClient(integration_app) as client:
+        item = _content_create(client, owner)
+        assert (
+            client.post(f"{CONTENT}/items/{item['id']}/submit", headers=owner).status_code == 200
+        )
+        zero_posts = {
+            "daily_tokens": 1000,
+            "monthly_posts": 0,
+            "monthly_wa_conversations": 10,
+            "max_brands": 1,
+            "seats": 1,
+        }
+        _run(
+            "INSERT INTO brand_entitlements (brand_id, plan, limits, active_until, is_active, "
+            "updated_at) VALUES (:b, 'starter', CAST(:l AS jsonb), NULL, true, now())",
+            {"b": BRAND_ID, "l": json.dumps(zero_posts)},
+        )
+        reset_db_caches()
+        res = client.post(f"{CONTENT}/items/{item['id']}/approve", headers=stranger)
+        assert res.status_code == 404, res.text
+        assert res.json()["detail"]["error"] == "brand_not_found"
+        dead = client.post(f"{CONTENT}/items/{uuid4()}/approve", headers=stranger)
+        assert dead.status_code == 404 and dead.json()["detail"]["error"] == "brand_not_found"
+        mine = client.post(f"{CONTENT}/items/{item['id']}/approve", headers=owner)
+        assert mine.status_code == 402, mine.text
+        assert mine.json()["detail"]["error"] == "entitlement_quota_exceeded"
+        assert mine.json()["detail"]["limit"] == 0
+    _a_truncate()
+
+
+def test_a3_brain_diagnose_routes_through_catalog_on_pg(integration_app: FastAPI) -> None:
+    """H3: catalog ON + a ``brand_diagnosis`` route + **no** platform key in settings ⇒
+    ``POST /brain/diagnose`` **200** through the catalog provider and one ``ai_cost_log`` row
+    with ``purpose='brand_diagnosis'`` (the brain used to bypass the catalog ⇒ 503)."""
+    from src.core.config import get_settings
+    from src.modules.ai_gateway.catalog.infrastructure.pg_repository import CATALOG_CACHE
+
+    owner = _c_reset(integration_app)
+    _a_public_resolver(integration_app)
+    base = integration_app.state.settings.model_copy(
+        update={
+            "platform_admin_user_ids": [OWNER_USER_ID],
+            "ai_catalog_cache_seconds": 0,
+            "ai_provider": "openai_compatible",
+            "ai_provider_api_key": None,
+        }
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: base
+    diagnosis = {
+        "summary": "تشخيص عبر الكتالوج [مُقاس]",
+        "strengths": [],
+        "gaps": [],
+        "recommendations": [],
+    }
+    try:
+        with TestClient(integration_app) as client:
+            _, model_id = _c_catalog_seed(client, owner)
+            routed = client.put(
+                f"{ADMIN_AI}/routing/brand_diagnosis", json={"models": [model_id]}, headers=owner
+            )
+            assert routed.status_code == 200, routed.text
+            CATALOG_CACHE.invalidate()
+            live = base.model_copy(update={"feature_provider_catalog_enabled": True})
+            integration_app.dependency_overrides[get_settings] = lambda: live
+            _brain_evidence_rows(client, owner)
+            with respx.mock(assert_all_called=False) as mock:
+                route = mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("gpt-4o-mini", json.dumps(diagnosis))
+                )
+                res = client.post(f"{BRAIN_PG}/diagnose", headers=owner)
+                assert res.status_code == 200, res.text
+                assert route.call_count == 1
+                sent = json.loads(route.calls[0].request.content)
+                assert sent["model"] == "gpt-4o-mini"
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+        CATALOG_CACHE.invalidate()
+    rows = _rows("SELECT purpose, outcome, model FROM ai_cost_log")
+    assert len(rows) == 1 and rows[0][0] == "brand_diagnosis" and rows[0][1] == "ok"
+    assert rows[0][2].endswith("/gpt-4o-mini")  # A-5: resolved provider_id/model_name key
+    _a_truncate()
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://ollama:11434/v1",
+        "http://127.0.0.1.nip.io:11434/v1",
+        "http://169.254.169.254.nip.io/v1",
+        "http://metadata.google.internal/v1",
+        "http://0177.0.0.1/v1",
+        "http://2130706433/v1",
+    ],
+)
+def test_a4_review_hosts_are_422_and_store_nothing_on_pg(
+    integration_app: FastAPI, base_url: str
+) -> None:
+    """H4: the six ``base_url`` values that stored rows in the review ⇒ **422
+    ``provider_host_not_allowed``** and **0** ``ai_providers`` rows."""
+    owner = _c_reset(integration_app)
+    restore = _c_admin(integration_app)
+    try:
+        with TestClient(integration_app) as client:
+            res = client.post(
+                f"{ADMIN_AI}/providers",
+                json={"slug": "evil", "kind": "openai_compatible", "base_url": base_url},
+                headers=owner,
+            )
+            assert res.status_code == 422, res.text
+            assert res.json()["detail"]["error"] == "provider_host_not_allowed"
+    finally:
+        integration_app.dependency_overrides.pop(restore, None)
+    assert _run("SELECT COUNT(*) FROM ai_providers", scalar=True) == 0
+    _a_truncate()
+
+
+def test_a4_dns_answers_decide_create_and_patch_on_pg(integration_app: FastAPI) -> None:
+    """H4: a DNS name is **resolved** at create / patch time — ``api.openai.com`` with a mocked
+    public answer ⇒ 201; a name whose answer is private ⇒ 422 and the row is untouched."""
+    from src.modules.ai_gateway.dependencies import get_host_resolver
+
+    owner = _c_reset(integration_app)
+    restore = _c_admin(integration_app)
+    answers: dict[str, str] = {"api.openai.com": "104.18.6.192", "rebind.example": "10.0.0.5"}
+
+    async def scripted(host: str, port: int) -> list[tuple]:
+        if host not in answers:
+            raise OSError("no such host")
+        return [(2, 1, 6, "", (answers[host], port))]
+
+    integration_app.dependency_overrides[get_host_resolver] = lambda: scripted
+    try:
+        with TestClient(integration_app) as client:
+            ok = client.post(
+                f"{ADMIN_AI}/providers",
+                json={
+                    "slug": "oa",
+                    "kind": "openai_compatible",
+                    "base_url": "https://api.openai.com/v1",
+                },
+                headers=owner,
+            )
+            assert ok.status_code == 201, ok.text
+            private = client.patch(
+                f"{ADMIN_AI}/providers/{ok.json()['id']}",
+                json={"base_url": "https://rebind.example/v1"},
+                headers=owner,
+            )
+            assert private.status_code == 422, private.text
+            unresolvable = client.patch(
+                f"{ADMIN_AI}/providers/{ok.json()['id']}",
+                json={"base_url": "https://nx.example/v1"},
+                headers=owner,
+            )
+            assert unresolvable.status_code == 422
+    finally:
+        integration_app.dependency_overrides.pop(restore, None)
+        integration_app.dependency_overrides.pop(get_host_resolver, None)
+    assert _rows("SELECT base_url FROM ai_providers") == [("https://api.openai.com/v1",)]
+    _a_truncate()
+
+
+def test_a5_disabled_namesake_price_never_leaks_503_unpriced_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """H5: provider A **disabled** + ``shared-model`` priced 0 · provider B enabled +
+    ``shared-model`` **unpriced** · route ⇒ B. ``content/generate`` ⇒ **503
+    ``ai_model_unpriced``**, 0 provider calls, 0 ``ai_cost_log`` rows."""
+    from src.core.config import get_settings
+    from src.modules.ai_gateway.catalog.infrastructure.pg_repository import CATALOG_CACHE
+
+    owner = _c_reset(integration_app)
+    _a_public_resolver(integration_app)
+    base = integration_app.state.settings.model_copy(
+        update={"platform_admin_user_ids": [OWNER_USER_ID], "ai_catalog_cache_seconds": 0}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: base
+    try:
+        with TestClient(integration_app) as client:
+            a = client.post(
+                f"{ADMIN_AI}/providers",
+                json={
+                    "slug": "a-off",
+                    "kind": "openai_compatible",
+                    "base_url": f"{CATALOG_HOST}/v1",
+                    "api_key": PROBE_KEY,
+                    "enabled": False,
+                },
+                headers=owner,
+            )
+            assert a.status_code == 201, a.text
+            priced = client.post(
+                f"{ADMIN_AI}/models",
+                json={
+                    "provider_id": a.json()["id"],
+                    "model_name": "shared-model",
+                    "pricing": {"prompt_per_1k": "0", "completion_per_1k": "0"},
+                },
+                headers=owner,
+            )
+            assert priced.status_code == 201, priced.text
+            b = client.post(
+                f"{ADMIN_AI}/providers",
+                json={
+                    "slug": "b-on",
+                    "kind": "openai_compatible",
+                    "base_url": f"{CATALOG_HOST_2}/v1",
+                    "api_key": PROBE_KEY,
+                },
+                headers=owner,
+            )
+            assert b.status_code == 201, b.text
+            unpriced = client.post(
+                f"{ADMIN_AI}/models",
+                json={"provider_id": b.json()["id"], "model_name": "shared-model"},
+                headers=owner,
+            )
+            assert unpriced.status_code == 201, unpriced.text
+            routed = client.put(
+                f"{ADMIN_AI}/routing/content_generation",
+                json={"models": [unpriced.json()["id"]]},
+                headers=owner,
+            )
+            assert routed.status_code == 200, routed.text
+            CATALOG_CACHE.invalidate()
+            live = base.model_copy(update={"feature_provider_catalog_enabled": True})
+            integration_app.dependency_overrides[get_settings] = lambda: live
+            item = _content_create(client, owner)
+            with respx.mock(assert_all_called=False) as mock:
+                any_llm = mock.post(url__regex=r".*/chat/completions").respond(
+                    200, json=_c_openai_ok("shared-model")
+                )
+                res = client.post(
+                    f"{CONTENT}/items/{item['id']}/generate",
+                    json={"brief": "منشور ترويجي قصير عن العرض"},
+                    headers=owner,
+                )
+                assert res.status_code == 503, res.text
+                assert res.json()["detail"]["error"] == "ai_model_unpriced"
+                assert any_llm.call_count == 0
+            # the probe on B agrees: 503 unpriced, no call, no row
+            with respx.mock(assert_all_called=False) as mock:
+                any_llm = mock.post(url__regex=r".*/chat/completions").respond(200, json={})
+                probe = client.post(
+                    f"{ADMIN_AI}/probe",
+                    json={"model_id": unpriced.json()["id"], "prompt": "ping"},
+                    headers=owner,
+                )
+                assert probe.status_code == 503, probe.text
+                assert any_llm.call_count == 0
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+        CATALOG_CACHE.invalidate()
+    assert _run("SELECT COUNT(*) FROM ai_cost_log", scalar=True) == 0
+    _a_truncate()
+
+
+def test_a6_max_tokens_cap_reaches_provider_and_probe_prices_from_table_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """H6a: ``PATCH /models/{id} {max_tokens_cap: 5}`` ⇒ the provider receives
+    ``max_tokens: 5`` from both ``content/generate`` (asked 2000-default) and ``probe``
+    (asked 64); H5: the probe's ``estimated_cost_usd`` equals the cost row (one price source).
+    H6b/H6c/H6d on PG: patch with both credentials ⇒ 422; routing an audio model on a text
+    purpose ⇒ 422."""
+    from src.core.config import get_settings
+    from src.modules.ai_gateway.catalog.infrastructure.pg_repository import CATALOG_CACHE
+
+    owner = _c_reset(integration_app)
+    _a_public_resolver(integration_app)
+    base = integration_app.state.settings.model_copy(
+        update={"platform_admin_user_ids": [OWNER_USER_ID], "ai_catalog_cache_seconds": 0}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: base
+    try:
+        with TestClient(integration_app) as client:
+            provider_id, model_id = _c_catalog_seed(client, owner)
+            capped = client.patch(
+                f"{ADMIN_AI}/models/{model_id}", json={"max_tokens_cap": 5}, headers=owner
+            )
+            assert capped.status_code == 200 and capped.json()["max_tokens_cap"] == 5
+            both = client.patch(
+                f"{ADMIN_AI}/providers/{provider_id}",
+                json={"api_key": PROBE_KEY, "credential_ref": "ENV_REF_X"},
+                headers=owner,
+            )
+            assert both.status_code == 422, both.text  # H6b
+            audio = client.post(
+                f"{ADMIN_AI}/models",
+                json={
+                    "provider_id": provider_id,
+                    "model_name": "whisper-x",
+                    "capability": "audio",
+                    "pricing": {"cost_per_minute_usd": "0.006", "max_audio_seconds": 60},
+                },
+                headers=owner,
+            )
+            assert audio.status_code == 201, audio.text
+            mismatch = client.put(
+                f"{ADMIN_AI}/routing/content_generation",
+                json={"models": [audio.json()["id"]]},
+                headers=owner,
+            )
+            assert mismatch.status_code == 422  # H6d
+            assert mismatch.json()["detail"]["error"] == "catalog_invalid_pricing"
+            routed = client.put(
+                f"{ADMIN_AI}/routing/content_generation",
+                json={"models": [model_id]},
+                headers=owner,
+            )
+            assert routed.status_code == 200, routed.text
+            CATALOG_CACHE.invalidate()
+            live = base.model_copy(update={"feature_provider_catalog_enabled": True})
+            integration_app.dependency_overrides[get_settings] = lambda: live
+            item = _content_create(client, owner)
+            with respx.mock(assert_all_called=False) as mock:
+                route = mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("gpt-4o-mini")
+                )
+                gen = client.post(
+                    f"{CONTENT}/items/{item['id']}/generate",
+                    json={"brief": "منشور ترويجي قصير عن العرض"},
+                    headers=owner,
+                )
+                assert gen.status_code == 200, gen.text
+                probe = client.post(
+                    f"{ADMIN_AI}/probe",
+                    json={"model_id": model_id, "prompt": "ping", "max_tokens": 64},
+                    headers=owner,
+                )
+                assert probe.status_code == 200, probe.text
+                assert route.call_count == 2
+                sent = [json.loads(c.request.content)["max_tokens"] for c in route.calls]
+                assert sent == [5, 5]  # H6a: the cap, not 2000 / 64
+            assert probe.json()["ok"] is True
+            probe_cost = Decimal(probe.json()["estimated_cost_usd"])
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+        CATALOG_CACHE.invalidate()
+    rows = _rows("SELECT purpose, estimated_cost_usd, model FROM ai_cost_log ORDER BY created_at")
+    assert [r[0] for r in rows] == ["content_draft", "admin_probe"]
+    assert rows[1][1] == probe_cost  # H5: probe response and cost row share one price source
+    assert all(r[2] == f"{provider_id}/gpt-4o-mini" for r in rows)
+    _a_truncate()

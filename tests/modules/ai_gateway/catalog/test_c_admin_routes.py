@@ -25,9 +25,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from src.core.config import Settings, get_settings
 from src.modules.ai_gateway.catalog.router import PROBE_BUCKET, get_catalog_admin_service
-from src.modules.ai_gateway.catalog.service import CatalogPriceTable
+from src.modules.ai_gateway.catalog.service import CatalogPriceTable, price_key
 from src.modules.ai_gateway.contract import AIError, ErrorCategory
 from src.modules.ai_gateway.cost_log import CostOutcome
+from src.modules.ai_gateway.dependencies import get_host_resolver
 from src.modules.ai_gateway.gateway import CompletionRequest, CompletionResult, Usage
 
 from tests.conftest import AGENCY_ID, OWNER_ID, OWNER_USER_ID
@@ -71,9 +72,16 @@ def admin_app(
         encryption=encryption,
         allow_local_hosts=admin_settings.ai_allow_local_provider_hosts,
         invalidate=_invalidate,
+        resolver=public_resolver,  # SPRINT-12 A-4: DNS answers are scripted, never real
     )
+    app.dependency_overrides[get_host_resolver] = lambda: public_resolver
     app.state.admin_settings = admin_settings
     return app
+
+
+async def public_resolver(host: str, port: int) -> list[tuple]:
+    """Every DNS name resolves to one public address (``mock getaddrinfo`` — §2 A-4)."""
+    return [(2, 1, 6, "", ("104.18.6.192", port))]
 
 
 @pytest.fixture
@@ -255,6 +263,7 @@ def test_c13_provider_host_guard_422_unless_allow_listed(
         repo,
         encryption=None,
         allow_local_hosts=allowed.ai_allow_local_provider_hosts,
+        resolver=public_resolver,
         invalidate=lambda: None,
     )
     ok = admin.post(
@@ -460,10 +469,12 @@ def scripted(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     holder: dict[str, Any] = {"error": None, "built": []}
 
-    def _build(resolved: Any, **_: Any) -> _ScriptedGateway:
+    def _build(resolved: Any, **_: Any) -> Any:
+        from src.modules.ai_gateway.catalog.service import _ResolvedFacade
+
         gw = _ScriptedGateway(resolved.model.model_name, holder["error"])
         holder["built"].append(gw)
-        return gw
+        return _ResolvedFacade(gw, resolved=resolved)  # SPRINT-12 A-5 / A-6a
 
     monkeypatch.setattr(admin_service, "build_provider_client", _build)
     return holder
@@ -497,7 +508,8 @@ def test_c14_probe_success_writes_admin_probe_cost_row(
     assert len(rows) == 1
     row = rows[0]
     assert row.purpose == "admin_probe" and row.brand_id is None
-    assert row.outcome == CostOutcome.OK and row.model == "gpt-4o-mini"
+    # SPRINT-12 A-5 (H5): the cost row carries the resolved ``provider_id/model_name`` key
+    assert row.outcome == CostOutcome.OK and row.model == f"{provider['id']}/gpt-4o-mini"
     assert RAW_KEY not in res.text
 
 
@@ -600,6 +612,138 @@ def test_c10_openapi_admin_ai_schemas_carry_no_secret_fields(client: TestClient)
     assert len(admin_paths) == 7 and sum(len(spec["paths"][p]) for p in admin_paths) == 11
 
 
+def test_h6b_provider_patch_refuses_api_key_and_credential_ref_together(
+    admin: TestClient, auth_headers: Headers
+) -> None:
+    """SPRINT-12 A-6b (H6b): the ``ProviderPatch`` validator mirrors ``ProviderCreate``."""
+    owner = auth_headers(OWNER_ID)
+    created = _create_provider(admin, owner)
+    res = admin.patch(
+        f"{API}/providers/{created['id']}",
+        json={"api_key": RAW_KEY, "credential_ref": "ENV_REF_X"},
+        headers=owner,
+    )
+    assert res.status_code == 422, res.text
+    assert "not both" in res.text
+    unchanged = admin.get(f"{API}/providers", headers=owner).json()[0]
+    assert unchanged["has_credential"] is True and unchanged["credential_ref"] is None
+
+
+def test_h6c_missing_encryption_is_503_catalog_encryption_unavailable(
+    admin_app: FastAPI,
+    admin: TestClient,
+    auth_headers: Headers,
+    catalog_repo: FakeCatalogRepository,
+) -> None:
+    """SPRINT-12 A-6c (H6c): a key sent while ``TOKEN_ENCRYPTION_KEY`` is unset ⇒ 503 (was 404)."""
+    from src.modules.ai_gateway.catalog.admin_service import CatalogAdminService
+
+    admin_app.dependency_overrides[get_catalog_admin_service] = lambda: CatalogAdminService(
+        catalog_repo,
+        encryption=None,
+        allow_local_hosts=[],
+        invalidate=lambda: None,
+        resolver=public_resolver,
+    )
+    owner = auth_headers(OWNER_ID)
+    res = admin.post(f"{API}/providers", json=_provider_body(), headers=owner)
+    assert res.status_code == 503, res.text
+    assert res.json()["detail"]["error"] == "catalog_encryption_unavailable"
+    assert catalog_repo.providers == {}
+    # a credential_ref provider needs no cipher ⇒ still 201
+    ok = admin.post(
+        f"{API}/providers",
+        json=_provider_body(api_key=None, credential_ref="OPENAI_KEY_ENV"),
+        headers=owner,
+    )
+    assert ok.status_code == 201, ok.text
+
+
+def test_h6d_routing_put_refuses_capability_mismatch(
+    admin: TestClient, auth_headers: Headers
+) -> None:
+    """SPRINT-12 A-6d (H6d): an audio model on a text purpose (and vice versa) ⇒ 422."""
+    owner = auth_headers(OWNER_ID)
+    provider = _create_provider(admin, owner)
+    text = _create_model(admin, owner, provider["id"])
+    audio = admin.post(
+        f"{API}/models",
+        json={
+            "provider_id": provider["id"],
+            "model_name": "whisper-x",
+            "capability": "audio",
+            "pricing": {"cost_per_minute_usd": "0.006", "max_audio_seconds": 60},
+        },
+        headers=owner,
+    ).json()
+    bad = admin.put(
+        f"{API}/routing/content_generation", json={"models": [audio["id"]]}, headers=owner
+    )
+    assert bad.status_code == 422, bad.text
+    assert bad.json()["detail"]["error"] == "catalog_invalid_pricing"
+    bad2 = admin.put(
+        f"{API}/routing/audio_transcription", json={"models": [text["id"]]}, headers=owner
+    )
+    assert bad2.status_code == 422
+    assert admin.get(f"{API}/routing", headers=owner).json() == []
+    ok = admin.put(
+        f"{API}/routing/audio_transcription", json={"models": [audio["id"]]}, headers=owner
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_h5_probe_unpriced_even_when_disabled_namesake_is_priced(
+    admin: TestClient, auth_headers: Headers, admin_app: FastAPI, scripted: dict[str, Any]
+) -> None:
+    """SPRINT-12 A-5 (H5): the review's scenario — provider A disabled + ``shared-model``
+    priced 0, provider B enabled + ``shared-model`` unpriced ⇒ **503 ``ai_model_unpriced``**,
+    0 provider calls, 0 cost rows (the name-only index used to let A's price leak onto B)."""
+    owner = auth_headers(OWNER_ID)
+    off = _create_provider(admin, owner, slug="off-p", enabled=False)
+    priced = admin.post(
+        f"{API}/models",
+        json={
+            "provider_id": off["id"],
+            "model_name": "shared-model",
+            "pricing": {"prompt_per_1k": "0", "completion_per_1k": "0"},
+        },
+        headers=owner,
+    )
+    assert priced.status_code == 201, priced.text
+    on = _create_provider(admin, owner, slug="on-p")
+    unpriced = admin.post(
+        f"{API}/models",
+        json={"provider_id": on["id"], "model_name": "shared-model"},
+        headers=owner,
+    ).json()
+    res = admin.post(
+        f"{API}/probe", json={"model_id": unpriced["id"], "prompt": "ping"}, headers=owner
+    )
+    assert res.status_code == 503, res.text
+    assert res.json()["detail"]["error"] == "ai_model_unpriced"
+    assert all(gw.requests == [] for gw in scripted["built"])
+    assert _cost_rows(admin_app) == []
+
+
+def test_h6a_probe_applies_max_tokens_cap(
+    admin: TestClient, auth_headers: Headers, scripted: dict[str, Any]
+) -> None:
+    """SPRINT-12 A-6a (H6a): ``PATCH {max_tokens_cap: 5}`` ⇒ the probe's provider request
+    carries ``max_tokens == 5`` even though the admin asked for 64."""
+    owner = auth_headers(OWNER_ID)
+    provider = _create_provider(admin, owner)
+    model = _create_model(admin, owner, provider["id"])
+    capped = admin.patch(f"{API}/models/{model['id']}", json={"max_tokens_cap": 5}, headers=owner)
+    assert capped.status_code == 200, capped.text
+    res = admin.post(
+        f"{API}/probe",
+        json={"model_id": model["id"], "prompt": "ping", "max_tokens": 64},
+        headers=owner,
+    )
+    assert res.status_code == 200, res.text
+    assert scripted["built"][-1].requests[-1].max_tokens == 5
+
+
 def test_c3_price_table_from_snapshot_matches_model_prices() -> None:
     """The probe prices through ``CatalogPriceTable(snapshot)``; sanity of the arithmetic."""
     from src.modules.ai_gateway.catalog.domain import (
@@ -616,5 +760,7 @@ def test_c3_price_table_from_snapshot_matches_model_prices() -> None:
         pricing=ModelPricing.token(Decimal("1"), Decimal("2")),
     )
     table = CatalogPriceTable(CatalogSnapshot(providers=(p,), models=(m,)))
-    assert table.estimate("fake-1", 1000, 1000) == Decimal("3.000000")
+    key = price_key(p.id, "fake-1")  # SPRINT-12 A-5 (H5): provider-scoped key
+    assert table.estimate(key, 1000, 1000) == Decimal("3.000000")
+    assert table.estimate("fake-1", 1000, 1000) is None  # the bare name is no longer a key
     assert table.estimate_unit("other") is None

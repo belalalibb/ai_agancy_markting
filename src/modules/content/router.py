@@ -34,7 +34,7 @@ from src.core.database import get_db_session
 from src.modules.ai_gateway.budget_guard import BudgetGuardError
 from src.modules.ai_gateway.contract import AIError, ErrorCategory
 from src.modules.ai_gateway.dependencies import GuardedGateway
-from src.modules.ai_gateway.http_errors import budget_error_to_http
+from src.modules.ai_gateway.http_errors import budget_error_to_http, plan_inactive_http
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import Action
@@ -42,6 +42,7 @@ from src.modules.content.domain.models import Channel, ContentItem, ContentStatu
 from src.modules.content.domain.repository import ContentRepository
 from src.modules.content.entitlements_port import (
     CounterGuard,
+    CounterPlanInactiveError,
     CounterQuotaExceededError,
     get_counter_guard,
 )
@@ -493,13 +494,12 @@ async def approve_item(
     payload: ApprovalNoteRequest | None = None,
 ) -> ContentItemPublic:
     """Roles: **OWNER only** — MANAGER ⇒ 403 ``approval_requires_owner``. An owner may approve
-    their own draft. Logs an ``approved`` event. SPRINT-11.1 A-2 (E2): the plan's
-    ``monthly_posts`` ceiling is checked first ⇒ **402 ``entitlement_quota_exceeded``**."""
-    if quota is not None:
-        try:
-            await quota.ensure_can_approve_post(brand_id)
-        except CounterQuotaExceededError as exc:
-            raise quota_exceeded_to_http(exc) from exc
+    their own draft. Logs an ``approved`` event. SPRINT-12 A-2 (H2): authorisation first
+    (404 ``brand_not_found`` / 403) and **then** the plan's ``monthly_posts`` ceiling ⇒ **402
+    ``entitlement_quota_exceeded``** — a stranger never learns another brand's plan state.
+    A-1 (H1): a suspended / expired plan ⇒ **402 ``entitlement_plan_inactive``**."""
+    await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    await _ensure_post_quota(quota, brand_id)
     return await _act(
         service,
         resolver,
@@ -510,6 +510,18 @@ async def approve_item(
         actor.user_id,
         note=payload.note if payload else None,
     )
+
+
+async def _ensure_post_quota(quota: CounterGuard | None, brand_id: UUID) -> None:
+    """SPRINT-11.1 A-2 / SPRINT-12 A-1: the two plan refusals of an approval, both 402."""
+    if quota is None:
+        return
+    try:
+        await quota.ensure_can_approve_post(brand_id)
+    except CounterQuotaExceededError as exc:
+        raise quota_exceeded_to_http(exc) from exc
+    except CounterPlanInactiveError as exc:
+        raise plan_inactive_http(plan=exc.plan, active_until=exc.active_until) from exc
 
 
 @router.post(

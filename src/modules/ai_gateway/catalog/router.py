@@ -59,6 +59,7 @@ from src.modules.ai_gateway.catalog.service import CatalogError, CatalogPriceTab
 from src.modules.ai_gateway.dependencies import (
     BudgetReader,
     CostWriter,
+    HostResolver,
     build_budget_guard,
 )
 from src.modules.ai_gateway.gateway import AIGateway
@@ -77,15 +78,18 @@ PROBE_WINDOW_SECONDS = 60
 def get_catalog_admin_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     settings: Annotated[Settings, Depends(get_settings)],
+    resolver: HostResolver = None,
 ) -> CatalogAdminService:
     """Request-scoped admin service over the PG repository; every write invalidates the
-    process-wide snapshot cache so the next guarded call sees the change."""
+    process-wide snapshot cache so the next guarded call sees the change. SPRINT-12 A-4:
+    ``resolver`` (``get_host_resolver``) is the DNS lookup behind the host guard."""
     encryption = get_token_encryption_service(settings) if settings.token_encryption_key else None
     return CatalogAdminService(
         PgCatalogRepository(session),
         encryption=encryption,
         allow_local_hosts=settings.ai_allow_local_provider_hosts,
         invalidate=CATALOG_CACHE.invalidate,
+        resolver=resolver,
     )
 
 

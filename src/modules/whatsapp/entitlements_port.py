@@ -30,6 +30,17 @@ class CounterQuotaExceededError(Exception):
         self.used = used
 
 
+class CounterPlanInactiveError(Exception):
+    """SPRINT-12 A-1 (H1): plan suspended / expired ⇒ the agent-side routes answer **402
+    ``entitlement_plan_inactive``** ``{plan, active_until}``; the signed webhook stores the
+    message anyway and flags the conversation under ``plan_inactive`` (never a 5xx to Meta)."""
+
+    def __init__(self, *, plan: str | None = None, active_until: str | None = None) -> None:
+        super().__init__("plan inactive")
+        self.plan = plan
+        self.active_until = active_until
+
+
 class CounterGuard(Protocol):
     async def ensure_within_conversation_quota(self, brand_id: UUID) -> None:
         """Raises :class:`CounterQuotaExceededError` when the brand's stored conversations of the
@@ -42,4 +53,9 @@ def get_counter_guard() -> CounterGuard | None:
     return None
 
 
-__all__ = ["CounterGuard", "CounterQuotaExceededError", "get_counter_guard"]
+__all__ = [
+    "CounterGuard",
+    "CounterPlanInactiveError",
+    "CounterQuotaExceededError",
+    "get_counter_guard",
+]

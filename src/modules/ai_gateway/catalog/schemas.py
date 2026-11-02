@@ -62,6 +62,14 @@ class ProviderPatch(BaseModel):
     def sent(self, name: str) -> bool:
         return name in self.model_fields_set
 
+    @model_validator(mode="after")
+    def _one_credential(self) -> ProviderPatch:
+        """SPRINT-12 A-6b (H6b): the same ``api_key ⊕ credential_ref`` rule as
+        :class:`ProviderCreate` — a patch naming both would silently drop the key."""
+        if self.api_key is not None and self.credential_ref is not None:
+            raise ValueError("send either api_key or credential_ref, not both")
+        return self
+
 
 class ProviderOut(BaseModel):
     id: UUID

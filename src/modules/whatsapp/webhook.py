@@ -69,6 +69,7 @@ from src.modules.whatsapp.domain.models import (
 from src.modules.whatsapp.domain.repository import WhatsAppRepository
 from src.modules.whatsapp.entitlements_port import (
     CounterGuard,
+    CounterPlanInactiveError,
     CounterQuotaExceededError,
     get_counter_guard,
 )
@@ -146,6 +147,9 @@ class WebhookOutcome:
     # SPRINT-11.1 A-2 (E2): conversations stored while the brand is over its monthly
     # ``monthly_wa_conversations`` ceiling — never a 429 to Meta, flagged here instead.
     quota_exceeded: list[UUID] = field(default_factory=list)
+    # SPRINT-12 A-1 (H1): conversations stored while the brand's plan is suspended / expired —
+    # a signed webhook never answers 5xx (Meta would retry and the message would be lost).
+    plan_inactive: list[UUID] = field(default_factory=list)
 
 
 def _ts(value: Any) -> datetime:  # noqa: ANN401 - raw JSON
@@ -329,6 +333,12 @@ class WebhookProcessor:
                     exc.used,
                     exc.limit,
                 )
+            except CounterPlanInactiveError:
+                outcome.plan_inactive.append(conversation.id)
+                counters.increment("wa_plan_inactive")
+                logger.info(
+                    "wa plan inactive: brand=%s conv=%s", account.brand_id, conversation.id
+                )
         expired = await self._repo.expire_pending_drafts(conversation.id, now=now)
         await record_expired(self._repo, expired, now=now, consent=self._consent)  # D-069/D-080
         outcome.expired_drafts.extend(d.id for d in expired)
@@ -499,4 +509,5 @@ async def receive_webhook(
         "unparsed": outcome.unparsed,
         "expired_drafts": [str(d) for d in outcome.expired_drafts],  # B-3
         "quota_exceeded": [str(c) for c in outcome.quota_exceeded],  # SPRINT-11.1 A-2
+        "plan_inactive": [str(c) for c in outcome.plan_inactive],  # SPRINT-12 A-1 (H1)
     }

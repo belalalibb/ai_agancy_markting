@@ -212,7 +212,16 @@ class PgEntitlementLimitsReader:
             resets = 1
             if entitlement.active_until is not None and entitlement.active_until > now:
                 resets = int((entitlement.active_until - now).total_seconds())  # pragma: no cover
-            raise EntitlementLimitError("plan_inactive", resets_in_seconds=max(resets, 3600))
+            raise EntitlementLimitError(
+                "plan_inactive",
+                resets_in_seconds=max(resets, 3600),
+                plan=entitlement.plan.value,
+                active_until=(
+                    entitlement.active_until.isoformat()
+                    if entitlement.active_until is not None
+                    else None
+                ),
+            )
         return entitlement, stored is not None
 
     async def check(self, brand_id: UUID, purpose: str) -> bool:

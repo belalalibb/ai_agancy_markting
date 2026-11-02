@@ -482,24 +482,42 @@ def _request(settings: Settings) -> Request:
     return Request(scope)
 
 
-def test_get_brain_gateway_dependency_paths() -> None:
+async def test_get_brain_gateway_dependency_paths() -> None:
+    """SPRINT-12 A-3 (H3): no ``X-AI-Key`` ⇒ the shared ``get_budget_guard`` (catalog-aware);
+    ``X-AI-Key`` ⇒ the per-request user-key facade, no catalog, no fallback."""
     writer = FakeCostLogWriter()
     # user key ⇒ openai_compatible on the user's key even when the platform is ``fake``
     fake_settings = Settings(_env_file=None, ai_provider="fake")  # type: ignore[call-arg]
     reader = NullBudgetUsageReader()
-    gw = get_brain_gateway(
+    gw = await get_brain_gateway(
         _request(fake_settings), fake_settings, writer, reader, None, x_ai_key=USER_KEY
     )
     assert isinstance(gw, BudgetGuard)
     assert isinstance(gw.inner, HttpOpenAICompatibleProvider)
     assert USER_KEY not in repr(gw.inner)
-    # no key ⇒ the platform gateway (fake here)
-    gw = get_brain_gateway(_request(fake_settings), fake_settings, writer, reader, None)
+    # no key ⇒ the platform gateway (fake here) through get_budget_guard
+    gw = await get_brain_gateway(_request(fake_settings), fake_settings, writer, reader, None)
+    assert isinstance(gw, BudgetGuard)
     assert isinstance(gw.inner, FakeProvider)
     # no key and openai_compatible without a platform key ⇒ 503 from get_ai_gateway
     from fastapi import HTTPException
 
     unconfigured = Settings(_env_file=None, ai_provider="openai_compatible")  # type: ignore[call-arg]
     with pytest.raises(HTTPException) as info:
-        get_brain_gateway(_request(unconfigured), unconfigured, writer, reader, None)
+        await get_brain_gateway(_request(unconfigured), unconfigured, writer, reader, None)
     assert info.value.status_code == 503
+    # catalog ON + a snapshot reader ⇒ the catalog resolver, not the legacy provider (H3)
+    from src.modules.ai_gateway.catalog.domain import CatalogSnapshot
+    from src.modules.ai_gateway.catalog.service import CatalogGatewayResolver
+
+    class Reader:
+        async def snapshot(self) -> CatalogSnapshot:
+            return CatalogSnapshot()
+
+    catalog_on = Settings(  # type: ignore[call-arg]
+        _env_file=None, ai_provider="fake", feature_provider_catalog_enabled=True
+    )
+    gw = await get_brain_gateway(
+        _request(catalog_on), catalog_on, writer, reader, None, catalog=Reader()
+    )
+    assert isinstance(gw, CatalogGatewayResolver)

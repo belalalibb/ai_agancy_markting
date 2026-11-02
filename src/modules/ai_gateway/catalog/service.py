@@ -25,7 +25,15 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import SecretStr
 
-from src.core.netguard import host_port_key, is_global_ip_literal
+from src.core.netguard import (
+    PinnedAddressTransport,
+    Resolver,
+    host_port_key,
+    is_forbidden_hostname,
+    is_global_ip_literal,
+    normalize_ip_literal,
+    resolve_public_addresses,
+)
 from src.core.security import TokenEncryptionService
 from src.modules.ai_gateway.budget_guard import BudgetGuardError
 from src.modules.ai_gateway.catalog.domain import (
@@ -107,6 +115,17 @@ class CatalogInvalidPricingError(CatalogError):
     status = 422
 
 
+class CatalogEncryptionUnavailableError(CatalogError):
+    """SPRINT-12 A-6c (H6c): a key was sent but ``TOKEN_ENCRYPTION_KEY`` is not configured ⇒
+    **503** ``catalog_encryption_unavailable`` (a deployment fault, not a missing resource)."""
+
+    error = "catalog_encryption_unavailable"
+    status = 503
+
+    def __init__(self) -> None:
+        super().__init__("token encryption is not configured")
+
+
 class CredentialUnavailableError(CatalogError, BudgetGuardError):
     """``credential_ref`` names an unset environment variable ⇒ provider unusable (503).
     Runtime error like ``NoRouteError`` ⇒ also a ``BudgetGuardError`` (B-6)."""
@@ -126,28 +145,76 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 def validate_provider_host(base_url: str, allow_local: Mapping[str, bool] | list[str]) -> str:
     """Return the normalised ``host:port`` key of ``base_url`` or raise
-    :class:`ProviderHostNotAllowedError`. Accepted when the host is a **public IP literal or a
-    DNS name** (DNS names are resolved by the HTTP client; an IP literal is checked here), or
-    when ``host:port`` is listed verbatim in ``AI_ALLOW_LOCAL_PROVIDER_HOSTS``."""
+    :class:`ProviderHostNotAllowedError` — the **pure** part of the guard (no network).
+
+    Accepted: a **global IP literal** (after :func:`normalize_ip_literal`, so ``0177.0.0.1``
+    / ``2130706433`` / ``0x7f000001`` are seen as ``127.0.0.1`` and refused), or a DNS name
+    that is not a loopback / internal / wildcard-DNS name (``*.internal``, ``*.local``,
+    ``*.localhost``, ``*.nip.io``, ``*.sslip.io``, bare words), or a ``host:port`` listed
+    verbatim in ``AI_ALLOW_LOCAL_PROVIDER_HOSTS``. DNS names are then resolved by
+    :func:`ensure_provider_host_resolves_public` (SPRINT-12 A-4 / H4)."""
     parts = urlsplit(base_url)
     if parts.scheme not in _DEFAULT_PORTS or not parts.hostname:
         raise ProviderHostNotAllowedError(parts.hostname or "")
     key = host_port_key(parts.hostname, parts.port, default_port=_DEFAULT_PORTS[parts.scheme])
-    allowed = {h.strip().lower() for h in allow_local if h and h.strip()}
-    if key in allowed:
+    if key in _allowed_keys(allow_local):
         return key
     host = parts.hostname.lower().rstrip(".")
-    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+    literal = normalize_ip_literal(host)
+    if literal is not None:
+        if not is_global_ip_literal(literal):
+            raise ProviderHostNotAllowedError(host)
+        return key
+    if is_forbidden_hostname(host):
         raise ProviderHostNotAllowedError(host)
-    try:
-        import ipaddress
+    return key  # DNS name — resolved and checked by ``ensure_provider_host_resolves_public``
 
-        ipaddress.ip_address(host)
-    except ValueError:
-        return key  # DNS name — resolved at call time by the HTTP client
-    if not is_global_ip_literal(host):
+
+def _allowed_keys(allow_local: Mapping[str, bool] | list[str]) -> set[str]:
+    return {h.strip().lower() for h in allow_local if h and h.strip()}
+
+
+async def ensure_provider_host_resolves_public(
+    base_url: str,
+    allow_local: Mapping[str, bool] | list[str],
+    *,
+    resolver: Resolver | None = None,
+) -> str:
+    """SPRINT-12 A-4 (H4): :func:`validate_provider_host` **plus** a ``getaddrinfo`` at
+    create / patch time — a DNS name whose answers are not all global (``netguard
+    .is_global_address``, the ``public_fetch.py`` contract) is refused with 422. Allow-listed
+    and IP-literal hosts skip the lookup."""
+    key = validate_provider_host(base_url, allow_local)
+    parts = urlsplit(base_url)
+    host = (parts.hostname or "").lower().rstrip(".")
+    if key in _allowed_keys(allow_local) or normalize_ip_literal(host) is not None:
+        return key
+    port = parts.port or _DEFAULT_PORTS[parts.scheme]
+    if not await resolve_public_addresses(host, port, resolver=resolver):
         raise ProviderHostNotAllowedError(host)
     return key
+
+
+def pinned_http_client(
+    http_client: httpx.AsyncClient | None,
+    allow_local: Mapping[str, bool] | list[str],
+    *,
+    resolver: Resolver | None = None,
+) -> httpx.AsyncClient:
+    """SPRINT-12 A-4 (H4, connect time): an ``httpx`` client whose transport re-resolves the
+    provider host before every request and refuses a non-global answer (DNS rebinding). The
+    app's pooled client (``http_client``) is reused as the inner transport when present so
+    the connection pool and ``respx`` keep working; ``None`` ⇒ a fresh pooled transport."""
+    inner: httpx.AsyncBaseTransport
+    if http_client is not None:
+        inner = http_client._transport  # noqa: SLF001 - the pooled transport is the point
+    else:
+        inner = httpx.AsyncHTTPTransport()
+    return httpx.AsyncClient(
+        transport=PinnedAddressTransport(
+            inner, allow_hosts=frozenset(_allowed_keys(allow_local)), resolver=resolver
+        )
+    )
 
 
 # ---------------------------------------------------------------- catalog ----
@@ -189,26 +256,36 @@ class ProviderCatalog:
         return provider, model
 
 
+def price_key(provider_id: object, model_name: str) -> str:
+    """SPRINT-12 A-5 (H5): the **resolved** model key the ``BudgetGuard`` prices by —
+    ``"<provider_id>/<model_name>"`` — so two providers exposing ``gpt-4o-mini`` never share
+    a price row. It is what the per-attempt facade reports as ``model`` and what
+    ``ai_cost_log.model`` stores (≤ 64 chars: UUID 36 + ``/`` + name ≤ 27, else truncated)."""
+    return f"{provider_id}/{model_name}"[:64]
+
+
 class CatalogPriceTable:
-    """``PriceSource`` over ``ai_models`` — same interface as ``pricing.PriceTable``."""
+    """``PriceSource`` over ``ai_models`` — same interface as ``pricing.PriceTable``.
+
+    SPRINT-12 A-5 (H5): indexed by :func:`price_key` ``(provider_id, model_name)`` and
+    **only enabled models of enabled providers** are priced — a disabled provider's price
+    can never leak onto a namesake model; an unpriced enabled model stays unpriced
+    (fail-closed ``ai_model_unpriced``, D-075)."""
 
     def __init__(self, snapshot: CatalogSnapshot) -> None:
-        self._by_name: dict[str, Model] = {}
-        for model in snapshot.models:
-            # Two providers may expose the same model name; the first enabled one wins and a
-            # priced entry is preferred over an unpriced one.
-            current = self._by_name.get(model.model_name)
-            if current is None or (
-                current.pricing.token_unit is None and model.pricing.token_unit is not None
-            ):
-                self._by_name[model.model_name] = model
+        enabled_providers = {p.id for p in snapshot.providers if p.enabled}
+        self._by_key: dict[str, Model] = {
+            price_key(m.provider_id, m.model_name): m
+            for m in snapshot.models
+            if m.enabled and m.provider_id in enabled_providers
+        }
 
     @property
     def models(self) -> frozenset[str]:
-        return frozenset(self._by_name)
+        return frozenset(self._by_key)
 
     def estimate_unit(self, model: str) -> tuple[Decimal, Decimal] | None:
-        entry = self._by_name.get(model)
+        entry = self._by_key.get(model)
         return entry.pricing.token_unit if entry is not None else None
 
     def estimate(
@@ -223,7 +300,7 @@ class CatalogPriceTable:
     def estimate_audio(self, model: str, seconds: int) -> Decimal | None:
         """Audio pricing (``cost_per_minute_usd``); ``None`` when unpriced **or** when
         ``seconds`` exceeds the model's ``max_audio_seconds``."""
-        entry = self._by_name.get(model)
+        entry = self._by_key.get(model)
         if entry is None or entry.capability != "audio":
             return None
         pricing = entry.pricing
@@ -268,28 +345,59 @@ GuardFactory = Callable[[AIGateway, str], AIGateway]
 """``(inner_provider, model_name) ⇒ BudgetGuard`` — built per attempt by ``dependencies``."""
 
 
+class _ResolvedFacade:
+    """Wrap one provider facade so the ``BudgetGuard`` sees the **resolved** price key
+    (``price_key(provider_id, model_name)`` — SPRINT-12 A-5 / H5) as ``model`` while the
+    provider still receives its own ``model_name``, and so ``max_tokens_cap`` is **applied**
+    (``min(req.max_tokens, cap)`` — SPRINT-12 A-6a / H6a) before the call leaves."""
+
+    def __init__(self, inner: AIGateway, *, resolved: ResolvedModel) -> None:
+        self._inner = inner
+        self.name = str(getattr(inner, "name", "unknown"))
+        self.model = price_key(resolved.provider.id, resolved.model.model_name)
+        self.model_name = resolved.model.model_name
+        self.max_tokens_cap = resolved.model.max_tokens_cap
+
+    @property
+    def inner(self) -> AIGateway:
+        return self._inner
+
+    async def complete(self, req: CompletionRequest) -> CompletionResult:
+        cap = self.max_tokens_cap
+        if cap is not None and req.max_tokens > cap:
+            req = req.model_copy(update={"max_tokens": cap})
+        return await self._inner.complete(req)
+
+
 def build_provider_client(
     resolved: ResolvedModel,
     *,
     credentials: CredentialResolver,
     http_client: httpx.AsyncClient | None,
     user_key: SecretStr | None = None,
+    allow_local: Mapping[str, bool] | list[str] = (),
+    resolver: Resolver | None = None,
 ) -> AIGateway:
     """The concrete facade for one (provider, model): ``fake`` ⇒ ``FakeProvider``;
     ``openai_compatible`` ⇒ ``HttpOpenAICompatibleProvider`` on the resolved key (or the
-    caller's ``X-AI-Key``)."""
+    caller's ``X-AI-Key``) behind :func:`pinned_http_client` (A-4: the host is re-resolved
+    before every request and a private answer is refused). Either is wrapped in
+    :class:`_ResolvedFacade` (A-5 price key + A-6a ``max_tokens_cap``)."""
     provider, model = resolved.provider, resolved.model
     if provider.kind == "fake":
-        return FakeProvider(model=model.model_name)
+        return _ResolvedFacade(FakeProvider(model=model.model_name), resolved=resolved)
     key = user_key if user_key is not None else credentials.resolve(provider)
     if key is None:
         raise CredentialUnavailableError(f"provider {provider.slug!r} has no credential")
-    return HttpOpenAICompatibleProvider(
-        base_url=provider.base_url,
-        api_key=key,
-        model=model.model_name,
-        http_client=http_client,
-        timeout_seconds=float(provider.timeout_seconds),
+    return _ResolvedFacade(
+        HttpOpenAICompatibleProvider(
+            base_url=provider.base_url,
+            api_key=key,
+            model=model.model_name,
+            http_client=pinned_http_client(http_client, allow_local, resolver=resolver),
+            timeout_seconds=float(provider.timeout_seconds),
+        ),
+        resolved=resolved,
     )
 
 
@@ -310,12 +418,16 @@ class CatalogGatewayResolver:
         http_client: httpx.AsyncClient | None = None,
         user_key: SecretStr | None = None,
         max_attempts: int = MAX_ATTEMPTS,
+        allow_local: Mapping[str, bool] | list[str] = (),
+        resolver: Resolver | None = None,
     ) -> None:
         self._catalog = catalog
         self._credentials = credentials
         self._guard_factory = guard_factory
         self._http = http_client
         self._user_key = user_key
+        self._allow_local = allow_local
+        self._resolver = resolver
         self._max_attempts = max(1, int(max_attempts))
         self.model = "catalog"  # the BudgetGuard reads the per-attempt model instead
         self.attempts: list[str] = []
@@ -350,8 +462,10 @@ class CatalogGatewayResolver:
             credentials=self._credentials,
             http_client=self._http,
             user_key=self._user_key,
+            allow_local=self._allow_local,
+            resolver=self._resolver,
         )
-        guarded = self._guard_factory(inner, candidate.model.model_name)
+        guarded = self._guard_factory(inner, inner.model)  # A-5: the resolved price key
         self.attempts.append(candidate.model.model_name)
         return await guarded.complete(req)
 
@@ -360,6 +474,7 @@ __all__ = [
     "FALLBACK_CATEGORIES",
     "MAX_ATTEMPTS",
     "CatalogConflictError",
+    "CatalogEncryptionUnavailableError",
     "CatalogError",
     "CatalogGatewayResolver",
     "CatalogInvalidPricingError",
@@ -372,5 +487,8 @@ __all__ = [
     "ProviderCatalog",
     "ProviderHostNotAllowedError",
     "build_provider_client",
+    "ensure_provider_host_resolves_public",
+    "pinned_http_client",
+    "price_key",
     "validate_provider_host",
 ]

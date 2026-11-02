@@ -28,7 +28,7 @@ from src.core.security import (
 )
 from src.modules.ai_gateway.budget_guard import BudgetGuardError
 from src.modules.ai_gateway.dependencies import GuardedGateway
-from src.modules.ai_gateway.http_errors import budget_error_to_http
+from src.modules.ai_gateway.http_errors import budget_error_to_http, plan_inactive_http
 from src.modules.auth.dependencies import CurrentUser, CurrentUserFresh, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.exceptions import ContentError
@@ -54,6 +54,7 @@ from src.modules.whatsapp.domain.models import Conversation, ConversationStatus,
 from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, WhatsAppRepository
 from src.modules.whatsapp.entitlements_port import (
     CounterGuard,
+    CounterPlanInactiveError,
     CounterQuotaExceededError,
     get_counter_guard,
 )
@@ -221,6 +222,8 @@ async def _ensure_quota(quota: CounterGuard | None, brand_id: UUID) -> None:
         await quota.ensure_within_conversation_quota(brand_id)
     except CounterQuotaExceededError as exc:
         raise quota_exceeded_to_http(exc) from exc
+    except CounterPlanInactiveError as exc:  # SPRINT-12 A-1 (H1): pay, not wait
+        raise plan_inactive_http(plan=exc.plan, active_until=exc.active_until) from exc
 
 
 def to_http(exc: WhatsAppError) -> HTTPException:

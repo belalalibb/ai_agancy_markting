@@ -195,10 +195,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from src.modules.whatsapp import entitlements_port as whatsapp_port
 
     app.dependency_overrides[content_port.get_counter_guard] = counter_guard_dependency(
-        content_port.CounterQuotaExceededError
+        content_port.CounterQuotaExceededError, content_port.CounterPlanInactiveError
     )
     app.dependency_overrides[whatsapp_port.get_counter_guard] = counter_guard_dependency(
-        whatsapp_port.CounterQuotaExceededError
+        whatsapp_port.CounterQuotaExceededError, whatsapp_port.CounterPlanInactiveError
     )
     app.include_router(api_v1)
 

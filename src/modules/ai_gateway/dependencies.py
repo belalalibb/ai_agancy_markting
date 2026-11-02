@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.core.netguard import Resolver
 from src.core.security import get_token_encryption_service
 from src.modules.ai_gateway.budget import BudgetUsageReader, DailyBudget, EntitlementLimitsReader
 from src.modules.ai_gateway.budget_guard import BudgetGuard
@@ -145,6 +146,16 @@ def build_budget_guard(
 
 
 # --------------------------------------------------------- SPRINT-11.1 B-3 --
+def get_host_resolver() -> Resolver | None:
+    """SPRINT-12 A-4 (H4): the ``getaddrinfo``-shaped resolver the catalog uses at create /
+    patch time **and** before every provider request. ``None`` ⇒ the real resolver
+    (``netguard.default_resolver``); tests override this dependency with a scripted one."""
+    return None
+
+
+HostResolver = Annotated[Resolver | None, Depends(get_host_resolver)]
+
+
 def get_catalog_reader(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CatalogReader | None:
@@ -176,6 +187,7 @@ def build_catalog_gateway(
     request_id: str | None,
     http_client: httpx.AsyncClient | None,
     user_key: str | None = None,
+    resolver: Resolver | None = None,
 ) -> AIGateway:
     """Pure factory: ``CatalogGatewayResolver`` whose **every attempt** is wrapped in its own
     ``BudgetGuard`` priced from ``ai_models`` (two cost rows on primary-503 + fallback-200).
@@ -207,6 +219,8 @@ def build_catalog_gateway(
         guard_factory=guard_factory,
         http_client=http_client,
         user_key=SecretStr(user_key) if user_key else None,
+        allow_local=settings.ai_allow_local_provider_hosts,  # A-4: connect-time check
+        resolver=resolver,
     )
 
 
@@ -217,6 +231,7 @@ async def get_budget_guard(
     usage_reader: BudgetReader,
     limits_reader: LimitsReader,
     catalog: CatalogSnapshotReader,
+    resolver: HostResolver = None,
 ) -> AIGateway:
     """The single dependency every AI consumer uses instead of the raw gateway.
 
@@ -235,6 +250,7 @@ async def get_budget_guard(
             limits_reader=limits_reader,
             request_id=request_id,
             http_client=getattr(request.app.state, "http_client", None),
+            resolver=resolver,
         )
     inner = await _resolve_inner(request, settings)
     return build_budget_guard(
