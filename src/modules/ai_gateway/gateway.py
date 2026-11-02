@@ -6,12 +6,13 @@ from __future__ import annotations
 from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.modules.ai_gateway.contract import CredentialMode, Operation, Usage
 
 # SPRINT-09 B-3 adds ``reply_suggestion``; SPRINT-10 B-2 adds the four Brand Brain purposes
-# (directive §2-0: a Literal, not a new layer).
+# (directive §2-0: a Literal, not a new layer). SPRINT-11.1 C-3 adds ``admin_probe`` — the
+# only purpose that may travel without a brand (``brand_id=None``; platform-paid, capped).
 Purpose = Literal[
     "content_draft",
     "reply_suggestion",
@@ -19,6 +20,7 @@ Purpose = Literal[
     "competitor_gap",
     "content_plan",
     "tone_profile",
+    "admin_probe",
 ]
 
 
@@ -30,9 +32,18 @@ class CompletionRequest(BaseModel):
     user: str = Field(min_length=1)
     max_tokens: int = Field(default=800, ge=1, le=2000)
     temperature: float = Field(default=0.7, ge=0.0, le=1.0)
-    brand_id: UUID
+    # SPRINT-11.1 (§5-5 note 3): ``None`` only for ``purpose="admin_probe"`` — the BudgetGuard
+    # then skips the brand-level checks and writes ``ai_cost_log.brand_id = NULL``.
+    brand_id: UUID | None = None
     tenant_id: UUID
     operation: Operation = "generate_text"
+
+    @model_validator(mode="after")
+    def _brand_required_unless_probe(self) -> CompletionRequest:
+        if self.brand_id is None and self.purpose != "admin_probe":
+            raise ValueError("brand_id is required unless purpose is 'admin_probe'")
+        return self
+
     # B-0 (D-067): ``platform`` = the platform's own key (today's only mode); ``user_key`` is
     # reserved for BYOK (M7) and never selected in SPRINT-07. SPRINT-10 B-2: ``user_key`` is
     # selected by the ``X-AI-Key`` header on Brand Brain routes (memory only, no fallback).

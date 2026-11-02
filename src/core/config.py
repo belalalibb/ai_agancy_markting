@@ -141,6 +141,17 @@ class Settings(BaseSettings):
     # admin route answers 403 ``platform_admin_required`` (safe by default). Moves to the
     # database in SPRINT-11.1.
     platform_admin_user_ids: Annotated[list[UUID], NoDecode] = Field(default_factory=list)
+    # SPRINT-11.1 B-3 (D-077 + D-076 kill switch): ``True`` routes every completion through
+    # the runtime provider catalog (``ai_providers`` / ``ai_models`` / ``ai_routing``) with
+    # per-model prices; ``False`` (default) keeps the ``AI_PROVIDER`` / ``AI_DEFAULT_MODEL`` /
+    # ``AI_PRICE_TABLE_JSON`` behaviour literally. The admin routes work in both modes.
+    feature_provider_catalog_enabled: bool = False
+    # SPRINT-11.1 B-3: comma-separated ``host[:port]`` entries a catalog provider may point at
+    # even though they are private/loopback (local dev, e.g. ``localhost:11434``). Anything
+    # else must resolve to a public IP literal or DNS name ⇒ 422 ``provider_host_not_allowed``.
+    ai_allow_local_provider_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # SPRINT-11.1 B-2: in-process catalog snapshot TTL; ``0`` disables the cache (tests).
+    ai_catalog_cache_seconds: int = Field(default=30, ge=0, le=3600)
 
     # --- Scheduler / publishing (SPRINT-07 B3) ------------------------------------------
     # Off by default (tests, dev). The worker loop is started in ``lifespan`` only when on.
@@ -155,10 +166,11 @@ class Settings(BaseSettings):
     # reads this setting (``job.max_attempts`` is the truth for an existing job).
     publish_max_attempts: int = Field(default=3, ge=1, le=10)
 
-    @field_validator("platform_admin_user_ids", mode="before")
+    @field_validator("platform_admin_user_ids", "ai_allow_local_provider_hosts", mode="before")
     @classmethod
     def _split_admin_ids(cls, value: object) -> object:
-        """``PLATFORM_ADMIN_USER_IDS=<uuid>,<uuid>`` (whitespace tolerated; empty ⇒ ``[]``)."""
+        """``PLATFORM_ADMIN_USER_IDS=<uuid>,<uuid>`` / ``AI_ALLOW_LOCAL_PROVIDER_HOSTS=h1,h2:port``
+        (whitespace tolerated; empty ⇒ ``[]``)."""
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value

@@ -523,7 +523,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -928,7 +928,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1949,7 +1949,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2019,7 +2019,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2474,7 +2474,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2603,7 +2603,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2750,7 +2750,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2800,7 +2800,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2958,7 +2958,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -3005,7 +3005,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -3174,7 +3174,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
     at 0008 and come back; no other table is touched."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     wa_tables = {
@@ -3279,7 +3279,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert wa_tables <= present
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
@@ -3744,8 +3744,11 @@ def test_b3_i2_budget_of_one_token_makes_suggest_reply_429_on_pg(
         account_id, wa_id="201111111111", last_inbound_at=now - timedelta(minutes=4)
     )
     settings = integration_app.state.settings
+    # SPRINT-11.1 A-2 (E2c): an enforced brand without a row is governed by the implicit
+    # ``trial`` plan (20,000), so the setting only decides under the entitlements kill switch
+    # — which is exactly the shared-budget-reader path this test exercises.
     integration_app.state.settings = settings.model_copy(
-        update={"ai_daily_token_budget_per_brand": 1}
+        update={"ai_daily_token_budget_per_brand": 1, "feature_entitlements_enforced": False}
     )
     from src.core.config import get_settings
 
@@ -4302,7 +4305,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
     the pre-cleanup marks the **older** one ``expired`` and the partial unique index
     ``uq_wa_reply_drafts_one_pending`` then rejects a second pending draft."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     command.downgrade(cfg, "0009")
@@ -4324,7 +4327,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
         _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 2
     )
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     statuses = dict(_rows("SELECT id, status FROM wa_reply_drafts"))
     assert statuses[older] == "expired" and statuses[newer] == "suggested"
     assert (
@@ -4563,7 +4566,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
     """B1-M1 — ``head ⇒ 0010 ⇒ head``: the five 0011 tables disappear and come back with
     their named constraints; 0010's partial index survives the round-trip."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0011 = {
         "brand_profiles",
@@ -4584,7 +4587,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
         r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
     }
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     assert tables_0011 <= _public_tables()
     constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
     assert {
@@ -5251,7 +5254,7 @@ def test_b1_migration_0013_round_trip_on_pg() -> None:
     widened outcome CHECK disappear and come back; orphaned rows are deleted on downgrade
     (documented) and unsettled reservations are mapped to ``error``."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     orphan = _cost_row("ok", brand_id=None)
@@ -5287,7 +5290,7 @@ def test_b1_migration_0013_round_trip_on_pg() -> None:
     with pytest.raises(DBAPIError):  # 9 chars > VARCHAR(8) on the 0012 schema
         _cost_row("ambiguous")
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     assert {"ix_ai_cost_log_mode_created", "ix_ai_cost_log_pending"} <= _indexes()
     assert {"settled_at", "request_id"} <= _columns()
     _cost_row("ambiguous")  # accepted again
@@ -5636,7 +5639,7 @@ def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
     """B3-M1 — ``head ⇒ 0011 ⇒ head``: the two 0012 tables disappear and come back with
     their named constraints and indexes; 0011's tables survive the round-trip."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0012 = {"brand_recommendations", "learning_signals"}
 
@@ -5649,7 +5652,7 @@ def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
     assert not tables_0012 & _public_tables()
     assert {"brand_profiles", "brand_evidence", "ai_cost_log"} <= _public_tables()
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     assert tables_0012 <= _public_tables()
     constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
     assert {
@@ -5707,7 +5710,7 @@ def test_c1_migration_0014_round_trip_on_pg() -> None:
     """``head ⇒ 0013 ⇒ head`` and ``head ⇒ 0012 ⇒ head``: the two 0014 tables, the three new
     columns and their named constraints disappear and come back; 0013 survives."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0014 = {"brand_entitlements", "entitlement_events"}
 
@@ -5743,7 +5746,7 @@ def test_c1_migration_0014_round_trip_on_pg() -> None:
         assert not named & _constraints()
         assert "ai_cost_log" in _public_tables()
         command.upgrade(cfg, "head")
-        assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+        assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
         assert tables_0014 <= _public_tables()
         assert named <= _constraints()
     indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
@@ -6586,3 +6589,108 @@ def test_a5_self_tenant_referral_is_422_and_stores_nothing_on_pg(
     )
     assert referrer == BRAND_ID
     _a_truncate()
+
+
+# --------------------------------------------------------- SPRINT-11.1 Part B (PG) --
+CATALOG_TABLES = {"ai_providers", "ai_models", "ai_routing"}
+CATALOG_CONSTRAINTS = {
+    "uq_ai_providers_slug",
+    "ck_ai_providers_slug",
+    "ck_ai_providers_kind",
+    "ck_ai_providers_one_credential",
+    "uq_ai_models_provider_name",
+    "ck_ai_models_capability",
+    "ck_ai_models_max_audio_seconds",
+    "ck_ai_models_price_shape",
+    "ck_ai_models_prices_non_negative",
+    "ck_ai_routing_purpose",
+    "uq_ai_routing_purpose_priority",
+    "uq_ai_routing_purpose_model",
+}
+
+
+def test_b1_migration_0015_round_trip_on_pg() -> None:
+    """B-1 (D-077): ``head ⇒ 0014 ⇒ head`` — the three catalog tables and their named
+    constraints disappear and come back; no existing table is touched (0014 survives)."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+    def _public_tables() -> set[str]:
+        return {t for (t,) in _rows("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+
+    def _constraints() -> set[str]:
+        return {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
+
+    assert len(CATALOG_CONSTRAINTS) >= 11
+    assert CATALOG_TABLES <= _public_tables()
+    assert CATALOG_CONSTRAINTS <= _constraints()
+    before = _public_tables() - CATALOG_TABLES
+
+    command.downgrade(cfg, "0014")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert not CATALOG_TABLES & _public_tables()
+    assert not CATALOG_CONSTRAINTS & _constraints()
+    assert _public_tables() == before  # nothing else dropped
+    assert {"brand_entitlements", "entitlement_events", "ai_cost_log"} <= _public_tables()
+
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
+    assert CATALOG_TABLES <= _public_tables()
+    assert CATALOG_CONSTRAINTS <= _constraints()
+
+    # FK semantics: ai_models.provider_id and ai_routing.model_id CASCADE.
+    fks = {
+        name: dtype
+        for (name, dtype) in _rows(
+            "SELECT conname, confdeltype FROM pg_constraint WHERE contype = 'f' "
+            "AND conrelid::regclass::text IN ('ai_models', 'ai_routing')"
+        )
+    }
+    # ``"char"`` arrives as bytes under asyncpg (as in the 0013/0014 round-trip tests).
+    assert {d.decode() if isinstance(d, bytes) else d for d in fks.values()} == {"c"}, fks
+    # Named CHECKs refuse bad rows.
+    pid = uuid4()
+    with pytest.raises(IntegrityError, match="ck_ai_providers_kind"):
+        _run(
+            "INSERT INTO ai_providers (id, slug, kind, base_url) VALUES (:id, 'x', 'other', 'h')",
+            {"id": pid},
+        )
+    _run(
+        "INSERT INTO ai_providers (id, slug, kind, base_url) VALUES (:id, 'p1', 'fake', 'fake://')",
+        {"id": pid},
+    )
+    with pytest.raises(IntegrityError, match="ck_ai_models_max_audio_seconds"):
+        _run(
+            "INSERT INTO ai_models (id, provider_id, model_name, capability, cost_per_minute_usd,"
+            " max_audio_seconds) VALUES (:id, :p, 'w', 'audio', 0.01, 121)",
+            {"id": uuid4(), "p": pid},
+        )
+    with pytest.raises(IntegrityError, match="ck_ai_models_price_shape"):
+        _run(
+            "INSERT INTO ai_models (id, provider_id, model_name, capability, prompt_per_1k,"
+            " max_audio_seconds) VALUES (:id, :p, 't', 'text', 0.1, 10)",
+            {"id": uuid4(), "p": pid},
+        )
+    mid = uuid4()
+    _run(
+        "INSERT INTO ai_models (id, provider_id, model_name, capability, prompt_per_1k,"
+        " completion_per_1k) VALUES (:id, :p, 't', 'text', 0, 0)",
+        {"id": mid, "p": pid},
+    )
+    _run(
+        "INSERT INTO ai_routing (id, purpose, model_id, priority) "
+        "VALUES (:id, 'content_generation', :m, 0)",
+        {"id": uuid4(), "m": mid},
+    )
+    with pytest.raises(IntegrityError, match="uq_ai_routing_purpose_model"):
+        _run(
+            "INSERT INTO ai_routing (id, purpose, model_id, priority) "
+            "VALUES (:id, 'content_generation', :m, 1)",
+            {"id": uuid4(), "m": mid},
+        )
+    _run("DELETE FROM ai_providers WHERE id = :id", {"id": pid})
+    assert _run("SELECT COUNT(*) FROM ai_models", scalar=True) == 0  # CASCADE
+    assert _run("SELECT COUNT(*) FROM ai_routing", scalar=True) == 0
+    _seed_fresh()
+    reset_db_caches()

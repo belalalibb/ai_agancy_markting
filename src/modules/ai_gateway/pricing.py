@@ -11,12 +11,28 @@ from __future__ import annotations
 import json
 import logging
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
 _USD = Decimal("0.000001")
 PRICE_KEYS = ("prompt_per_1k", "completion_per_1k")
+
+
+@runtime_checkable
+class PriceSource(Protocol):
+    """What :class:`~src.modules.ai_gateway.budget_guard.BudgetGuard` needs from a price
+    table (SPRINT-11.1 B-3): the static :class:`PriceTable` and the catalog's per-model
+    ``CatalogPriceTable`` both satisfy it."""
+
+    @property
+    def models(self) -> frozenset[str]: ...
+
+    def estimate_unit(self, model: str) -> tuple[Decimal, Decimal] | None: ...
+
+    def estimate(
+        self, model: str, prompt_tokens: int | None, completion_tokens: int | None
+    ) -> Decimal | None: ...
 
 
 class PriceTable:
@@ -81,4 +97,4 @@ def _parse_entry(entry: Any) -> tuple[Decimal, Decimal] | None:
     return values[0], values[1]
 
 
-__all__ = ["PRICE_KEYS", "PriceTable"]
+__all__ = ["PRICE_KEYS", "PriceSource", "PriceTable"]
