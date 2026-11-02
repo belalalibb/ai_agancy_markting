@@ -2362,7 +2362,10 @@ def test_a5_i1_token_budget_is_summed_from_ai_cost_log_only_on_pg(
         _cost_row(outcome, prompt_tokens=p, completion_tokens=c, created_at=created)
 
     assert _wa_combined_usage(BRAND_ID) == 170_000
-    # Lower the budget to the measured usage ⇒ 429 through the API.
+    # SPRINT-11.1 A-2 (E2c): a brand without an entitlement row is governed by the implicit
+    # ``trial`` plan (20,000/day) — the 170,000 measured above already exceeds it, so the
+    # 429 carries ``limit_kind=plan_daily_tokens``. The setting below is the kill-switch
+    # fallback only and no longer decides the outcome here.
     integration_app.state.settings = settings.model_copy(
         update={"ai_daily_token_budget_per_brand": 170_000}
     )
@@ -2380,7 +2383,8 @@ def test_a5_i1_token_budget_is_summed_from_ai_cost_log_only_on_pg(
         _wa_restore_budget(integration_app, settings)
     assert res.status_code == 429, res.text
     assert res.json()["detail"]["error"] == "generation_budget_exceeded"
-    assert res.json()["detail"]["limit_kind"] == "brand_daily_tokens"
+    assert res.json()["detail"]["limit_kind"] == "plan_daily_tokens"
+    assert res.json()["detail"]["budget"] == 20_000
     assert res.json()["detail"]["used"] == 170_000
 
 
@@ -3778,8 +3782,11 @@ def _wa_override_budget(integration_app: FastAPI, budget: int):  # noqa: ANN202
     from src.core.config import get_settings
 
     settings = integration_app.state.settings
+    # SPRINT-11.1 A-2 (E2c): the plan (implicit ``trial`` = 20,000) governs an enforced brand;
+    # these tests exercise the *shared budget reader* through the setting, so they run under
+    # the kill switch where ``ai_daily_token_budget_per_brand`` is the ceiling.
     integration_app.state.settings = settings.model_copy(
-        update={"ai_daily_token_budget_per_brand": budget}
+        update={"ai_daily_token_budget_per_brand": budget, "feature_entitlements_enforced": False}
     )
     integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
     return settings
@@ -6236,3 +6243,346 @@ def test_c6_c7_consent_none_blocks_signals_and_ctwa_referral_persists_on_pg(
     assert _run("SELECT COUNT(*) FROM learning_signals", scalar=True) == 0
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     reset_db_caches()
+
+
+# =========================================================================================
+# SPRINT-11.1 Part A — E1..E5 closures proven on PostgreSQL 17
+# =========================================================================================
+def _a_truncate() -> None:
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    reset_db_caches()
+
+
+def test_a1_content_plan_consent_none_writes_zero_signals_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-1 (E1): ``PATCH /learning-consent {none}`` ⇒ ``POST /brain/content-plan`` with 3 items
+    ⇒ ``brand_recommendations`` = 3 (materialized), ``content_items`` = 3, ``learning_signals``
+    = **0** (the planner's probe reproduced)."""
+    owner = _c_reset(integration_app)
+    with TestClient(integration_app) as client:
+        res = client.patch(
+            f"{API}/brands/{BRAND_ID}/learning-consent",
+            json={"learning_consent": "none"},
+            headers=owner,
+        )
+        assert res.status_code == 200 and res.json() == {"learning_consent": "none"}
+        ev = _brain_evidence_rows(client, owner)[0]["id"]
+        payload = {
+            "items": [
+                {
+                    "title": f"منشور {i}",
+                    "channel": "facebook" if i % 2 else "instagram",
+                    "body": f"نص المنشور رقم {i}",
+                    "rationale": "r",
+                    "evidence_ids": [ev],
+                }
+                for i in range(3)
+            ]
+        }
+        _brain_scripted_gateway(integration_app, payload)
+        res = client.post(f"{BRAIN_PG}/content-plan", headers=owner)
+        assert res.status_code == 200, res.text
+        assert len(res.json()["items"]) == 3
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+    assert _rows("SELECT status FROM brand_recommendations") == [("materialized",)] * 3
+    assert (
+        _run(
+            "SELECT COUNT(*) FROM content_items WHERE brand_id = :b", {"b": BRAND_ID}, scalar=True
+        )
+        == 3
+    )
+    assert _run("SELECT COUNT(*) FROM learning_signals", scalar=True) == 0
+    _a_truncate()
+
+
+def test_a2_unstored_brand_is_governed_by_trial_daily_tokens_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-2 (E2c): a brand without a ``brand_entitlements`` row shows ``daily_tokens=20,000`` in
+    ``GET /entitlement`` **and** is enforced at 20,000 (not the 200,000 setting): with 20,000
+    tokens already logged today the next call ⇒ ``EntitlementLimitError plan_daily_tokens``;
+    the kill switch hands the brand back to the setting."""
+    from src.modules.ai_gateway.budget_guard import EntitlementLimitError
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+    from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
+    from src.modules.entitlements.infrastructure.postgres_repository import (
+        PgCounterUsageReader,
+        PgEntitlementRepository,
+    )
+    from src.modules.entitlements.service import PgEntitlementLimitsReader
+
+    owner = _c_reset(integration_app)
+    with TestClient(integration_app) as client:
+        shown = client.get(f"{API}/brands/{BRAND_ID}/entitlement", headers=owner)
+        assert shown.status_code == 200, shown.text
+        assert shown.json()["plan"] == "trial"
+        assert shown.json()["limits"]["daily_tokens"] == 20_000
+    assert _run("SELECT COUNT(*) FROM brand_entitlements", scalar=True) == 0
+    _cost_row("ok", prompt_tokens=19_000, completion_tokens=1_000)  # exactly the trial ceiling
+    calls: list[object] = []
+
+    class P:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            calls.append(req)
+            return CompletionResult(
+                text="x",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=10, completion_tokens=5),
+            )
+
+    async def _attempt(enforced: bool) -> None:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            async with AsyncSession(eng) as session:
+                limits = PgEntitlementLimitsReader(
+                    PgEntitlementRepository(session),
+                    usage_reader=PgBudgetUsageReader(session),
+                    counters=PgCounterUsageReader(session),
+                    enforced=enforced,
+                )
+                # daily_budget = the 200,000 setting: it must NOT rescue the brand when enforced.
+                await _pg_guard(P(), daily_budget=200_000, limits=limits).complete(_fin_request())
+        finally:
+            await eng.dispose()
+
+    with pytest.raises(EntitlementLimitError) as info:
+        asyncio.run(_attempt(True))
+    reset_db_caches()
+    assert info.value.limit_kind == "plan_daily_tokens"
+    assert info.value.budget == 20_000 and info.value.used == 20_000
+    assert calls == []  # refused before the provider
+    assert len(_fin_rows()) == 1  # no reservation row for the refused call
+    asyncio.run(_attempt(False))  # kill switch ⇒ the 200,000 setting governs ⇒ goes through
+    reset_db_caches()
+    assert len(calls) == 1 and len(_fin_rows()) == 2
+    _a_truncate()
+
+
+def test_a2_eleventh_approval_is_402_on_pg(integration_app: FastAPI) -> None:
+    """A-2 (E2): trial ``monthly_posts = 10`` on real ``approval_events`` rows — 10 approvals
+    succeed, the 11th ⇒ **402 ``entitlement_quota_exceeded`` {counter, limit, used}** and the
+    item stays ``pending_approval``."""
+    owner = _c_reset(integration_app)
+    content = f"{API}/brands/{BRAND_ID}/content"
+    with TestClient(integration_app) as client:
+
+        def pending() -> str:
+            created = client.post(
+                f"{content}/items",
+                json={"channel": "facebook_page", "body": "منشور تجريبي للموافقة"},
+                headers=owner,
+            )
+            assert created.status_code == 201, created.text
+            item = created.json()["id"]
+            assert client.post(f"{content}/items/{item}/submit", headers=owner).status_code == 200
+            return item
+
+        for _ in range(10):
+            res = client.post(f"{content}/items/{pending()}/approve", headers=owner)
+            assert res.status_code == 200, res.text
+        eleventh = pending()
+        res = client.post(f"{content}/items/{eleventh}/approve", headers=owner)
+        assert res.status_code == 402, res.text
+        assert res.json()["detail"] == {
+            "error": "entitlement_quota_exceeded",
+            "message": "monthly plan quota reached for monthly_posts",
+            "counter": "monthly_posts",
+            "limit": 10,
+            "used": 10,
+        }
+        detail = client.get(f"{content}/items/{eleventh}", headers=owner)
+        assert detail.json()["status"] == "pending_approval"
+        usage = client.get(f"{API}/brands/{BRAND_ID}/entitlement", headers=owner).json()
+        assert usage["usage"]["monthly_posts"] == 10
+    assert (
+        _run("SELECT COUNT(*) FROM approval_events WHERE action = 'approved'", scalar=True) == 10
+    )
+    _a_truncate()
+
+
+def test_a2_fifty_first_conversation_webhook_200_then_suggest_402_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A-2 (E2): trial ``monthly_wa_conversations = 50`` on real ``wa_conversations`` rows —
+    50 new conversations ⇒ no flag; the 51st ⇒ webhook **200** with the conversation under
+    ``quota_exceeded`` (stored, never 429) and ``suggest-reply`` / send ⇒ **402**."""
+    owner = _c_reset(integration_app)
+    _wa_account_row(integration_encryption)
+    wa = f"{API}/brands/{BRAND_ID}/whatsapp"
+    ts = int(datetime.now(tz=UTC).timestamp())  # inside the 30-day counter window
+    with TestClient(integration_app) as client:
+        for i in range(50):
+            payload = _wa_payload(f"wamid.quota.{i}", ts=ts)
+            payload["entry"][0]["changes"][0]["value"]["messages"][0]["from"] = f"2010000{i:05d}"
+            res = _wa_post(client, payload)
+            assert res.status_code == 200, res.text
+            assert res.json()["inbound"] == 1 and res.json()["quota_exceeded"] == []
+        payload = _wa_payload("wamid.quota.51", ts=ts)
+        payload["entry"][0]["changes"][0]["value"]["messages"][0]["from"] = "201999999951"
+        res = _wa_post(client, payload)
+        assert res.status_code == 200, res.text  # never 429 to Meta
+        assert res.json()["inbound"] == 1
+        flagged = res.json()["quota_exceeded"]
+        assert len(flagged) == 1
+        conv_id = flagged[0]
+        wa_id = _run(
+            "SELECT wa_id FROM wa_conversations WHERE id = :c", {"c": UUID(conv_id)}, scalar=True
+        )
+        assert wa_id == "201999999951"
+        res = client.post(f"{wa}/conversations/{conv_id}/suggest-reply", headers=owner)
+        assert res.status_code == 402, res.text
+        assert res.json()["detail"] == {
+            "error": "entitlement_quota_exceeded",
+            "message": "monthly plan quota reached for monthly_wa_conversations",
+            "counter": "monthly_wa_conversations",
+            "limit": 50,
+            "used": 51,
+        }
+        res = client.post(
+            f"{wa}/conversations/{conv_id}/messages", json={"body": "hi"}, headers=owner
+        )
+        assert res.status_code == 402
+    assert _run("SELECT COUNT(*) FROM wa_conversations", scalar=True) == 51
+    assert _run("SELECT COUNT(*) FROM wa_messages", scalar=True) == 51
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 0
+    _a_truncate()
+
+
+def test_a4_reservation_tokens_count_against_brand_budget_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-4 (E4): the ``pending`` reservation row carries ``prompt_estimate + max_tokens`` so
+    ``combined_usage_since`` > 0 during the call window; ``settle_stale`` keeps those tokens
+    (``ambiguous`` counts conservatively); a successful settle replaces them with the actual
+    150; a refund deletes the row ⇒ 0."""
+    from src.modules.ai_gateway.budget_guard import (
+        estimate_prompt_tokens,
+        settle_stale_reservations,
+    )
+    from src.modules.ai_gateway.contract import AIError, ErrorCategory, Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+    from src.modules.ai_gateway.infrastructure.pg_cost_log import PgCostLogWriter
+
+    _fin_reset(integration_app)
+    req = _fin_request(max_tokens=300)
+    expected_reserved = estimate_prompt_tokens(req) + 300
+    seen: dict = {}
+
+    class Measuring:
+        """Provider that measures the brand's usage *during* the call (row is pending)."""
+
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, request):  # noqa: ANN001, ANN202
+            since = datetime.now(tz=UTC) - timedelta(hours=24)
+            seen["during"] = await PgCostLogWriter().brand_tokens_since(BRAND_ID, since)
+            eng = create_async_engine(TEST_DATABASE_URL)
+            try:
+                async with AsyncSession(eng) as session:
+                    seen["row"] = (
+                        await session.execute(
+                            text(
+                                "SELECT outcome, prompt_tokens, completion_tokens FROM ai_cost_log"
+                            )
+                        )
+                    ).one()
+            finally:
+                await eng.dispose()
+            return CompletionResult(
+                text="x",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=100, completion_tokens=50),
+            )
+
+    asyncio.run(_pg_guard(Measuring()).complete(req))
+    reset_db_caches()
+    assert seen["during"] == expected_reserved > 0
+    assert seen["row"][0] == "pending" and seen["row"][1] + seen["row"][2] == expected_reserved
+    assert _wa_combined_usage(BRAND_ID) == 150  # settled with the actual usage (B-1 unchanged)
+    (row,) = _fin_rows()
+    assert row[0] == "ok" and row[2] == 100 and row[3] == 50
+
+    # A reservation left ``pending`` (crash before settle) keeps its tokens through
+    # ``settle_stale`` ⇒ ``ambiguous`` and still counted.
+    now = datetime.now(tz=UTC)
+    _run("DELETE FROM ai_cost_log")
+    stale = _cost_row(
+        "pending",
+        prompt_tokens=expected_reserved - 300,
+        completion_tokens=300,
+        created_at=now - timedelta(seconds=90),
+        purpose="content_plan",
+    )
+    reset_db_caches()
+    assert _wa_combined_usage(BRAND_ID) == expected_reserved
+    assert (
+        asyncio.run(settle_stale_reservations(PgCostLogWriter(), now=now, timeout_seconds=30)) == 1
+    )
+    reset_db_caches()
+    assert _rows("SELECT id, outcome FROM ai_cost_log") == [(stale, "ambiguous")]
+    assert _wa_combined_usage(BRAND_ID) == expected_reserved  # still counted
+
+    # Refund (``NOT_REACHED_CATEGORIES`` — the provider did no work) deletes the pending row
+    # ⇒ 0 tokens; a reached-but-failed call (``provider_unavailable``) settles ``error``
+    # with prompt tokens only, which the brand budget does not count.
+    _run("DELETE FROM ai_cost_log")
+    reset_db_caches()
+
+    class Unreachable:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, request):  # noqa: ANN001, ANN202
+            raise AIError(ErrorCategory.BAD_REQUEST)
+
+    with pytest.raises(AIError):
+        asyncio.run(_pg_guard(Unreachable()).complete(req))
+    reset_db_caches()
+    assert _fin_rows() == [] and _wa_combined_usage(BRAND_ID) == 0
+    _a_truncate()
+
+
+def test_a5_self_tenant_referral_is_422_and_stores_nothing_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-5 (E5): ``POST /brands {referred_by_brand_id: <own brand>}`` ⇒ **422
+    ``referral_self_tenant``** and no ``brands`` row; a brand of another tenant as referrer
+    ⇒ 201 with ``referred_by_brand_id`` persisted."""
+    owner = _c_reset(integration_app)
+    before = _run("SELECT COUNT(*) FROM brands", scalar=True)
+    with TestClient(integration_app) as client:
+        res = client.post(
+            f"{API}/brands",
+            json={"slug": "self-ref", "name": "Self", "referred_by_brand_id": str(BRAND_ID)},
+            headers=owner,
+        )
+        assert res.status_code == 422, res.text
+        assert res.json()["detail"] == {
+            "error": "referral_self_tenant",
+            "message": "a brand cannot be referred by a brand of the same tenant",
+        }
+        assert _run("SELECT COUNT(*) FROM brands", scalar=True) == before
+        agency = integration_headers(integration_app.state.settings, AGENCY_ID)
+        res = client.post(
+            f"{API}/brands",
+            json={"slug": "agency-ref", "name": "Agency", "referred_by_brand_id": str(BRAND_ID)},
+            headers=agency,
+        )
+        assert res.status_code == 201, res.text
+    referrer = _run(
+        "SELECT referred_by_brand_id FROM brands WHERE slug = 'agency-ref'", scalar=True
+    )
+    assert referrer == BRAND_ID
+    _a_truncate()

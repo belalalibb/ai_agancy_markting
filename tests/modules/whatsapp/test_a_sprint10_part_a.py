@@ -422,11 +422,14 @@ async def test_a4_wa_draft_tokens_block_content_generate_in_the_fake_world(
     wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, auth_headers, roles: None, wa_account
 ) -> None:
     """Fake mirror of A4-I1 (SPRINT-11 B-1): one WhatsApp suggestion settled in the shared
-    ``ai_cost_log`` with ``budget + 1`` tokens ⇒ ``/generate`` **and** ``/suggest`` 429."""
+    ``ai_cost_log`` with ``budget + 1`` tokens ⇒ ``/generate`` **and** ``/suggest`` 429.
+    SPRINT-11.1 A-2 (E2c): the governing budget of a brand without an entitlement row is the
+    implicit ``trial`` plan (20,000), so the 429 carries ``limit_kind=plan_daily_tokens``."""
     from src.modules.ai_gateway.cost_log import CostEntry, CostOutcome
+    from src.modules.entitlements.domain.models import DEFAULT_LIMITS, Plan
 
     conv = await _seed_conversation(wa_repo, wa_account.id)
-    budget = wa_app.state.settings.ai_daily_token_budget_per_brand
+    budget = DEFAULT_LIMITS[Plan.TRIAL].daily_tokens
     await wa_app.state.cost_writer.reserve(
         CostEntry(
             brand_id=BRAND_ID,
@@ -457,7 +460,8 @@ async def test_a4_wa_draft_tokens_block_content_generate_in_the_fake_world(
         )
         assert res.status_code == 429, res.text
         assert res.json()["detail"]["error"] == "generation_budget_exceeded"
-        assert res.json()["detail"]["limit_kind"] == "brand_daily_tokens"
+        assert res.json()["detail"]["limit_kind"] == "plan_daily_tokens"
+        assert res.json()["detail"]["budget"] == budget
         assert "Retry-After" in res.headers
         again = _suggest(client, owner, conv.id)
         assert again.status_code == 429  # the same shared allowance

@@ -40,6 +40,11 @@ from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.domain.lifecycle import Action
 from src.modules.content.domain.models import Channel, ContentItem, ContentStatus
 from src.modules.content.domain.repository import ContentRepository
+from src.modules.content.entitlements_port import (
+    CounterGuard,
+    CounterQuotaExceededError,
+    get_counter_guard,
+)
 from src.modules.content.exceptions import (
     BodyTooLongError,
     ChannelNotActivatedError,
@@ -122,6 +127,8 @@ def get_content_service(
 
 Service = Annotated[ContentService, Depends(get_content_service)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
+# SPRINT-11.1 A-2 (E2): consumer-owned port, bound by ``src/main.py``; ``None`` ⇒ no check.
+PostQuota = Annotated[CounterGuard | None, Depends(get_counter_guard)]
 LimitQuery = Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)]
 CursorQuery = Annotated[str | None, Query(max_length=128)]
 StatusQuery = Annotated[StatusLiteral | None, Query(alias="status")]
@@ -141,6 +148,20 @@ async def _authorise(
     except TenancyError as exc:
         raise tenancy_to_http(exc) from exc
     return role
+
+
+def quota_exceeded_to_http(exc: CounterQuotaExceededError) -> HTTPException:
+    """SPRINT-11.1 A-2 (E2): 402 ``entitlement_quota_exceeded`` ``{counter, limit, used}``."""
+    return HTTPException(
+        status.HTTP_402_PAYMENT_REQUIRED,
+        detail={
+            "error": "entitlement_quota_exceeded",
+            "message": f"monthly plan quota reached for {exc.counter}",
+            "counter": exc.counter,
+            "limit": exc.limit,
+            "used": exc.used,
+        },
+    )
 
 
 def to_http(exc: ContentError) -> HTTPException:
@@ -468,10 +489,17 @@ async def approve_item(
     actor: CurrentUserFresh,
     service: Service,
     resolver: Resolver,
+    quota: PostQuota,
     payload: ApprovalNoteRequest | None = None,
 ) -> ContentItemPublic:
     """Roles: **OWNER only** — MANAGER ⇒ 403 ``approval_requires_owner``. An owner may approve
-    their own draft. Logs an ``approved`` event."""
+    their own draft. Logs an ``approved`` event. SPRINT-11.1 A-2 (E2): the plan's
+    ``monthly_posts`` ceiling is checked first ⇒ **402 ``entitlement_quota_exceeded``**."""
+    if quota is not None:
+        try:
+            await quota.ensure_can_approve_post(brand_id)
+        except CounterQuotaExceededError as exc:
+            raise quota_exceeded_to_http(exc) from exc
     return await _act(
         service,
         resolver,

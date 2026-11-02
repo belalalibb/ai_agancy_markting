@@ -52,6 +52,11 @@ from src.modules.whatsapp.client import WhatsAppCloudClient
 from src.modules.whatsapp.consent import BrandConsentReader
 from src.modules.whatsapp.domain.models import Conversation, ConversationStatus, Message
 from src.modules.whatsapp.domain.repository import Cursor, IndependentWrites, WhatsAppRepository
+from src.modules.whatsapp.entitlements_port import (
+    CounterGuard,
+    CounterQuotaExceededError,
+    get_counter_guard,
+)
 from src.modules.whatsapp.exceptions import (
     AccountAlreadyExistsError,
     AccountNotFoundError,
@@ -137,6 +142,7 @@ Client = Annotated[WhatsAppCloudClient, Depends(get_whatsapp_client)]
 Encryption = Annotated[TokenEncryptionService, Depends(get_encryption)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
 Consent = Annotated[BrandConsentReader, Depends(get_brand_consent_reader)]  # C-6 (D-080)
+Quota = Annotated[CounterGuard | None, Depends(get_counter_guard)]  # SPRINT-11.1 A-2 (E2)
 Limiter = Annotated[RateLimiter, Depends(get_rate_limiter)]
 LimitQuery = Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)]
 CursorQuery = Annotated[str | None, Query(max_length=128)]
@@ -190,6 +196,31 @@ async def _authorise(
     except TenancyError as exc:
         raise tenancy_to_http(exc) from exc
     return role
+
+
+def quota_exceeded_to_http(exc: CounterQuotaExceededError) -> HTTPException:
+    """SPRINT-11.1 A-2 (E2): 402 ``entitlement_quota_exceeded`` ``{counter, limit, used}``."""
+    return HTTPException(
+        status.HTTP_402_PAYMENT_REQUIRED,
+        detail={
+            "error": "entitlement_quota_exceeded",
+            "message": f"monthly plan quota reached for {exc.counter}",
+            "counter": exc.counter,
+            "limit": exc.limit,
+            "used": exc.used,
+        },
+    )
+
+
+async def _ensure_quota(quota: CounterGuard | None, brand_id: UUID) -> None:
+    """``suggest-reply`` and the outbound sends refuse with 402 while the brand is over its
+    ``monthly_wa_conversations`` ceiling (the webhook stored the message anyway)."""
+    if quota is None:
+        return
+    try:
+        await quota.ensure_within_conversation_quota(brand_id)
+    except CounterQuotaExceededError as exc:
+        raise quota_exceeded_to_http(exc) from exc
 
 
 def to_http(exc: WhatsAppError) -> HTTPException:
@@ -482,9 +513,11 @@ async def send_text(
     resolver: Resolver,
     inbox: Inbox,
     response: Response,
+    quota: Quota,
     idempotency_key: IdempotencyKey = None,
 ) -> SendResultPublic:
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    await _ensure_quota(quota, brand_id)
     conv: Conversation | None = None
     try:
         conv = await inbox.get_conversation(brand_id, conversation_id)
@@ -519,9 +552,11 @@ async def send_template(
     resolver: Resolver,
     inbox: Inbox,
     response: Response,
+    quota: Quota,
     idempotency_key: IdempotencyKey = None,
 ) -> SendResultPublic:
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    await _ensure_quota(quota, brand_id)
     conv: Conversation | None = None
     try:
         conv = await inbox.get_conversation(brand_id, conversation_id)
@@ -552,6 +587,7 @@ async def send_template(
     summary="AI reply suggestion (draft only, never sent) — OWNER/MANAGER",
     responses={
         409: {"description": "no_inbound_to_reply / draft_pending"},
+        402: {"description": "entitlement_quota_exceeded (SPRINT-11.1 A-2)"},
         429: {"description": "generation_rate_limited / generation_budget_exceeded (A-5)"},
     },
 )
@@ -562,9 +598,11 @@ async def suggest_reply(
     resolver: Resolver,
     suggestions: Suggestions,
     brands: BrandRepo,
+    quota: Quota,
     payload: SuggestReplyRequest | None = None,
 ) -> ReplyDraftPublic:
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    await _ensure_quota(quota, brand_id)
     payload = payload or SuggestReplyRequest()
     brand = await brands.get(brand_id)
     try:

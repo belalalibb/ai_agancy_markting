@@ -260,6 +260,12 @@ class BudgetGuard:
                 provider=self.name[:32],
                 model=model[:64],
                 credential_mode=ctx.credential_mode,
+                # SPRINT-11.1 A-4 (E4): the reservation carries the estimated tokens so a
+                # ``pending`` / ``ambiguous`` row counts against the brand's daily tokens
+                # (not only the platform USD cap). ``_settle_ok`` replaces them with the
+                # provider's actual usage; ``refund`` deletes the row.
+                prompt_tokens=prompt_estimate,
+                completion_tokens=req.max_tokens,
                 estimated_cost_usd=reservation,
                 latency_ms=0,
                 prompt_version=ctx.prompt_version,

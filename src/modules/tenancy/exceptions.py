@@ -45,3 +45,10 @@ class GrantAlreadyActiveError(TenancyError):
 
 class GrantNotFoundError(TenancyError):
     error = "grant_not_found"
+
+
+class SelfReferralError(TenancyError):
+    """SPRINT-11.1 A-5 (E5): a brand cannot be referred by a brand of the same tenant
+    (D-078 would otherwise credit a tenant for referring itself) ⇒ 422."""
+
+    error = "referral_self_tenant"

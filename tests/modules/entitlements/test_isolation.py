@@ -61,7 +61,9 @@ def test_removability_doc_is_complete() -> None:
         "/api/v1/admin/entitlements/activate",
         "/api/v1/admin/entitlements/{brand_id}",
         "/api/v1/brands/{brand_id}/entitlement",
-        "/api/v1/brands/{brand_id}/learning-consent",
+        "consent `PATCH` route (column `learning_consent`) lives in **`tenancy`**",  # A-3 (E3)
+        "entitlements_port.py",  # SPRINT-11.1 A-2 (E2): consumer-owned counter ports
+        "counter_guard_dependency",
         "FEATURE_ENTITLEMENTS_ENFORCED",
         "PLATFORM_ADMIN_USER_IDS",
         "get_entitlement_limits_reader",

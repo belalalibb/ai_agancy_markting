@@ -29,6 +29,7 @@ from src.modules.tenancy.exceptions import (
     GranteeIsOwnerError,
     GrantNotFoundError,
     InsufficientRoleError,
+    SelfReferralError,
     TenantNotFoundError,
     TenantSlugTakenError,
 )
@@ -75,12 +76,14 @@ class TenancyService:
             raise TenantNotFoundError()
         if await self._brands.get_by_owner_and_slug(owner_tenant_id, slug) is not None:
             raise BrandSlugTakenError(f"brand slug {slug!r} already exists for this tenant")
-        if (
-            referred_by_brand_id is not None
-            and await self._brands.get(referred_by_brand_id) is None
-        ):
-            # SPRINT-11 C-6 (D-078): the referrer must exist — 404 hides nothing sensitive here.
-            raise BrandNotFoundError("referred_by_brand_id does not exist")
+        if referred_by_brand_id is not None:
+            referrer = await self._brands.get(referred_by_brand_id)
+            if referrer is None:
+                # SPRINT-11 C-6 (D-078): the referrer must exist — 404 hides nothing here.
+                raise BrandNotFoundError("referred_by_brand_id does not exist")
+            if referrer.owner_tenant_id == owner_tenant_id:
+                # SPRINT-11.1 A-5 (E5): no self-referral across a tenant's own brands.
+                raise SelfReferralError("a brand cannot be referred by a brand of the same tenant")
         return await self._brands.add(
             Brand(
                 owner_tenant_id=owner_tenant_id,

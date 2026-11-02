@@ -442,10 +442,13 @@ class BrandAdvisor:
             )
             items.append((recommendation, item))
         await self._repo.add_recommendations([rec for rec, _ in items])
-        for rec, _ in items:
-            await self._repo.add_learning_signal(
-                self._signal(rec, "materialized", now, {"channel": rec.provenance["channel"]})
-            )
+        # SPRINT-11.1 A-1 (E1, D-080): ``learning_consent='none'`` ⇒ the plan is still
+        # materialised, but no ``learning_signals`` row is written for any of its items.
+        if await may_write_signal(self._consent, brand_id):
+            for rec, _ in items:
+                await self._repo.add_learning_signal(
+                    self._signal(rec, "materialized", now, {"channel": rec.provenance["channel"]})
+                )
         logger.info(
             "brain content plan: brand=%s items=%s dropped=%s model=%s",
             brand_id,

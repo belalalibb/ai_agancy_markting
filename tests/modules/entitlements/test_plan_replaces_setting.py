@@ -1,6 +1,8 @@
-"""SPRINT-11 C-1 — a **stored** active entitlement's ``daily_tokens`` *replace*
-``ai_daily_token_budget_per_brand`` inside the ``BudgetGuard``; brands without a row (implicit
-``trial``) and the kill switch keep the global setting."""
+"""SPRINT-11 C-1 / SPRINT-11.1 A-2 (E2c) — the brand's plan ``daily_tokens`` *replace*
+``ai_daily_token_budget_per_brand`` inside the ``BudgetGuard``: a stored active plan governs
+with its own limits, a brand **without a row is governed by the implicit ``trial``** (20,000 —
+what ``GET /entitlement`` shows is what is enforced), and **only** the kill switch falls back to
+the global setting. A stored but inactive row ⇒ ``plan_inactive`` (never silently trial)."""
 
 from __future__ import annotations
 
@@ -17,7 +19,12 @@ from src.modules.ai_gateway.budget_guard import (
 from src.modules.ai_gateway.facades import FakeProvider
 from src.modules.ai_gateway.gateway import CompletionRequest
 from src.modules.ai_gateway.pricing import PriceTable
-from src.modules.entitlements.domain.models import BrandEntitlement, Plan, PlanLimits
+from src.modules.entitlements.domain.models import (
+    DEFAULT_LIMITS,
+    BrandEntitlement,
+    Plan,
+    PlanLimits,
+)
 from src.modules.entitlements.service import PgEntitlementLimitsReader
 
 from tests.conftest import BRAND_ID, OWNER_ID
@@ -91,16 +98,36 @@ async def test_stored_plan_daily_tokens_replace_the_global_setting(store: FakeSt
     assert info.value.budget == 1000 and info.value.used == 1000
 
 
-async def test_brand_without_row_keeps_the_global_setting(store: FakeStore) -> None:
-    """Implicit ``trial`` (no row) ⇒ ``check`` returns False ⇒ ``DailyBudget(setting)`` applies
-    even though the trial default (20_000) would have allowed the call."""
+async def test_brand_without_row_is_governed_by_trial_limits(store: FakeStore) -> None:
+    """A-2 (E2c): implicit ``trial`` (no row) ⇒ ``check`` returns True and the trial
+    ``daily_tokens`` (20,000) govern — the global setting is ignored in both directions."""
     usage = _Usage(500)
     reader = PgEntitlementLimitsReader(_repo(store, daily_tokens=None), usage_reader=usage)
-    assert await reader.check(BRAND_ID, "content_plan") is False
-    with pytest.raises(BrandBudgetExceededError) as info:
-        await _guard(reader, usage, setting=100).complete(_req())
-    assert info.value.limit_kind == "brand_daily_tokens"
-    await _guard(reader, usage, setting=1000).complete(_req())  # setting allows ⇒ ok
+    assert await reader.check(BRAND_ID, "content_plan") is True
+    # setting=100 would refuse; the trial plan (20,000) allows ⇒ ok.
+    await _guard(reader, usage, setting=100).complete(_req())
+    # At the trial ceiling the plan refuses even though the setting (10**9) would allow.
+    over = _Usage(DEFAULT_LIMITS[Plan.TRIAL].daily_tokens)
+    reader = PgEntitlementLimitsReader(_repo(store, daily_tokens=None), usage_reader=over)
+    with pytest.raises(EntitlementLimitError) as info:
+        await _guard(reader, over, setting=10**9).complete(_req())
+    assert info.value.limit_kind == "plan_daily_tokens"
+    assert info.value.budget == 20_000
+    assert info.value.used == 20_000
+
+
+async def test_stored_inactive_row_raises_plan_inactive_not_trial(store: FakeStore) -> None:
+    """A-2: a suspended / expired stored plan is refused with ``plan_inactive`` — it never
+    degrades to the trial limits (the plan is what the customer bought)."""
+    usage = _Usage(0)
+    repo = _repo(store, daily_tokens=1000)
+    repo.entitlements[BRAND_ID] = repo.entitlements[BRAND_ID].model_copy(
+        update={"is_active": False}
+    )
+    reader = PgEntitlementLimitsReader(repo, usage_reader=usage)
+    with pytest.raises(EntitlementLimitError) as info:
+        await _guard(reader, usage, setting=10**9).complete(_req())
+    assert info.value.limit_kind == "plan_inactive"
 
 
 async def test_kill_switch_and_no_reader_fall_back_to_the_setting(store: FakeStore) -> None:
@@ -112,5 +139,5 @@ async def test_kill_switch_and_no_reader_fall_back_to_the_setting(store: FakeSto
     await _guard(off, usage, setting=1000).complete(_req())  # plan=10 ignored under the switch
     with pytest.raises(BrandBudgetExceededError):
         await _guard(None, usage, setting=100).complete(_req())
-    # Unknown brand without a row behaves like any implicit trial.
+    # Under the switch even an unknown brand (implicit trial) is handed to the setting.
     assert await off.check(uuid4(), "content_plan") is False

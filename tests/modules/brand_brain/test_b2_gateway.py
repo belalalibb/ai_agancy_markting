@@ -213,6 +213,33 @@ async def test_budget_guard_reserves_then_settles_ok_with_estimate() -> None:
     assert "rules" not in dumped and "profile + evidence" not in dumped  # no prompt text
 
 
+async def test_a4_reservation_row_carries_estimated_tokens_until_settled() -> None:
+    """SPRINT-11.1 A-4 (E4): the ``pending`` row is written with ``prompt_tokens =
+    estimate`` and ``completion_tokens = max_tokens`` so the brand's daily budget already
+    counts the reservation; the successful settle replaces both with the provider's actual
+    usage (B-1: the final count is the real 150-style figure, not the estimate)."""
+    from src.modules.ai_gateway.budget_guard import estimate_prompt_tokens
+
+    writer = FakeCostLogWriter()
+    snapshot: dict = {}
+
+    async def spy(entry) -> None:  # noqa: ANN001
+        snapshot["pending"] = (entry.outcome, entry.prompt_tokens, entry.completion_tokens)
+
+    writer.on_reserve = spy
+    req = _req(json_mode=False, max_tokens=321)
+    result = await _guard(FakeProvider(), writer).complete(req)
+    assert snapshot["pending"] == (CostOutcome.PENDING, estimate_prompt_tokens(req), 321)
+    assert estimate_prompt_tokens(req) > 0
+    entry = writer.entries[0]
+    assert entry.outcome is CostOutcome.OK
+    assert (entry.prompt_tokens, entry.completion_tokens) == (
+        result.usage.prompt_tokens,
+        result.usage.completion_tokens,
+    )
+    assert (entry.prompt_tokens, entry.completion_tokens) != snapshot["pending"][1:]
+
+
 async def test_budget_guard_settles_error_for_provider_failures_and_reraises() -> None:
     writer = FakeCostLogWriter()
     provider = HttpOpenAICompatibleProvider(
