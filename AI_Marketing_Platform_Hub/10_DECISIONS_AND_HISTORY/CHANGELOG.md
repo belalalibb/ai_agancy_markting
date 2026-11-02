@@ -49,3 +49,9 @@
 - `sprints/POST_M7_STRATEGIC_PLAN.md` (PR #35/#36 ⇒ `main` @ `d7e7a70`): استراتيجية/اقتصاد/معمارية حتى V1 مع أدلة حيّة (تسعير Meta WhatsApp وOpenAI، GitHub API لـ12 مستودعاً).
 - **المالك اعتمد Q1–Q17** ⇒ D-075–D-082 + مراجعة D-017/D-056/D-057 (LiteLLM وTemporal مرفوضان في V1)؛ تسعير بالجنيه المصري (1,490/3,990/9,900)؛ `ai_cost_log` مصدر وحيد + `BudgetGuard`؛ كتالوج مزودين بتحكم إداري كامل (SPRINT-11.1)؛ Safe Removability؛ `learning_consent`؛ الاحتفاظ؛ حدود واتساب.
 - **SPRINT-11 صدر** في `CURRENT_DIRECTIVE.md` (Part A: B2–B6 + Part B: المالية/B1 + Part C: entitlements + CTWA referral + learning_consent + Removability)؛ `SPRINT-11.1` (ProviderCatalog + `/admin/ai/*` + probe) يتبعه قبل L1.
+
+### المحطة 9: 1–2 نوفمبر 2026 — SPRINT-11 مقبول (المالية D-075 + الباقات D-073 + الإزالة الآمنة D-076) وإصدار SPRINT-11.1
+- **SPRINT-11** (A: إغلاق B2–B6 — SSRF بـ`getaddrinfo`/`is_global`، robots متدفق، `RevisionPublic`، سباق `reply_template`، سقف `phone_number_id=8` قبل HMAC؛ B: `ai_cost_log` ملك `ai_gateway` + هجرة 0013 + `BudgetGuard.reserve/settle/refund` + fail-closed + سقف المنصة $25 + حذف `UNION ALL`؛ C: `entitlements` + هجرة 0014 + `PlatformAdmin` + `learning_consent` + إحالة CTWA + `REMOVABILITY.md`) رُوجع مستقلاً على PG 17.11 UTF8 وقُبل ودُمج (PR #39 ⇒ `main` @ `8fbbe8c`): 1,331 اختباراً، 98.11%، 66 مساراً محمياً، هجرات 0001–0014.
+- مراجعة المخطط أثبتت سبع نتائج غير مانعة بمِجسّ حي (E1–E5, F1, F2 — `sprints/SPRINT-11_REVIEW.md`) ⇒ تُغلق في **SPRINT-11.1 Part A**.
+- **SPRINT-11.1 صدر** في `CURRENT_DIRECTIVE.md`: Part A الإغلاقات ⇒ Part B كتالوج المزودين (D-077: `ai_providers`/`ai_models`/`ai_routing` + هجرة 0015 + تسعير رموز/صوت + بدائل مرتّبة + `FEATURE_PROVIDER_CATALOG_ENABLED`) ⇒ Part C `/api/v1/admin/ai/*` (11 مساراً + probe) ⇒ `PROTECTED_ROUTE_COUNT` 77.
+- نظافة GitHub: حُذفت فروع `wip/*` السبعة بعد الدمج.
