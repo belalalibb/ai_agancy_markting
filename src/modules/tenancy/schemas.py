@@ -90,3 +90,16 @@ class GrantOut(BaseModel):
     @classmethod
     def from_domain(cls, grant: BrandAccessGrant) -> GrantOut:
         return cls.model_validate(grant.model_dump())
+
+
+class LearningConsentUpdate(BaseModel):
+    """SPRINT-11.1 A-3 (E3): ``PATCH /brands/{id}/learning-consent`` body — the column is
+    owned by ``tenancy`` (D-080), so the route lives here, not in a removable module."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    learning_consent: LearningConsent
+
+
+class LearningConsentOut(BaseModel):
+    learning_consent: LearningConsent

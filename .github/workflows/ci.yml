@@ -5,7 +5,7 @@
 # mark every one of them "Required" in branch protection (directive §8):
 #
 #   lint         ruff check + ruff format --check   on  src tests alembic scripts
-#   unit         pytest -m "not integration" --cov=src --cov-fail-under=95   (no DB)
+#   unit         pytest -m "not integration" --cov=src --cov-fail-under=95 --cov-precision=2 (no DB)
 #   integration  pytest -m integration against a real PostgreSQL 16 + pgvector
 #                service container (pgvector/pgvector:pg16). `CREATE EXTENSION
 #                vector` is performed by alembic migration 0001 — no manual step.
@@ -68,7 +68,7 @@ jobs:
       - name: Install (dev extras)
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
       - name: pytest (unit, coverage gate 95%)
-        run: pytest -m "not integration" --cov=src --cov-report=term-missing --cov-fail-under=95
+        run: pytest -m "not integration" --cov=src --cov-report=term-missing --cov-fail-under=95 --cov-precision=2
 
   integration:
     name: integration

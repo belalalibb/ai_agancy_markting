@@ -32,7 +32,7 @@ from src.modules.tenancy.dependencies import (
     get_grant_repository,
     get_tenant_repository,
 )
-from src.modules.tenancy.domain.access import BrandAccessResolver
+from src.modules.tenancy.domain.access import GRANT_ROLES, BrandAccessResolver
 from src.modules.tenancy.domain.repository import (
     BrandAccessGrantRepository,
     BrandRepository,
@@ -45,6 +45,7 @@ from src.modules.tenancy.exceptions import (
     GranteeIsOwnerError,
     GrantNotFoundError,
     InsufficientRoleError,
+    SelfReferralError,
     TenancyError,
     TenantNotFoundError,
     TenantSlugTakenError,
@@ -55,6 +56,8 @@ from src.modules.tenancy.schemas import (
     BrandWithRoleOut,
     GrantCreate,
     GrantOut,
+    LearningConsentOut,
+    LearningConsentUpdate,
     TenantOut,
 )
 from src.modules.tenancy.service import TenancyService
@@ -168,6 +171,29 @@ async def revoke_grant(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.patch(
+    "/brands/{brand_id}/learning-consent",
+    response_model=LearningConsentOut,
+    summary="Set the brand's learning consent (OWNER only, fresh session) — D-080",
+)
+async def set_learning_consent(
+    brand_id: UUID,
+    payload: LearningConsentUpdate,
+    actor: CurrentUserFresh,
+    service: Service,
+) -> LearningConsentOut:
+    """SPRINT-11.1 A-3 (E3): moved here from ``entitlements`` — ``brands.learning_consent``
+    is a ``tenancy`` column, so consent control survives removing that module (D-076)."""
+    try:
+        await service.require_role(actor.tenant_id, brand_id, GRANT_ROLES)
+        brand = await service.set_learning_consent(
+            actor.tenant_id, brand_id, payload.learning_consent
+        )
+    except TenancyError as exc:
+        raise to_http(exc) from exc
+    return LearningConsentOut(learning_consent=brand.learning_consent)
+
+
 # ---------------------------------------------------------- error mapping --
 _STATUS: dict[type[TenancyError], int] = {
     TenantNotFoundError: status.HTTP_404_NOT_FOUND,
@@ -178,6 +204,7 @@ _STATUS: dict[type[TenancyError], int] = {
     GrantAlreadyActiveError: status.HTTP_409_CONFLICT,
     InsufficientRoleError: status.HTTP_403_FORBIDDEN,
     GranteeIsOwnerError: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    SelfReferralError: status.HTTP_422_UNPROCESSABLE_CONTENT,  # SPRINT-11.1 A-5 (E5)
 }
 
 

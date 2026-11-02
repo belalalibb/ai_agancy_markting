@@ -45,7 +45,7 @@ from src.modules.ai_gateway.budget import (
 from src.modules.ai_gateway.contract import AIError, ErrorCategory
 from src.modules.ai_gateway.cost_log import CostEntry, CostLogWriter, CostOutcome
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
-from src.modules.ai_gateway.pricing import PriceTable
+from src.modules.ai_gateway.pricing import PriceSource
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +151,13 @@ class CostLogUnavailableError(BudgetGuardError):
 # ----------------------------------------------------------------- context --
 @dataclass(frozen=True, slots=True)
 class BudgetContext:
-    """What the guard needs to know about one call (derived from the request)."""
+    """What the guard needs to know about one call (derived from the request).
 
-    brand_id: UUID
+    SPRINT-11.1 (§5-5 note 3): ``brand_id`` is ``None`` only for ``purpose="admin_probe"`` —
+    the brand-level checks (step 2) are skipped, the platform cap and the cost row remain.
+    """
+
+    brand_id: UUID | None
     purpose: str
     credential_mode: str
     prompt_version: str
@@ -183,7 +187,7 @@ class BudgetGuard:
         inner: AIGateway,
         *,
         writer: CostLogWriter,
-        price_table: PriceTable,
+        price_table: PriceSource,
         daily_budget: DailyBudget,
         platform_daily_usd_cap: Decimal,
         usage_reader: BudgetUsageReader,
@@ -228,10 +232,10 @@ class BudgetGuard:
 
         # 2. brand tokens — the plan's daily_tokens replace the global setting when a stored
         #    active entitlement governs the brand (C-1); otherwise the setting applies.
-        governed = False
-        if self._limits is not None:
+        governed = ctx.brand_id is None  # admin_probe: no brand to govern
+        if not governed and self._limits is not None and ctx.brand_id is not None:
             governed = bool(await self._limits.check(ctx.brand_id, ctx.purpose))
-        if not governed:
+        if not governed and ctx.brand_id is not None:
             verdict = await self._daily_budget.check(
                 ctx.brand_id, usage_reader=self._usage_reader, now=now
             )
@@ -260,6 +264,12 @@ class BudgetGuard:
                 provider=self.name[:32],
                 model=model[:64],
                 credential_mode=ctx.credential_mode,
+                # SPRINT-11.1 A-4 (E4): the reservation carries the estimated tokens so a
+                # ``pending`` / ``ambiguous`` row counts against the brand's daily tokens
+                # (not only the platform USD cap). ``_settle_ok`` replaces them with the
+                # provider's actual usage; ``refund`` deletes the row.
+                prompt_tokens=prompt_estimate,
+                completion_tokens=req.max_tokens,
                 estimated_cost_usd=reservation,
                 latency_ms=0,
                 prompt_version=ctx.prompt_version,

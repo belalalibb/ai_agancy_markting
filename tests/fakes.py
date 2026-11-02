@@ -1701,3 +1701,88 @@ class FakeCounterUsageReader:
 
     async def monthly_used(self, brand_id: UUID, counter: str, *, since) -> int:  # noqa: ANN001
         return self.used.get((brand_id, counter), 0)
+
+
+# -------------------------------------------------------- SPRINT-11.1 C: AI catalog --
+class FakeCatalogRepository:
+    """In-memory ``CatalogRepository`` for the ``/admin/ai/*`` route tests (no PG). Mirrors the
+    PG repository's contract: unique ``slug`` / ``(provider_id, model_name)`` ⇒
+    ``CatalogConflictError``; deleting a provider cascades to its models and routes."""
+
+    def __init__(self) -> None:
+        self.providers: dict[UUID, Any] = {}
+        self.models: dict[UUID, Any] = {}
+        self.routes: list[Any] = []
+
+    def _conflict(self, message: str) -> Exception:
+        from src.modules.ai_gateway.catalog.service import CatalogConflictError
+
+        return CatalogConflictError(message)
+
+    async def list_providers(self) -> list[Any]:
+        return sorted(self.providers.values(), key=lambda p: p.slug)
+
+    async def get_provider(self, provider_id: UUID) -> Any | None:
+        return self.providers.get(provider_id)
+
+    async def add_provider(self, provider: Any) -> Any:
+        if any(p.slug == provider.slug for p in self.providers.values()):
+            raise self._conflict("slug already exists")
+        self.providers[provider.id] = provider
+        return provider
+
+    async def update_provider(self, provider: Any) -> Any:
+        self.providers[provider.id] = provider
+        return provider
+
+    async def delete_provider(self, provider_id: UUID) -> bool:
+        if self.providers.pop(provider_id, None) is None:
+            return False
+        gone = {m.id for m in self.models.values() if m.provider_id == provider_id}
+        for model_id in gone:
+            del self.models[model_id]
+        self.routes = [r for r in self.routes if r.model_id not in gone]
+        return True
+
+    async def list_models(self, provider_id: UUID | None = None) -> list[Any]:
+        rows = [m for m in self.models.values() if provider_id in (None, m.provider_id)]
+        return sorted(rows, key=lambda m: (str(m.provider_id), m.model_name))
+
+    async def get_model(self, model_id: UUID) -> Any | None:
+        return self.models.get(model_id)
+
+    async def add_model(self, model: Any) -> Any:
+        if any(
+            m.provider_id == model.provider_id and m.model_name == model.model_name
+            for m in self.models.values()
+        ):
+            raise self._conflict("model already exists for this provider")
+        self.models[model.id] = model
+        return model
+
+    async def update_model(self, model: Any) -> Any:
+        self.models[model.id] = model
+        return model
+
+    async def delete_model(self, model_id: UUID) -> bool:
+        if self.models.pop(model_id, None) is None:
+            return False
+        self.routes = [r for r in self.routes if r.model_id != model_id]
+        return True
+
+    async def list_routes(self, purpose: str | None = None) -> list[Any]:
+        rows = [r for r in self.routes if purpose in (None, r.purpose)]
+        return sorted(rows, key=lambda r: (r.purpose, r.priority))
+
+    async def replace_routes(self, purpose: str, routes: list[Any]) -> list[Any]:
+        self.routes = [r for r in self.routes if r.purpose != purpose] + list(routes)
+        return sorted(routes, key=lambda r: r.priority)
+
+    async def snapshot(self) -> Any:
+        from src.modules.ai_gateway.catalog.domain import CatalogSnapshot
+
+        return CatalogSnapshot(
+            providers=list(self.providers.values()),
+            models=list(self.models.values()),
+            routes=list(self.routes),
+        )

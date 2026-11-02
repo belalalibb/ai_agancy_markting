@@ -9,7 +9,7 @@ and every point where it touches the rest of the platform is listed here.
 |---|---|
 | Tables (migration `0014`) | `brand_entitlements`, `entitlement_events` |
 | Columns added by `0014` to other tables | `brands.referred_by_brand_id` (+ FK SET NULL, `ck_brands_referred_by_not_self`), `brands.learning_consent` (+ `ck_brands_learning_consent`), `wa_messages.referral` |
-| Routes (4 protected, 0 public) | `POST /api/v1/admin/entitlements/activate` · `GET /api/v1/admin/entitlements/{brand_id}` · `GET /api/v1/brands/{brand_id}/entitlement` · `PATCH /api/v1/brands/{brand_id}/learning-consent` |
+| Routes (3 protected, 0 public) | `POST /api/v1/admin/entitlements/activate` · `GET /api/v1/admin/entitlements/{brand_id}` · `GET /api/v1/brands/{brand_id}/entitlement` — the brand consent `PATCH` route (column `learning_consent`) lives in **`tenancy`** (`tenancy/router.py`) since SPRINT-11.1 A-3 (E3) and is **not** removed with this module |
 | Settings | `FEATURE_ENTITLEMENTS_ENFORCED` (kill switch, default `true`) · `PLATFORM_ADMIN_USER_IDS` (empty ⇒ every `/admin/*` route is 403 `platform_admin_required`) |
 | Code | `src/modules/entitlements/**` |
 
@@ -33,9 +33,18 @@ Contracts this module *consumes* without importing the owner's ORM (D-016):
 
 Related but **not owned** here (they stay when the module is removed):
 
-* `brands.learning_consent` is read by the `BrandConsentReader` protocols declared in
-  `whatsapp/consent.py` and `brand_brain/consent.py` and implemented by
-  `tenancy.infrastructure.postgres_repository.PostgresBrandConsentReader` (D-080).
+* `brands.learning_consent` is **owned and controlled by `tenancy`** (the consent `PATCH`
+  route in `tenancy/router.py`, SPRINT-11.1 A-3) and read by the
+  `BrandConsentReader` protocols declared in `whatsapp/consent.py` and `brand_brain/consent.py`,
+  implemented by `PostgresBrandConsentReader` and built by
+  `tenancy.dependencies.build_brand_consent_reader` (D-080 / F2). Consent control does **not**
+  depend on this module.
+* **Monthly counters (SPRINT-11.1 A-2, E2):** `content/entitlements_port.py` and
+  `whatsapp/entitlements_port.py` declare consumer-owned `CounterGuard` protocols whose default
+  dependency yields `None` (no check). `src/main.py` overrides them with
+  `entitlements.dependencies.counter_guard_dependency(...)`. Removing this module = delete those
+  two `dependency_overrides` lines in `src/main.py`; approvals and WhatsApp conversations are then
+  unmetered (402 `entitlement_quota_exceeded` disappears).
   Any **future cross-brand learning reader must filter `learning_consent = 'full'` only**
   — `signals_only` allows writing a brand's own signals, never reading them across brands.
 * `wa_messages.referral` (CTWA) is written by `whatsapp/webhook.py` and exposed in

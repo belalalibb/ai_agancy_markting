@@ -216,15 +216,16 @@ class PgEntitlementLimitsReader:
         return entitlement, stored is not None
 
     async def check(self, brand_id: UUID, purpose: str) -> bool:
-        """C-1: ``True`` ⇒ a stored active plan governs the brand and its ``daily_tokens``
-        **replace** ``ai_daily_token_budget_per_brand``; ``False`` ⇒ no row (implicit trial)
-        or kill switch — the ``BudgetGuard`` keeps applying the global setting."""
+        """C-1 / SPRINT-11.1 A-2 (E2c): ``True`` ⇒ the brand's plan governs it and its
+        ``daily_tokens`` **replace** ``ai_daily_token_budget_per_brand`` — a brand **without a
+        row is governed by the implicit ``trial`` limits** (20,000), so what ``GET /entitlement``
+        shows is what is enforced. ``False`` **only** under the kill switch
+        (``FEATURE_ENTITLEMENTS_ENFORCED=false``) — then the ``BudgetGuard`` applies the global
+        setting as the fallback ceiling."""
         if not self._enforced:
             return False
         now = self._clock()
-        entitlement, stored = await self._active_entitlement(brand_id, now)
-        if not stored:
-            return False
+        entitlement, _stored = await self._active_entitlement(brand_id, now)
         budget = entitlement.limits.daily_tokens
         since = now - TOKEN_BUDGET_WINDOW
         used = await self._usage.combined_usage_since(brand_id, since)
@@ -247,15 +248,21 @@ class PgEntitlementLimitsReader:
             )
         return True
 
-    async def check_counter(self, brand_id: UUID, counter: Counter) -> None:
-        """Monthly ceilings read through the consumer-defined ``CounterUsageReader``."""
+    async def check_counter(self, brand_id: UUID, counter: Counter, *, reserve: int = 1) -> None:
+        """Monthly ceilings read through the consumer-defined ``CounterUsageReader``.
+
+        ``reserve`` = how many more units the caller is about to consume: ``1`` (default)
+        asks *"may I add one more?"* (``used + 1 > budget`` refuses); ``0`` asks *"is the
+        brand already over its ceiling?"* (SPRINT-11.1 A-2 — the WhatsApp webhook evaluates
+        the conversation it has **already stored**, so the 50th of 50 is fine and the 51st
+        is flagged)."""
         if not self._enforced or self._counters is None:
             return
         now = self._clock()
         entitlement, _stored = await self._active_entitlement(brand_id, now)
         budget = getattr(entitlement.limits, counter)
         used = await self._counters.monthly_used(brand_id, counter, since=now - MONTH_WINDOW)
-        if used >= budget:
+        if used + reserve > budget:
             raise EntitlementLimitError(
                 counter,
                 budget=budget,

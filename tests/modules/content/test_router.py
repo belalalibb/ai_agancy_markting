@@ -780,21 +780,59 @@ def test_a4_u1_viewer_detail_keeps_null_fields_and_lacks_generation_log_key(
 
 
 # ---------------------------------------------------------------- SPRINT-07 A5-U1 ------------
-@pytest.mark.parametrize(("used", "expected"), [(199_900, 200), (200_000, 429)])
+@pytest.mark.parametrize(("used", "expected"), [(19_900, 200), (20_000, 429)])
 def test_a5_u1_daily_token_budget(
     client: TestClient, as_: Headers, content_repo: FakeContentRepository, used: int, expected: int
 ) -> None:
+    """SPRINT-11.1 A-2 (E2c): a brand without an entitlement row is governed by the implicit
+    ``trial`` plan (20,000/day) — ``limit_kind=plan_daily_tokens``; the 200,000 setting is the
+    kill-switch fallback only (``test_a5_u1_daily_token_budget_under_kill_switch``)."""
     content_repo.token_usage_override = used
     owner = as_(OWNER_ID)
     item_id = _create(client, owner)["id"]
     response = _generate(client, owner, item_id)
-    assert response.status_code == expected
+    assert response.status_code == expected, response.text
     if expected == 429:
         detail = response.json()["detail"]
         assert detail["error"] == "generation_budget_exceeded"
+        assert detail["limit_kind"] == "plan_daily_tokens"
+        assert detail["budget"] == 20_000
+        assert detail["used"] == 20_000
+        assert 1 <= detail["resets_in_seconds"] <= 86_400
+        assert response.headers["Retry-After"] == str(detail["resets_in_seconds"])
+
+
+@pytest.mark.parametrize(("used", "expected"), [(199_900, 200), (200_000, 429)])
+def test_a5_u1_daily_token_budget_under_kill_switch(
+    app: FastAPI,
+    client: TestClient,
+    as_: Headers,
+    content_repo: FakeContentRepository,
+    used: int,
+    expected: int,
+) -> None:
+    """``FEATURE_ENTITLEMENTS_ENFORCED=false`` ⇒ the global ``AI_DAILY_TOKEN_BUDGET_PER_BRAND``
+    (200,000) is the ceiling again — ``limit_kind=brand_daily_tokens`` (SPRINT-07 contract)."""
+    from src.modules.ai_gateway.dependencies import get_entitlement_limits_reader
+    from src.modules.entitlements.service import PgEntitlementLimitsReader
+
+    app.dependency_overrides[get_entitlement_limits_reader] = lambda: PgEntitlementLimitsReader(
+        app.state.entitlement_repo,
+        usage_reader=app.state.budget_reader,
+        counters=app.state.counter_reader,
+        enforced=False,
+    )
+    content_repo.token_usage_override = used
+    owner = as_(OWNER_ID)
+    item_id = _create(client, owner)["id"]
+    response = _generate(client, owner, item_id)
+    assert response.status_code == expected, response.text
+    if expected == 429:
+        detail = response.json()["detail"]
+        assert detail["error"] == "generation_budget_exceeded"
+        assert detail["limit_kind"] == "brand_daily_tokens"
         assert detail["budget"] == 200_000
         assert detail["used"] == 200_000
-        assert 1 <= detail["resets_in_seconds"] <= 86_400
         assert response.headers["Retry-After"] == str(detail["resets_in_seconds"])
 
 
@@ -1434,7 +1472,7 @@ def test_b7_u3_protected_route_count_and_openapi_operations(client: TestClient) 
     the content + publishing module exposes exactly 14 operations over 13 paths."""
     from tests.test_auth_guard import PROTECTED, PROTECTED_ROUTE_COUNT
 
-    assert PROTECTED_ROUTE_COUNT == 66, PROTECTED  # 46 + A-2 rotate + 15 brain (SPRINT-10)
+    assert PROTECTED_ROUTE_COUNT == 77, PROTECTED  # 66 (SPRINT-11) + 11 /admin/ai/* (SPRINT-11.1)
     paths = client.get("/openapi.json").json()["paths"]
     content_paths = {p for p in paths if "/content/" in p}
     assert len(content_paths) == 13

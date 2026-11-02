@@ -65,9 +65,16 @@ def get_brand_access_resolver(
     return PostgresBrandAccessResolver(session)
 
 
+def build_brand_consent_reader(session: AsyncSession) -> PostgresBrandConsentReader:
+    """SPRINT-11.1 A-3 (F2): pure factory — the composition root for ``brands.learning_consent``
+    readers. Consumers (``whatsapp/webhook.py`` …) call this instead of importing
+    ``tenancy.infrastructure`` (D-016)."""
+    return PostgresBrandConsentReader(session)
+
+
 def get_brand_consent_reader(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> PostgresBrandConsentReader:
     """SPRINT-11 C-6 (D-080): ``learning_consent`` for the signal writers of ``whatsapp`` and
     ``brand_brain`` (each declares its own ``BrandConsentReader`` protocol)."""
-    return PostgresBrandConsentReader(session)
+    return build_brand_consent_reader(session)

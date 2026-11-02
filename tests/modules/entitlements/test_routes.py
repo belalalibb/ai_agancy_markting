@@ -140,10 +140,12 @@ def test_c4_referral_credit_once_on_first_activation(
     referrer with the agreed payload; later activations add none."""
     client = TestClient(admin_app)
     admin = auth_headers(OWNER_ID)
+    # SPRINT-11.1 A-5 (E5): the referred brand must belong to *another* tenant — a brand of
+    # the referrer's own tenant is 422 ``referral_self_tenant`` (tested in tenancy).
     referred = client.post(
         f"{API}/brands",
         json={"slug": "referred-shop", "name": "Referred", "referred_by_brand_id": str(BRAND_ID)},
-        headers=admin,
+        headers=auth_headers(AGENCY_ID),
     )
     assert referred.status_code == 201, referred.text
     referred_id = referred.json()["id"]

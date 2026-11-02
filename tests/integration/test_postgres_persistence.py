@@ -523,7 +523,7 @@ def test_alembic_0003_migrates_legacy_rows_and_roundtrips() -> None:
     )
 
     command.upgrade(cfg, "head")  # must succeed again on the downgraded data
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     assert _run("SELECT COUNT(*) FROM tenants", scalar=True) == 2
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
@@ -928,7 +928,7 @@ def test_alembic_0004_roundtrip_and_case_insensitive_email() -> None:
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert not {"users", "refresh_sessions"} & tables
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     tables = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert {"users", "refresh_sessions"} <= tables
     indexes = {r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")}
@@ -1949,7 +1949,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     assert "scopes_verified" not in cols
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")  # no ``engine`` fixture here
     _seed_fresh()
     item_id, rev_id = uuid4(), uuid4()
@@ -2019,7 +2019,7 @@ def test_b1_m1_migration_0005_roundtrip_with_edge_inserts_on_pg() -> None:
     command.downgrade(cfg, "0004")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0004"
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
 
 
 def test_b2_i1_schedule_validates_target_against_real_connection_on_pg(
@@ -2362,7 +2362,10 @@ def test_a5_i1_token_budget_is_summed_from_ai_cost_log_only_on_pg(
         _cost_row(outcome, prompt_tokens=p, completion_tokens=c, created_at=created)
 
     assert _wa_combined_usage(BRAND_ID) == 170_000
-    # Lower the budget to the measured usage ⇒ 429 through the API.
+    # SPRINT-11.1 A-2 (E2c): a brand without an entitlement row is governed by the implicit
+    # ``trial`` plan (20,000/day) — the 170,000 measured above already exceeds it, so the
+    # 429 carries ``limit_kind=plan_daily_tokens``. The setting below is the kill-switch
+    # fallback only and no longer decides the outcome here.
     integration_app.state.settings = settings.model_copy(
         update={"ai_daily_token_budget_per_brand": 170_000}
     )
@@ -2380,7 +2383,8 @@ def test_a5_i1_token_budget_is_summed_from_ai_cost_log_only_on_pg(
         _wa_restore_budget(integration_app, settings)
     assert res.status_code == 429, res.text
     assert res.json()["detail"]["error"] == "generation_budget_exceeded"
-    assert res.json()["detail"]["limit_kind"] == "brand_daily_tokens"
+    assert res.json()["detail"]["limit_kind"] == "plan_daily_tokens"
+    assert res.json()["detail"]["budget"] == 20_000
     assert res.json()["detail"]["used"] == 170_000
 
 
@@ -2470,7 +2474,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     assert _action_len() == 16
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     assert _action_len() == 32
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
@@ -2599,7 +2603,7 @@ def test_b1_m1_migration_0006_roundtrip_with_edge_inserts_on_pg() -> None:
     )
     assert _run("SELECT COUNT(*) FROM approval_events", scalar=True) == 0
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"  # SPRINT-11 head
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"  # head
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
 
@@ -2746,7 +2750,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
     ``'linkedin'`` would violate it); Meta rows survive untouched; ``'x'``/``'tiktok'`` are
     rejected under 0006 and accepted again at head; ``publish_jobs.channel`` has no CHECK."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     fb_id, li_id, li_rev = uuid4(), uuid4(), uuid4()
@@ -2796,7 +2800,7 @@ def test_b1_m1_migration_0007_roundtrip_archives_linkedin_draft_on_pg() -> None:
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status) "
         "VALUES (:id, :b, :t, 'tiktok', 'draft')",
@@ -2954,7 +2958,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
     at head a ``draft`` with ``published_at`` is still rejected and ``archived`` with or
     without ``published_at`` is accepted."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     archived_with, archived_without = uuid4(), uuid4()
@@ -3001,7 +3005,7 @@ def test_a1_m1_migration_0008_roundtrip_nulls_archived_published_at_on_pg() -> N
         )
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(
         "INSERT INTO content_items (id, brand_id, created_by_tenant_id, channel, status, "
         "published_at) VALUES (:id, :b, :t, 'facebook_page', 'archived', now())",
@@ -3170,7 +3174,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     (outbound needs an actor; decided draft needs an actor; partial unique wamid), vanish
     at 0008 and come back; no other table is touched."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     wa_tables = {
@@ -3275,7 +3279,7 @@ def test_b1_m1_migration_0009_roundtrip_creates_and_drops_five_tables_on_pg() ->
     assert _run("SELECT COUNT(*) FROM brands", scalar=True) >= 1
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     present = {r[0] for r in _rows("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     assert wa_tables <= present
     assert _run("SELECT COUNT(*) FROM whatsapp_accounts", scalar=True) == 0
@@ -3740,8 +3744,11 @@ def test_b3_i2_budget_of_one_token_makes_suggest_reply_429_on_pg(
         account_id, wa_id="201111111111", last_inbound_at=now - timedelta(minutes=4)
     )
     settings = integration_app.state.settings
+    # SPRINT-11.1 A-2 (E2c): an enforced brand without a row is governed by the implicit
+    # ``trial`` plan (20,000), so the setting only decides under the entitlements kill switch
+    # — which is exactly the shared-budget-reader path this test exercises.
     integration_app.state.settings = settings.model_copy(
-        update={"ai_daily_token_budget_per_brand": 1}
+        update={"ai_daily_token_budget_per_brand": 1, "feature_entitlements_enforced": False}
     )
     from src.core.config import get_settings
 
@@ -3778,8 +3785,11 @@ def _wa_override_budget(integration_app: FastAPI, budget: int):  # noqa: ANN202
     from src.core.config import get_settings
 
     settings = integration_app.state.settings
+    # SPRINT-11.1 A-2 (E2c): the plan (implicit ``trial`` = 20,000) governs an enforced brand;
+    # these tests exercise the *shared budget reader* through the setting, so they run under
+    # the kill switch where ``ai_daily_token_budget_per_brand`` is the ceiling.
     integration_app.state.settings = settings.model_copy(
-        update={"ai_daily_token_budget_per_brand": budget}
+        update={"ai_daily_token_budget_per_brand": budget, "feature_entitlements_enforced": False}
     )
     integration_app.dependency_overrides[get_settings] = lambda: integration_app.state.settings
     return settings
@@ -4295,7 +4305,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
     the pre-cleanup marks the **older** one ``expired`` and the partial unique index
     ``uq_wa_reply_drafts_one_pending`` then rejects a second pending draft."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     command.downgrade(cfg, "0009")
@@ -4317,7 +4327,7 @@ def test_a5_m1_migration_0010_roundtrip_expires_older_pending_drafts_on_pg(
         _run("SELECT COUNT(*) FROM wa_reply_drafts WHERE status = 'suggested'", scalar=True) == 2
     )
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     statuses = dict(_rows("SELECT id, status FROM wa_reply_drafts"))
     assert statuses[older] == "expired" and statuses[newer] == "suggested"
     assert (
@@ -4556,7 +4566,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
     """B1-M1 — ``head ⇒ 0010 ⇒ head``: the five 0011 tables disappear and come back with
     their named constraints; 0010's partial index survives the round-trip."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0011 = {
         "brand_profiles",
@@ -4577,7 +4587,7 @@ def test_b1_m1_migration_0011_roundtrip_on_pg() -> None:
         r[0] for r in _rows("SELECT indexname FROM pg_indexes WHERE tablename = 'wa_reply_drafts'")
     }
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     assert tables_0011 <= _public_tables()
     constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
     assert {
@@ -5244,7 +5254,7 @@ def test_b1_migration_0013_round_trip_on_pg() -> None:
     widened outcome CHECK disappear and come back; orphaned rows are deleted on downgrade
     (documented) and unsettled reservations are mapped to ``error``."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     _seed_fresh()
     orphan = _cost_row("ok", brand_id=None)
@@ -5280,7 +5290,7 @@ def test_b1_migration_0013_round_trip_on_pg() -> None:
     with pytest.raises(DBAPIError):  # 9 chars > VARCHAR(8) on the 0012 schema
         _cost_row("ambiguous")
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     assert {"ix_ai_cost_log_mode_created", "ix_ai_cost_log_pending"} <= _indexes()
     assert {"settled_at", "request_id"} <= _columns()
     _cost_row("ambiguous")  # accepted again
@@ -5629,7 +5639,7 @@ def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
     """B3-M1 — ``head ⇒ 0011 ⇒ head``: the two 0012 tables disappear and come back with
     their named constraints and indexes; 0011's tables survive the round-trip."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0012 = {"brand_recommendations", "learning_signals"}
 
@@ -5642,7 +5652,7 @@ def test_b3_m1_migration_0012_roundtrip_on_pg() -> None:
     assert not tables_0012 & _public_tables()
     assert {"brand_profiles", "brand_evidence", "ai_cost_log"} <= _public_tables()
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     assert tables_0012 <= _public_tables()
     constraints = {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
     assert {
@@ -5700,7 +5710,7 @@ def test_c1_migration_0014_round_trip_on_pg() -> None:
     """``head ⇒ 0013 ⇒ head`` and ``head ⇒ 0012 ⇒ head``: the two 0014 tables, the three new
     columns and their named constraints disappear and come back; 0013 survives."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     tables_0014 = {"brand_entitlements", "entitlement_events"}
 
@@ -5736,7 +5746,7 @@ def test_c1_migration_0014_round_trip_on_pg() -> None:
         assert not named & _constraints()
         assert "ai_cost_log" in _public_tables()
         command.upgrade(cfg, "head")
-        assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+        assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
         assert tables_0014 <= _public_tables()
         assert named <= _constraints()
     indexes = {i for (i,) in _rows("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")}
@@ -6236,3 +6246,754 @@ def test_c6_c7_consent_none_blocks_signals_and_ctwa_referral_persists_on_pg(
     assert _run("SELECT COUNT(*) FROM learning_signals", scalar=True) == 0
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
     reset_db_caches()
+
+
+# =========================================================================================
+# SPRINT-11.1 Part A — E1..E5 closures proven on PostgreSQL 17
+# =========================================================================================
+def _a_truncate() -> None:
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+    reset_db_caches()
+
+
+def test_a1_content_plan_consent_none_writes_zero_signals_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-1 (E1): ``PATCH /learning-consent {none}`` ⇒ ``POST /brain/content-plan`` with 3 items
+    ⇒ ``brand_recommendations`` = 3 (materialized), ``content_items`` = 3, ``learning_signals``
+    = **0** (the planner's probe reproduced)."""
+    owner = _c_reset(integration_app)
+    with TestClient(integration_app) as client:
+        res = client.patch(
+            f"{API}/brands/{BRAND_ID}/learning-consent",
+            json={"learning_consent": "none"},
+            headers=owner,
+        )
+        assert res.status_code == 200 and res.json() == {"learning_consent": "none"}
+        ev = _brain_evidence_rows(client, owner)[0]["id"]
+        payload = {
+            "items": [
+                {
+                    "title": f"منشور {i}",
+                    "channel": "facebook" if i % 2 else "instagram",
+                    "body": f"نص المنشور رقم {i}",
+                    "rationale": "r",
+                    "evidence_ids": [ev],
+                }
+                for i in range(3)
+            ]
+        }
+        _brain_scripted_gateway(integration_app, payload)
+        res = client.post(f"{BRAIN_PG}/content-plan", headers=owner)
+        assert res.status_code == 200, res.text
+        assert len(res.json()["items"]) == 3
+        integration_app.dependency_overrides.pop(
+            __import__("src.modules.brand_brain.router", fromlist=["x"]).get_brain_gateway, None
+        )
+    assert _rows("SELECT status FROM brand_recommendations") == [("materialized",)] * 3
+    assert (
+        _run(
+            "SELECT COUNT(*) FROM content_items WHERE brand_id = :b", {"b": BRAND_ID}, scalar=True
+        )
+        == 3
+    )
+    assert _run("SELECT COUNT(*) FROM learning_signals", scalar=True) == 0
+    _a_truncate()
+
+
+def test_a2_unstored_brand_is_governed_by_trial_daily_tokens_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-2 (E2c): a brand without a ``brand_entitlements`` row shows ``daily_tokens=20,000`` in
+    ``GET /entitlement`` **and** is enforced at 20,000 (not the 200,000 setting): with 20,000
+    tokens already logged today the next call ⇒ ``EntitlementLimitError plan_daily_tokens``;
+    the kill switch hands the brand back to the setting."""
+    from src.modules.ai_gateway.budget_guard import EntitlementLimitError
+    from src.modules.ai_gateway.contract import Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+    from src.modules.ai_gateway.infrastructure.pg_budget import PgBudgetUsageReader
+    from src.modules.entitlements.infrastructure.postgres_repository import (
+        PgCounterUsageReader,
+        PgEntitlementRepository,
+    )
+    from src.modules.entitlements.service import PgEntitlementLimitsReader
+
+    owner = _c_reset(integration_app)
+    with TestClient(integration_app) as client:
+        shown = client.get(f"{API}/brands/{BRAND_ID}/entitlement", headers=owner)
+        assert shown.status_code == 200, shown.text
+        assert shown.json()["plan"] == "trial"
+        assert shown.json()["limits"]["daily_tokens"] == 20_000
+    assert _run("SELECT COUNT(*) FROM brand_entitlements", scalar=True) == 0
+    _cost_row("ok", prompt_tokens=19_000, completion_tokens=1_000)  # exactly the trial ceiling
+    calls: list[object] = []
+
+    class P:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, req):  # noqa: ANN001, ANN202
+            calls.append(req)
+            return CompletionResult(
+                text="x",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=10, completion_tokens=5),
+            )
+
+    async def _attempt(enforced: bool) -> None:
+        eng = create_async_engine(TEST_DATABASE_URL)
+        try:
+            async with AsyncSession(eng) as session:
+                limits = PgEntitlementLimitsReader(
+                    PgEntitlementRepository(session),
+                    usage_reader=PgBudgetUsageReader(session),
+                    counters=PgCounterUsageReader(session),
+                    enforced=enforced,
+                )
+                # daily_budget = the 200,000 setting: it must NOT rescue the brand when enforced.
+                await _pg_guard(P(), daily_budget=200_000, limits=limits).complete(_fin_request())
+        finally:
+            await eng.dispose()
+
+    with pytest.raises(EntitlementLimitError) as info:
+        asyncio.run(_attempt(True))
+    reset_db_caches()
+    assert info.value.limit_kind == "plan_daily_tokens"
+    assert info.value.budget == 20_000 and info.value.used == 20_000
+    assert calls == []  # refused before the provider
+    assert len(_fin_rows()) == 1  # no reservation row for the refused call
+    asyncio.run(_attempt(False))  # kill switch ⇒ the 200,000 setting governs ⇒ goes through
+    reset_db_caches()
+    assert len(calls) == 1 and len(_fin_rows()) == 2
+    _a_truncate()
+
+
+def test_a2_eleventh_approval_is_402_on_pg(integration_app: FastAPI) -> None:
+    """A-2 (E2): trial ``monthly_posts = 10`` on real ``approval_events`` rows — 10 approvals
+    succeed, the 11th ⇒ **402 ``entitlement_quota_exceeded`` {counter, limit, used}** and the
+    item stays ``pending_approval``."""
+    owner = _c_reset(integration_app)
+    content = f"{API}/brands/{BRAND_ID}/content"
+    with TestClient(integration_app) as client:
+
+        def pending() -> str:
+            created = client.post(
+                f"{content}/items",
+                json={"channel": "facebook_page", "body": "منشور تجريبي للموافقة"},
+                headers=owner,
+            )
+            assert created.status_code == 201, created.text
+            item = created.json()["id"]
+            assert client.post(f"{content}/items/{item}/submit", headers=owner).status_code == 200
+            return item
+
+        for _ in range(10):
+            res = client.post(f"{content}/items/{pending()}/approve", headers=owner)
+            assert res.status_code == 200, res.text
+        eleventh = pending()
+        res = client.post(f"{content}/items/{eleventh}/approve", headers=owner)
+        assert res.status_code == 402, res.text
+        assert res.json()["detail"] == {
+            "error": "entitlement_quota_exceeded",
+            "message": "monthly plan quota reached for monthly_posts",
+            "counter": "monthly_posts",
+            "limit": 10,
+            "used": 10,
+        }
+        detail = client.get(f"{content}/items/{eleventh}", headers=owner)
+        assert detail.json()["status"] == "pending_approval"
+        usage = client.get(f"{API}/brands/{BRAND_ID}/entitlement", headers=owner).json()
+        assert usage["usage"]["monthly_posts"] == 10
+    assert (
+        _run("SELECT COUNT(*) FROM approval_events WHERE action = 'approved'", scalar=True) == 10
+    )
+    _a_truncate()
+
+
+def test_a2_fifty_first_conversation_webhook_200_then_suggest_402_on_pg(
+    integration_app: FastAPI, integration_encryption: TokenEncryptionService
+) -> None:
+    """A-2 (E2): trial ``monthly_wa_conversations = 50`` on real ``wa_conversations`` rows —
+    50 new conversations ⇒ no flag; the 51st ⇒ webhook **200** with the conversation under
+    ``quota_exceeded`` (stored, never 429) and ``suggest-reply`` / send ⇒ **402**."""
+    owner = _c_reset(integration_app)
+    _wa_account_row(integration_encryption)
+    wa = f"{API}/brands/{BRAND_ID}/whatsapp"
+    ts = int(datetime.now(tz=UTC).timestamp())  # inside the 30-day counter window
+    with TestClient(integration_app) as client:
+        for i in range(50):
+            payload = _wa_payload(f"wamid.quota.{i}", ts=ts)
+            payload["entry"][0]["changes"][0]["value"]["messages"][0]["from"] = f"2010000{i:05d}"
+            res = _wa_post(client, payload)
+            assert res.status_code == 200, res.text
+            assert res.json()["inbound"] == 1 and res.json()["quota_exceeded"] == []
+        payload = _wa_payload("wamid.quota.51", ts=ts)
+        payload["entry"][0]["changes"][0]["value"]["messages"][0]["from"] = "201999999951"
+        res = _wa_post(client, payload)
+        assert res.status_code == 200, res.text  # never 429 to Meta
+        assert res.json()["inbound"] == 1
+        flagged = res.json()["quota_exceeded"]
+        assert len(flagged) == 1
+        conv_id = flagged[0]
+        wa_id = _run(
+            "SELECT wa_id FROM wa_conversations WHERE id = :c", {"c": UUID(conv_id)}, scalar=True
+        )
+        assert wa_id == "201999999951"
+        res = client.post(f"{wa}/conversations/{conv_id}/suggest-reply", headers=owner)
+        assert res.status_code == 402, res.text
+        assert res.json()["detail"] == {
+            "error": "entitlement_quota_exceeded",
+            "message": "monthly plan quota reached for monthly_wa_conversations",
+            "counter": "monthly_wa_conversations",
+            "limit": 50,
+            "used": 51,
+        }
+        res = client.post(
+            f"{wa}/conversations/{conv_id}/messages", json={"body": "hi"}, headers=owner
+        )
+        assert res.status_code == 402
+    assert _run("SELECT COUNT(*) FROM wa_conversations", scalar=True) == 51
+    assert _run("SELECT COUNT(*) FROM wa_messages", scalar=True) == 51
+    assert _run("SELECT COUNT(*) FROM wa_reply_drafts", scalar=True) == 0
+    _a_truncate()
+
+
+def test_a4_reservation_tokens_count_against_brand_budget_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-4 (E4): the ``pending`` reservation row carries ``prompt_estimate + max_tokens`` so
+    ``combined_usage_since`` > 0 during the call window; ``settle_stale`` keeps those tokens
+    (``ambiguous`` counts conservatively); a successful settle replaces them with the actual
+    150; a refund deletes the row ⇒ 0."""
+    from src.modules.ai_gateway.budget_guard import (
+        estimate_prompt_tokens,
+        settle_stale_reservations,
+    )
+    from src.modules.ai_gateway.contract import AIError, ErrorCategory, Usage
+    from src.modules.ai_gateway.gateway import CompletionResult
+    from src.modules.ai_gateway.infrastructure.pg_cost_log import PgCostLogWriter
+
+    _fin_reset(integration_app)
+    req = _fin_request(max_tokens=300)
+    expected_reserved = estimate_prompt_tokens(req) + 300
+    seen: dict = {}
+
+    class Measuring:
+        """Provider that measures the brand's usage *during* the call (row is pending)."""
+
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, request):  # noqa: ANN001, ANN202
+            since = datetime.now(tz=UTC) - timedelta(hours=24)
+            seen["during"] = await PgCostLogWriter().brand_tokens_since(BRAND_ID, since)
+            eng = create_async_engine(TEST_DATABASE_URL)
+            try:
+                async with AsyncSession(eng) as session:
+                    seen["row"] = (
+                        await session.execute(
+                            text(
+                                "SELECT outcome, prompt_tokens, completion_tokens FROM ai_cost_log"
+                            )
+                        )
+                    ).one()
+            finally:
+                await eng.dispose()
+            return CompletionResult(
+                text="x",
+                provider="fake",
+                model="fake-1",
+                latency_ms=1,
+                usage=Usage(prompt_tokens=100, completion_tokens=50),
+            )
+
+    asyncio.run(_pg_guard(Measuring()).complete(req))
+    reset_db_caches()
+    assert seen["during"] == expected_reserved > 0
+    assert seen["row"][0] == "pending" and seen["row"][1] + seen["row"][2] == expected_reserved
+    assert _wa_combined_usage(BRAND_ID) == 150  # settled with the actual usage (B-1 unchanged)
+    (row,) = _fin_rows()
+    assert row[0] == "ok" and row[2] == 100 and row[3] == 50
+
+    # A reservation left ``pending`` (crash before settle) keeps its tokens through
+    # ``settle_stale`` ⇒ ``ambiguous`` and still counted.
+    now = datetime.now(tz=UTC)
+    _run("DELETE FROM ai_cost_log")
+    stale = _cost_row(
+        "pending",
+        prompt_tokens=expected_reserved - 300,
+        completion_tokens=300,
+        created_at=now - timedelta(seconds=90),
+        purpose="content_plan",
+    )
+    reset_db_caches()
+    assert _wa_combined_usage(BRAND_ID) == expected_reserved
+    assert (
+        asyncio.run(settle_stale_reservations(PgCostLogWriter(), now=now, timeout_seconds=30)) == 1
+    )
+    reset_db_caches()
+    assert _rows("SELECT id, outcome FROM ai_cost_log") == [(stale, "ambiguous")]
+    assert _wa_combined_usage(BRAND_ID) == expected_reserved  # still counted
+
+    # Refund (``NOT_REACHED_CATEGORIES`` — the provider did no work) deletes the pending row
+    # ⇒ 0 tokens; a reached-but-failed call (``provider_unavailable``) settles ``error``
+    # with prompt tokens only, which the brand budget does not count.
+    _run("DELETE FROM ai_cost_log")
+    reset_db_caches()
+
+    class Unreachable:
+        name = "fake"
+        model = "fake-1"
+
+        async def complete(self, request):  # noqa: ANN001, ANN202
+            raise AIError(ErrorCategory.BAD_REQUEST)
+
+    with pytest.raises(AIError):
+        asyncio.run(_pg_guard(Unreachable()).complete(req))
+    reset_db_caches()
+    assert _fin_rows() == [] and _wa_combined_usage(BRAND_ID) == 0
+    _a_truncate()
+
+
+def test_a5_self_tenant_referral_is_422_and_stores_nothing_on_pg(
+    integration_app: FastAPI,
+) -> None:
+    """A-5 (E5): ``POST /brands {referred_by_brand_id: <own brand>}`` ⇒ **422
+    ``referral_self_tenant``** and no ``brands`` row; a brand of another tenant as referrer
+    ⇒ 201 with ``referred_by_brand_id`` persisted."""
+    owner = _c_reset(integration_app)
+    before = _run("SELECT COUNT(*) FROM brands", scalar=True)
+    with TestClient(integration_app) as client:
+        res = client.post(
+            f"{API}/brands",
+            json={"slug": "self-ref", "name": "Self", "referred_by_brand_id": str(BRAND_ID)},
+            headers=owner,
+        )
+        assert res.status_code == 422, res.text
+        assert res.json()["detail"] == {
+            "error": "referral_self_tenant",
+            "message": "a brand cannot be referred by a brand of the same tenant",
+        }
+        assert _run("SELECT COUNT(*) FROM brands", scalar=True) == before
+        agency = integration_headers(integration_app.state.settings, AGENCY_ID)
+        res = client.post(
+            f"{API}/brands",
+            json={"slug": "agency-ref", "name": "Agency", "referred_by_brand_id": str(BRAND_ID)},
+            headers=agency,
+        )
+        assert res.status_code == 201, res.text
+    referrer = _run(
+        "SELECT referred_by_brand_id FROM brands WHERE slug = 'agency-ref'", scalar=True
+    )
+    assert referrer == BRAND_ID
+    _a_truncate()
+
+
+# --------------------------------------------------------- SPRINT-11.1 Part B (PG) --
+CATALOG_TABLES = {"ai_providers", "ai_models", "ai_routing"}
+CATALOG_CONSTRAINTS = {
+    "uq_ai_providers_slug",
+    "ck_ai_providers_slug",
+    "ck_ai_providers_kind",
+    "ck_ai_providers_one_credential",
+    "uq_ai_models_provider_name",
+    "ck_ai_models_capability",
+    "ck_ai_models_max_audio_seconds",
+    "ck_ai_models_price_shape",
+    "ck_ai_models_prices_non_negative",
+    "ck_ai_routing_purpose",
+    "uq_ai_routing_purpose_priority",
+    "uq_ai_routing_purpose_model",
+}
+
+
+def test_b1_migration_0015_round_trip_on_pg() -> None:
+    """B-1 (D-077): ``head ⇒ 0014 ⇒ head`` — the three catalog tables and their named
+    constraints disappear and come back; no existing table is touched (0014 survives)."""
+    cfg = alembic_config(TEST_DATABASE_URL)
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
+    _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+
+    def _public_tables() -> set[str]:
+        return {t for (t,) in _rows("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+
+    def _constraints() -> set[str]:
+        return {c for (c,) in _rows("SELECT conname FROM pg_constraint")}
+
+    assert len(CATALOG_CONSTRAINTS) >= 11
+    assert CATALOG_TABLES <= _public_tables()
+    assert CATALOG_CONSTRAINTS <= _constraints()
+    before = _public_tables() - CATALOG_TABLES
+
+    command.downgrade(cfg, "0014")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0014"
+    assert not CATALOG_TABLES & _public_tables()
+    assert not CATALOG_CONSTRAINTS & _constraints()
+    assert _public_tables() == before  # nothing else dropped
+    assert {"brand_entitlements", "entitlement_events", "ai_cost_log"} <= _public_tables()
+
+    command.upgrade(cfg, "head")
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
+    assert CATALOG_TABLES <= _public_tables()
+    assert CATALOG_CONSTRAINTS <= _constraints()
+
+    # FK semantics: ai_models.provider_id and ai_routing.model_id CASCADE.
+    fks = {
+        name: dtype
+        for (name, dtype) in _rows(
+            "SELECT conname, confdeltype FROM pg_constraint WHERE contype = 'f' "
+            "AND conrelid::regclass::text IN ('ai_models', 'ai_routing')"
+        )
+    }
+    # ``"char"`` arrives as bytes under asyncpg (as in the 0013/0014 round-trip tests).
+    assert {d.decode() if isinstance(d, bytes) else d for d in fks.values()} == {"c"}, fks
+    # Named CHECKs refuse bad rows.
+    pid = uuid4()
+    with pytest.raises(IntegrityError, match="ck_ai_providers_kind"):
+        _run(
+            "INSERT INTO ai_providers (id, slug, kind, base_url) VALUES (:id, 'x', 'other', 'h')",
+            {"id": pid},
+        )
+    _run(
+        "INSERT INTO ai_providers (id, slug, kind, base_url) VALUES (:id, 'p1', 'fake', 'fake://')",
+        {"id": pid},
+    )
+    with pytest.raises(IntegrityError, match="ck_ai_models_max_audio_seconds"):
+        _run(
+            "INSERT INTO ai_models (id, provider_id, model_name, capability, cost_per_minute_usd,"
+            " max_audio_seconds) VALUES (:id, :p, 'w', 'audio', 0.01, 121)",
+            {"id": uuid4(), "p": pid},
+        )
+    with pytest.raises(IntegrityError, match="ck_ai_models_price_shape"):
+        _run(
+            "INSERT INTO ai_models (id, provider_id, model_name, capability, prompt_per_1k,"
+            " max_audio_seconds) VALUES (:id, :p, 't', 'text', 0.1, 10)",
+            {"id": uuid4(), "p": pid},
+        )
+    mid = uuid4()
+    _run(
+        "INSERT INTO ai_models (id, provider_id, model_name, capability, prompt_per_1k,"
+        " completion_per_1k) VALUES (:id, :p, 't', 'text', 0, 0)",
+        {"id": mid, "p": pid},
+    )
+    _run(
+        "INSERT INTO ai_routing (id, purpose, model_id, priority) "
+        "VALUES (:id, 'content_generation', :m, 0)",
+        {"id": uuid4(), "m": mid},
+    )
+    with pytest.raises(IntegrityError, match="uq_ai_routing_purpose_model"):
+        _run(
+            "INSERT INTO ai_routing (id, purpose, model_id, priority) "
+            "VALUES (:id, 'content_generation', :m, 1)",
+            {"id": uuid4(), "m": mid},
+        )
+    _run("DELETE FROM ai_providers WHERE id = :id", {"id": pid})
+    assert _run("SELECT COUNT(*) FROM ai_models", scalar=True) == 0  # CASCADE
+    assert _run("SELECT COUNT(*) FROM ai_routing", scalar=True) == 0
+    _seed_fresh()
+    reset_db_caches()
+
+
+# =============================================================================
+# SPRINT-11.1 Part C — /admin/ai/* on real tables (Criteria #10, #12, #13, #14)
+# =============================================================================
+from decimal import Decimal  # noqa: E402
+
+from tests.conftest import OWNER_USER_ID  # noqa: E402
+
+ADMIN_AI = f"{API}/admin/ai"
+CATALOG_HOST = "https://catalog-pg.example"
+CATALOG_HOST_2 = "https://fallback-pg.example"
+PROBE_KEY = "".join(("sk-", "PLANNER-PROBE-", "pg0123456789"))  # assembled: no secret literal
+
+
+def _c_openai_ok(model: str, text_: str = "pg reply") -> dict:
+    return {
+        "model": model,
+        "choices": [{"message": {"content": text_}}],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+    }
+
+
+def _c_catalog_seed(client: TestClient, owner: dict[str, str]) -> tuple[str, str]:
+    """One encrypted-key provider + one priced model; returns ``(provider_id, model_id)``."""
+    provider = client.post(
+        f"{ADMIN_AI}/providers",
+        json={
+            "slug": "pg-main",
+            "kind": "openai_compatible",
+            "base_url": f"{CATALOG_HOST}/v1",
+            "api_key": PROBE_KEY,
+        },
+        headers=owner,
+    )
+    assert provider.status_code == 201, provider.text
+    model = client.post(
+        f"{ADMIN_AI}/models",
+        json={
+            "provider_id": provider.json()["id"],
+            "model_name": "gpt-4o-mini",
+            "pricing": {"prompt_per_1k": "0.00015", "completion_per_1k": "0.0006"},
+        },
+        headers=owner,
+    )
+    assert model.status_code == 201, model.text
+    return provider.json()["id"], model.json()["id"]
+
+
+def test_c10_admin_ai_zero_secret_on_pg(
+    integration_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Criterion #10: the raw key is never in any GET/PATCH body, in ``openapi.json`` or in the
+    log; ``ai_providers.credential_cipher`` is Fernet (``gAAAA``); the stored cipher decrypts
+    back to the key with the app's ``TokenEncryptionService`` (so the resolver can use it)."""
+    owner = _c_reset(integration_app)
+    get_settings_dep = _c_admin(integration_app)
+    caplog.set_level("INFO")
+    try:
+        with TestClient(integration_app) as client:
+            provider_id, model_id = _c_catalog_seed(client, owner)
+            bodies = [
+                client.get(f"{ADMIN_AI}/providers", headers=owner).text,
+                client.get(f"{ADMIN_AI}/models", headers=owner).text,
+                client.patch(
+                    f"{ADMIN_AI}/providers/{provider_id}", json={"enabled": True}, headers=owner
+                ).text,
+                client.get("/openapi.json").text,
+            ]
+            for body in bodies:
+                assert PROBE_KEY not in body and "sk-PLANNER" not in body
+            assert PROBE_KEY not in caplog.text
+            assert any("admin_ai action=provider.create" in r.getMessage() for r in caplog.records)
+            cipher = _run(
+                "SELECT credential_cipher FROM ai_providers WHERE id = :id",
+                {"id": UUID(provider_id)},
+                scalar=True,
+            )
+            assert isinstance(cipher, str) and cipher.startswith("gAAAA")
+            settings = integration_app.state.settings
+            svc = TokenEncryptionService(settings.token_encryption_key.get_secret_value())
+            assert svc.decrypt_token(cipher) == PROBE_KEY
+            # 404s and the CASCADE on delete are real FK behaviour on PG.
+            assert (
+                client.delete(f"{ADMIN_AI}/providers/{provider_id}", headers=owner).status_code
+                == 204
+            )
+            assert _run("SELECT COUNT(*) FROM ai_models", scalar=True) == 0
+            assert client.delete(f"{ADMIN_AI}/models/{model_id}", headers=owner).status_code == 404
+    finally:
+        integration_app.dependency_overrides.pop(get_settings_dep, None)
+
+
+def test_c12_catalog_fallback_leaves_two_cost_rows_on_pg(integration_app: FastAPI) -> None:
+    """Criterion #12 on real tables: routing [primary ⇒ fallback]; primary answers 503 ⇒ the
+    fallback is called; ``ai_cost_log`` holds two rows (``error`` then ``ok``) priced per model;
+    a 400 from the primary ⇒ **no** fallback and the reservation is refunded (no row)."""
+    from src.core.config import get_settings
+    from src.modules.ai_gateway.catalog.infrastructure.pg_repository import CATALOG_CACHE
+
+    owner = _c_reset(integration_app)
+    base = integration_app.state.settings.model_copy(
+        update={"platform_admin_user_ids": [OWNER_USER_ID], "ai_catalog_cache_seconds": 0}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: base
+    try:
+        with TestClient(integration_app) as client:
+            _, primary = _c_catalog_seed(client, owner)
+            second = client.post(
+                f"{ADMIN_AI}/providers",
+                json={
+                    "slug": "pg-fallback",
+                    "kind": "openai_compatible",
+                    "base_url": f"{CATALOG_HOST_2}/v1",
+                    "api_key": PROBE_KEY + "2",
+                },
+                headers=owner,
+            )
+            assert second.status_code == 201, second.text
+            fallback = client.post(
+                f"{ADMIN_AI}/models",
+                json={
+                    "provider_id": second.json()["id"],
+                    "model_name": "fallback-1",
+                    "pricing": {"prompt_per_1k": "0.001", "completion_per_1k": "0.002"},
+                },
+                headers=owner,
+            )
+            assert fallback.status_code == 201, fallback.text
+            put = client.put(
+                f"{ADMIN_AI}/routing/content_generation",
+                json={"models": [primary, fallback.json()["id"]]},
+                headers=owner,
+            )
+            assert put.status_code == 200, put.text
+            CATALOG_CACHE.invalidate()
+
+            # Switch the runtime resolver on for the brand-side call.
+            live = base.model_copy(update={"feature_provider_catalog_enabled": True})
+            integration_app.dependency_overrides[get_settings] = lambda: live
+            item = client.post(
+                f"{API}/brands/{BRAND_ID}/content/items",
+                json={"channel": "facebook_page", "body": "catalog fallback on pg"},
+                headers=owner,
+            )
+            assert item.status_code == 201, item.text
+            generate = f"{API}/brands/{BRAND_ID}/content/items/{item.json()['id']}/generate"
+            with respx.mock(assert_all_called=False) as mock:
+                primary_route = mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    503, json={"error": "down"}
+                )
+                fallback_route = mock.post(f"{CATALOG_HOST_2}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("fallback-1")
+                )
+                res = client.post(generate, json={"brief": "fallback brief"}, headers=owner)
+                # respx clears its call log on context exit ⇒ assert while still mocked. The
+                # HTTP facade retries a retryable 503 once itself (SPRINT-11 B) before the
+                # catalog moves on, so the primary sees ≥ 1 call and the fallback exactly 1.
+                assert primary_route.called and fallback_route.call_count == 1, res.text
+            assert res.status_code == 200, res.text
+            rows = _rows(
+                "SELECT model, outcome, estimated_cost_usd FROM ai_cost_log ORDER BY created_at"
+            )
+            assert [(r[0], r[1]) for r in rows] == [
+                ("gpt-4o-mini", "error"),
+                ("fallback-1", "ok"),
+            ]
+            # 20 * 0.001/1000 + 10 * 0.002/1000 = 0.00002 + 0.00002 = 0.00004
+            assert rows[1][2] == Decimal("0.000040")
+
+            # A 400 (bad_request) is not a fallback category ⇒ no 2nd call; the reservation
+            # never reached billing ⇒ **refunded** (row deleted, SPRINT-11 B-1) ⇒ no row.
+            _run("DELETE FROM ai_cost_log")
+            with respx.mock(assert_all_called=False) as mock:
+                primary_route = mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    400, json={"error": {"message": "bad"}}
+                )
+                never = mock.post(f"{CATALOG_HOST_2}/v1/chat/completions")
+                res = client.post(
+                    generate, json={"brief": "a brief that triggers a 400 upstream"}, headers=owner
+                )
+                assert primary_route.called, res.text
+                assert not never.called
+            assert res.status_code >= 400 and res.status_code != 503, res.text
+            assert _rows("SELECT model, outcome FROM ai_cost_log") == []
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+        CATALOG_CACHE.invalidate()
+
+
+def test_c13_provider_host_guard_on_pg(integration_app: FastAPI) -> None:
+    """Criterion #13: loopback ``base_url`` ⇒ 422 and **no row**; allow-listed ⇒ 201 and a row;
+    ``public_fetch.py`` is untouched (checked by the planner's ``git diff``)."""
+    from src.core.config import get_settings
+
+    owner = _c_reset(integration_app)
+    base = integration_app.state.settings.model_copy(
+        update={"platform_admin_user_ids": [OWNER_USER_ID]}
+    )
+    integration_app.dependency_overrides[get_settings] = lambda: base
+    try:
+        with TestClient(integration_app) as client:
+            body = {
+                "slug": "ollama",
+                "kind": "openai_compatible",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "credential_ref": "OLLAMA_KEY",
+            }
+            refused = client.post(f"{ADMIN_AI}/providers", json=body, headers=owner)
+            assert refused.status_code == 422, refused.text
+            assert refused.json()["detail"]["error"] == "provider_host_not_allowed"
+            assert _run("SELECT COUNT(*) FROM ai_providers", scalar=True) == 0
+            allowed = base.model_copy(
+                update={"ai_allow_local_provider_hosts": ["127.0.0.1:11434"]}
+            )
+            integration_app.dependency_overrides[get_settings] = lambda: allowed
+            ok = client.post(f"{ADMIN_AI}/providers", json=body, headers=owner)
+            assert ok.status_code == 201, ok.text
+            assert (
+                ok.json()["has_credential"] is True and ok.json()["credential_ref"] == "OLLAMA_KEY"
+            )
+            assert _run("SELECT credential_cipher FROM ai_providers", scalar=True) is None
+    finally:
+        integration_app.dependency_overrides.pop(get_settings, None)
+
+
+def test_c14_probe_writes_admin_probe_row_with_null_brand_on_pg(integration_app: FastAPI) -> None:
+    """Criterion #14 on PG: success ⇒ one ``ai_cost_log`` row ``purpose='admin_probe'``,
+    ``brand_id NULL``, ``outcome='ok'`` priced from ``ai_models``; a provider 500 ⇒ 200
+    ``ok=false`` + category + an ``error`` row; the 6th probe within a minute ⇒ 429."""
+    from src.modules.auth.dependencies import get_rate_limiter
+    from src.modules.auth.infrastructure.rate_limit import InMemoryRateLimiter
+
+    owner = _c_reset(integration_app)
+    get_settings_dep = _c_admin(integration_app)
+    # The integration app wires ``FakeRateLimiter`` (never limits); the probe quota needs the
+    # real in-memory limiter to prove the 6th call within a minute is 429.
+    real_limiter = InMemoryRateLimiter()
+    integration_app.dependency_overrides[get_rate_limiter] = lambda: real_limiter
+    try:
+        with TestClient(integration_app) as client:
+            _, model_id = _c_catalog_seed(client, owner)
+            with respx.mock(assert_all_called=True) as mock:
+                mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("gpt-4o-mini", "pong")
+                )
+                res = client.post(
+                    f"{ADMIN_AI}/probe",
+                    json={"model_id": model_id, "prompt": "ping", "max_tokens": 8},
+                    headers=owner,
+                )
+            assert res.status_code == 200, res.text
+            assert res.json()["ok"] is True and res.json()["preview"] == "pong"
+            assert PROBE_KEY not in res.text
+            rows = _rows(
+                "SELECT purpose, brand_id, outcome, prompt_tokens, completion_tokens,"
+                " estimated_cost_usd, credential_mode FROM ai_cost_log"
+            )
+            assert len(rows) == 1
+            purpose, brand_id, outcome, p_tok, c_tok, cost, mode = rows[0]
+            assert (purpose, brand_id, outcome, p_tok, c_tok, mode) == (
+                "admin_probe",
+                None,
+                "ok",
+                20,
+                10,
+                "platform",
+            )
+            # 20 * 0.00015/1000 + 10 * 0.0006/1000 = 0.000003 + 0.000006 = 0.000009
+            assert cost == Decimal("0.000009")
+
+            with respx.mock(assert_all_called=True) as mock:
+                mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(500, json={"error": "x"})
+                failed = client.post(
+                    f"{ADMIN_AI}/probe",
+                    json={"model_id": model_id, "prompt": "ping"},
+                    headers=owner,
+                )
+            assert failed.status_code == 200, failed.text
+            assert failed.json()["ok"] is False
+            assert failed.json()["error_category"] == "retryable_server_error"
+            assert _rows("SELECT outcome FROM ai_cost_log ORDER BY created_at")[-1] == ("error",)
+
+            # Real in-memory limiter: 5 per minute per admin ⇒ the 6th is 429.
+            statuses = []
+            with respx.mock(assert_all_called=False) as mock:
+                mock.post(f"{CATALOG_HOST}/v1/chat/completions").respond(
+                    200, json=_c_openai_ok("gpt-4o-mini")
+                )
+                for _ in range(4):
+                    statuses.append(
+                        client.post(
+                            f"{ADMIN_AI}/probe",
+                            json={"model_id": model_id, "prompt": "ping"},
+                            headers=owner,
+                        ).status_code
+                    )
+            assert statuses == [200, 200, 200, 429], statuses
+    finally:
+        integration_app.dependency_overrides.pop(get_settings_dep, None)
+        from tests.fakes import FakeRateLimiter
+
+        integration_app.dependency_overrides[get_rate_limiter] = FakeRateLimiter

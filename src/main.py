@@ -29,6 +29,7 @@ from src.modules.auth import router as auth_router
 from src.modules.brand_brain.router import router as brand_brain_router
 from src.modules.content import router as content_router
 from src.modules.content.domain.models import Channel
+from src.modules.entitlements.dependencies import counter_guard_dependency
 from src.modules.entitlements.router import admin_router as entitlements_admin_router
 from src.modules.entitlements.router import router as entitlements_router
 from src.modules.publishing.channels import get_registry
@@ -180,6 +181,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # SPRINT-11 C-5 (D-073/D-076): removable — see src/modules/entitlements/REMOVABILITY.md
     api_v1.include_router(entitlements_router)
     api_v1.include_router(entitlements_admin_router)
+    # SPRINT-11.1 C-1 (D-077/D-076): /admin/ai/* — provider catalog control. Local import so
+    # deleting ``ai_gateway/catalog/`` + this block removes the feature; the kill switch
+    # ``FEATURE_PROVIDER_CATALOG_ENABLED`` only governs the *runtime* resolver, the admin
+    # routes stay available for seeding — see ai_gateway/catalog/REMOVABILITY.md.
+    from src.modules.ai_gateway.catalog.router import router as admin_ai_router
+
+    api_v1.include_router(admin_ai_router)
+    # SPRINT-11.1 A-2 (E2): bind the consumer-owned ``CounterGuard`` ports of ``content`` and
+    # ``whatsapp`` to the entitlements adapter. Removing ``entitlements`` = delete these two
+    # lines; the ports then yield ``None`` (no quota check) — see entitlements/REMOVABILITY.md.
+    from src.modules.content import entitlements_port as content_port
+    from src.modules.whatsapp import entitlements_port as whatsapp_port
+
+    app.dependency_overrides[content_port.get_counter_guard] = counter_guard_dependency(
+        content_port.CounterQuotaExceededError
+    )
+    app.dependency_overrides[whatsapp_port.get_counter_guard] = counter_guard_dependency(
+        whatsapp_port.CounterQuotaExceededError
+    )
     app.include_router(api_v1)
 
     @app.get("/health", tags=["System"], summary="Liveness probe")

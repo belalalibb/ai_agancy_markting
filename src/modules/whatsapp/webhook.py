@@ -54,7 +54,7 @@ from src.core.security import (
     TokenEncryptionService,
     get_token_encryption_service,
 )
-from src.modules.tenancy.infrastructure.postgres_repository import PostgresBrandConsentReader
+from src.modules.tenancy.dependencies import build_brand_consent_reader
 from src.modules.whatsapp.consent import BrandConsentReader
 from src.modules.whatsapp.domain.models import (
     WINDOW,
@@ -67,6 +67,11 @@ from src.modules.whatsapp.domain.models import (
     message_kind_from_type,
 )
 from src.modules.whatsapp.domain.repository import WhatsAppRepository
+from src.modules.whatsapp.entitlements_port import (
+    CounterGuard,
+    CounterQuotaExceededError,
+    get_counter_guard,
+)
 from src.modules.whatsapp.infrastructure.postgres_repository import PostgresWhatsAppRepository
 from src.modules.whatsapp.learning import record_expired
 from src.modules.whatsapp.service import hash_verify_token
@@ -138,6 +143,9 @@ class WebhookOutcome:
     ignored_status_updates: int = 0  # A-3: other brand / unknown wamid / backwards move
     unparsed: int = 0
     expired_drafts: list[UUID] = field(default_factory=list)
+    # SPRINT-11.1 A-2 (E2): conversations stored while the brand is over its monthly
+    # ``monthly_wa_conversations`` ceiling — never a 429 to Meta, flagged here instead.
+    quota_exceeded: list[UUID] = field(default_factory=list)
 
 
 def _ts(value: Any) -> datetime:  # noqa: ANN401 - raw JSON
@@ -207,10 +215,15 @@ class WebhookProcessor:
     """Processes one verified payload inside the request transaction."""
 
     def __init__(
-        self, repo: WhatsAppRepository, *, consent: BrandConsentReader | None = None
+        self,
+        repo: WhatsAppRepository,
+        *,
+        consent: BrandConsentReader | None = None,
+        quota: CounterGuard | None = None,
     ) -> None:
         self._repo = repo
         self._consent = consent  # SPRINT-11 C-6 (D-080)
+        self._quota = quota  # SPRINT-11.1 A-2 (E2): ``None`` ⇒ no plan check
 
     async def handle_webhook_payload(
         self, payload: Any, *, accounts: dict[str, WhatsAppAccount]
@@ -298,6 +311,24 @@ class WebhookProcessor:
         outcome.inbound += 1
         counters.increment("wa_inbound")
         now = datetime.now(tz=UTC)
+        is_new = conversation.created_at == at and conversation.unread_count == 1
+        if is_new and self._quota is not None:
+            # First message of a brand-new conversation: the upsert *inserted* it with
+            # ``created_at = at`` and ``unread_count = 1`` (a later message in the same
+            # second bumps the count to 2). The message is already stored — a signed webhook
+            # never answers 429 (Meta retry semantics); the agent-side routes refuse with 402.
+            try:
+                await self._quota.ensure_within_conversation_quota(account.brand_id)
+            except CounterQuotaExceededError as exc:
+                outcome.quota_exceeded.append(conversation.id)
+                counters.increment("wa_quota_exceeded")
+                logger.info(
+                    "wa quota exceeded: brand=%s conv=%s used=%d limit=%d",
+                    account.brand_id,
+                    conversation.id,
+                    exc.used,
+                    exc.limit,
+                )
         expired = await self._repo.expire_pending_drafts(conversation.id, now=now)
         await record_expired(self._repo, expired, now=now, consent=self._consent)  # D-069/D-080
         outcome.expired_drafts.extend(d.id for d in expired)
@@ -378,11 +409,13 @@ Encryption = Annotated[TokenEncryptionService, Depends(_encryption)]
 def _consent(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> BrandConsentReader:
-    """SPRINT-11 C-6 (D-080): ``brands.learning_consent`` for the ``expired`` signals."""
-    return PostgresBrandConsentReader(session)
+    """SPRINT-11 C-6 (D-080): ``brands.learning_consent`` for the ``expired`` signals —
+    built by ``tenancy``'s composition root (SPRINT-11.1 F2, D-016)."""
+    return build_brand_consent_reader(session)
 
 
 Consent = Annotated[BrandConsentReader, Depends(_consent)]
+Quota = Annotated[CounterGuard | None, Depends(get_counter_guard)]  # SPRINT-11.1 A-2
 
 WEBHOOK_PATH = "/webhooks/whatsapp"
 
@@ -414,7 +447,7 @@ async def verify_webhook(
     status_code=status.HTTP_200_OK,
 )
 async def receive_webhook(
-    request: Request, repo: Repo, encryption: Encryption, consent: Consent
+    request: Request, repo: Repo, encryption: Encryption, consent: Consent, quota: Quota
 ) -> dict[str, int | list[str]]:
     raw_body = await read_body_capped(request)  # A-5 (1): 1 MiB cap, streamed
     header = request.headers.get(SIGNATURE_HEADER)
@@ -453,7 +486,7 @@ async def receive_webhook(
         counters.increment("wa_webhook_rejected")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"error": "webhook_unverified"})
 
-    outcome = await WebhookProcessor(repo, consent=consent).handle_webhook_payload(
+    outcome = await WebhookProcessor(repo, consent=consent, quota=quota).handle_webhook_payload(
         payload, accounts=accounts
     )
     if outcome.unparsed:
@@ -465,4 +498,5 @@ async def receive_webhook(
         "ignored_status_updates": outcome.ignored_status_updates,  # A-3
         "unparsed": outcome.unparsed,
         "expired_drafts": [str(d) for d in outcome.expired_drafts],  # B-3
+        "quota_exceeded": [str(c) for c in outcome.quota_exceeded],  # SPRINT-11.1 A-2
     }

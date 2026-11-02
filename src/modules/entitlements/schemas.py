@@ -93,13 +93,3 @@ class BrandEntitlementPublic(BaseModel):
             limits=ent.limits,
             usage=usage,
         )
-
-
-class LearningConsentUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    learning_consent: LearningConsent
-
-
-class LearningConsentOut(BaseModel):
-    learning_consent: LearningConsent
