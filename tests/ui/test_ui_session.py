@@ -120,8 +120,8 @@ def test_session_resolves_and_brand_pick_lists_both_brands(ui_client: TestClient
     # the owner has two brands in the fixed world ⇒ the pick page, not a redirect
     assert res.status_code == 200 and "data-brands" in res.text
     assert str(BRAND_ID) in res.text and str(BRAND2_ID) in res.text
-    # every authenticated response re-sets the (rotated) session cookie
-    assert res.headers["set-cookie"].startswith("app_session=")
+    # C-0: a valid ``app_access`` is decoded locally — no refresh, no cookie rotation
+    assert "set-cookie" not in res.headers
 
 
 def test_brand_without_grant_is_404_page(ui_client: TestClient) -> None:
@@ -138,7 +138,7 @@ def test_csrf_missing_or_wrong_is_403(ui_client: TestClient) -> None:
     assert len(token) == ui_session.CSRF_HEX_CHARS
     res = ui_client.post(f"{TODAY}/alerts/{SAMPLE}/ack", data={})
     assert res.status_code == 403
-    assert res.headers["set-cookie"].startswith("app_session=")  # rotated cookie kept
+    assert "Max-Age=0" not in res.headers.get("set-cookie", "")  # cookies stay (C-0.3)
     res = ui_client.post(f"{TODAY}/alerts/{SAMPLE}/ack", data={"csrf": token[::-1]})
     assert res.status_code == 403
     res = ui_client.post(f"{INBOX}/{SAMPLE}/stage", data={"csrf": "", "lead_stage": "won"})
@@ -147,28 +147,36 @@ def test_csrf_missing_or_wrong_is_403(ui_client: TestClient) -> None:
 
 def test_csrf_helpers_are_deterministic_per_principal(settings: Settings) -> None:
     user, other = uuid4(), uuid4()
-    token = ui_session.csrf_token(settings, user)
-    assert ui_session.verify_csrf(settings, user, token)
-    assert not ui_session.verify_csrf(settings, other, token)
-    assert not ui_session.verify_csrf(settings, user, None)
+    nonce, other_nonce = ui_session.new_nonce(), ui_session.new_nonce()
+    token = ui_session.csrf_token(settings, user, nonce)
+    assert ui_session.verify_csrf(settings, user, nonce, token)
+    assert not ui_session.verify_csrf(settings, other, nonce, token)
+    assert not ui_session.verify_csrf(settings, user, other_nonce, token)
+    assert not ui_session.verify_csrf(settings, user, nonce, None)
+    assert not ui_session.verify_csrf(settings, user, "", token)
 
 
-def test_csrf_stamp_survives_refresh_rotation(ui_client: TestClient) -> None:
-    """The auth module rotates ``sid`` on every refresh; the stamp must stay valid across
-    consecutive requests (otherwise no form could ever be submitted)."""
+def test_csrf_stamp_is_stable_within_a_login_cycle(ui_client: TestClient) -> None:
+    """The stamp is bound to (user_id, per-login nonce): identical across requests of one
+    login — including across a refresh rotation — otherwise no form could be submitted."""
     login(ui_client)
     first = csrf_of(ui_client.get(TODAY).text)
+    ui_client.cookies.delete("app_access", path="/app")  # force one refresh (rotation)
     second = csrf_of(ui_client.get(TODAY).text)
     assert first == second
 
 
 def test_logout_revokes_session_and_clears_cookie(ui_client: TestClient) -> None:
     value = login(ui_client)
-    res = ui_client.post("/app/logout")
+    token = csrf_of(ui_client.get(TODAY).text)
+    nonce = ui_client.cookies.get("app_csrf")
+    res = ui_client.post("/app/logout", data={"csrf": token})
     assert res.status_code == 303 and res.headers["location"] == LOGIN
-    assert "Max-Age=0" in res.headers["set-cookie"]
-    # the revoked refresh value is useless now
+    cleared = res.headers.get_list("set-cookie")
+    assert len(cleared) == 3 and all("Max-Age=0" in c for c in cleared)
+    # the revoked refresh value is useless now (access cookie gone ⇒ refresh ⇒ 401)
     ui_client.cookies.set("app_session", value, path="/app")
+    ui_client.cookies.set("app_csrf", nonce, path="/app")
     res = ui_client.get(TODAY)
     assert res.status_code == 303
     # logout without a cookie is harmless

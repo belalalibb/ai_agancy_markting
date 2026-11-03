@@ -6,7 +6,10 @@ any API behaviour, migration, or test outside `tests/ui/` and `tests/isolation/`
 ## What it owns
 
 * `src/ui/router.py` — `/app/*` routes (login, brand pick, today, inbox) — `include_in_schema=False`.
-* `src/ui/session.py` — `app_session` cookie (copy of the auth refresh value, `Path=/app`) + CSRF stamp.
+* `src/ui/session.py` — three `Path=/app` cookies: `app_session` (copy of the auth refresh value),
+  `app_access` (the short-lived access JWT, decoded locally — `/auth/refresh` is called only on
+  expiry, SPRINT-12.1-B C-0) and `app_csrf` (per-login nonce) + the CSRF stamp
+  `HMAC(key, user_id:nonce)[:32]`. An in-process `asyncio.Lock` coalesces twin refreshes.
 * `src/ui/api.py` — in-process ASGI client over the public JSON API (transport built by
   `src.core.http.build_in_process_client`; `src/ui` itself never imports `httpx` — D-068).
 * `src/ui/templates/**`, `src/ui/i18n/ar.json`, `src/ui/static/vendor/**` (+ `LICENSES.md`).
@@ -19,7 +22,8 @@ It never imports `sqlalchemy`, any `*.infrastructure`, repositories, or services
 
 ## What imports it
 
-Only `src/main.py` (two statements: `include_router(ui_router)` + `mount("/app/static", …)`).
+Only `src/main.py` (two statements: `include_router(ui_router)` + `mount("/app/static",
+VendorCacheControl(StaticFiles(…)))` — the wrapper adds `Cache-Control` to vendor assets).
 
 ## Removal procedure
 

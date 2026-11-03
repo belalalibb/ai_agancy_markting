@@ -54,6 +54,7 @@ from src.modules.tenancy import router as tenancy_router
 from src.modules.whatsapp.router import router as whatsapp_router
 from src.modules.whatsapp.webhook import router as whatsapp_webhook_router
 from src.ui.router import STATIC_DIR as UI_STATIC_DIR
+from src.ui.router import VendorCacheControl
 from src.ui.router import router as ui_router
 
 logger = logging.getLogger(__name__)
@@ -262,7 +263,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # in-process only. Removing ``src/ui`` = delete the two imports above + these two lines
     # (see src/ui/REMOVABILITY.md).
     app.include_router(ui_router)
-    app.mount("/app/static", StaticFiles(directory=str(UI_STATIC_DIR)), name="ui-static")
+    app.mount(
+        "/app/static",
+        VendorCacheControl(StaticFiles(directory=str(UI_STATIC_DIR))),
+        name="ui-static",
+    )
 
     @app.get("/health", tags=["System"], summary="Liveness probe")
     def health() -> dict[str, str]:

@@ -21,6 +21,7 @@ ALLOWED_PREFIXES = (
 )
 STDLIB = {
     "__future__",
+    "asyncio",  # C-0.2: in-process refresh coalescing lock
     "collections",
     "dataclasses",
     "datetime",
@@ -28,6 +29,8 @@ STDLIB = {
     "hmac",
     "json",
     "pathlib",
+    "secrets",  # C-0.3: per-login CSRF nonce
+    "time",  # C-0.2: refresh-result cache expiry
     "typing",
     "uuid",
 }
@@ -72,6 +75,8 @@ def test_removability_doc_is_complete() -> None:
     needles = (
         "src/main.py",
         "app_session",
+        "app_access",
+        "app_csrf",
         "tests/ui",
         "jinja2",
         "python-multipart",

@@ -32,13 +32,14 @@
   {% if plan %}
   <p data-plan="{{ plan.plan }}" class="plan-bar">
     {{ t("plan.label") }}: {{ t("plan." ~ plan.plan) }} ·
-    {{ t("plan.posts") }}: {{ plan.usage.get("monthly_posts", 0) }} / {{ plan.limits.monthly_posts }}
+    {{ t("plan.posts") }}: {{ plan.usage.get("monthly_posts", 0) }} / {{ plan.limits.monthly_posts }} ·
+    {{ t("plan.conversations") }}: {{ plan.usage.get("monthly_wa_conversations", 0) }} / {{ plan.limits.monthly_wa_conversations }}
     {% if not plan.is_active %} · <mark>{{ t("plan.inactive") }}</mark>{% endif %}
   </p>
   {% endif %}
 </header>
 <main class="container">
-  {% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
+  <div id="flash">{% if flash and not partial_flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}</div>
   {% block content %}{% endblock %}
 </main>
 </body>

@@ -1,3 +1,4 @@
+{% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
 <div class="grid">
   <article data-card="alerts">
     <header><strong>{{ t("today.alerts") }}</strong> <small>({{ open_count }})</small></header>

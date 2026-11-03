@@ -95,6 +95,7 @@ def login(client: TestClient) -> str:
     assert response.headers["location"] == "/app/"
     value = client.cookies.get("app_session")
     assert value, response.headers.get("set-cookie")
+    assert client.cookies.get("app_access") and client.cookies.get("app_csrf")
     return value
 
 
