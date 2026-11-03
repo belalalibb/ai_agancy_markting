@@ -86,7 +86,7 @@ def test_protected_route_count_is_reported() -> None:
     # SPRINT-12 C-1: +2 (POST/DELETE …/brain/diagnoses/{diag_id}/share) ⇒ 83; public 6 ⇒ 7.
     # (The directive's 82 assumed batch approval — deferred to 12.1 by the size valve — and
     # a PATCH-based share; the real routes are POST/DELETE share — documented in §6.)
-    assert PROTECTED_ROUTE_COUNT == 83, PROTECTED  # SPRINT-12 B: 77 + 4; C-1: + 2
+    assert PROTECTED_ROUTE_COUNT == 84, PROTECTED  # SPRINT-12 B: 77 + 4; C-1: + 2; 12.1 A-2: + 1
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)

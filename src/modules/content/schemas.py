@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.modules.content.domain.models import (
     ApprovalEvent,
@@ -81,6 +81,46 @@ class ApprovalNoteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     note: str | None = Field(default=None, max_length=1000)
+
+
+BATCH_MAX_ITEMS = 50
+
+
+class BatchApprovalRequest(BaseModel):
+    """SPRINT-12.1 A-2 (C-2 of SPRINT-12, D-055): 1–50 **unique** item ids."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_ids: list[UUID] = Field(min_length=1, max_length=BATCH_MAX_ITEMS)
+    note: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("item_ids")
+    @classmethod
+    def _unique(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            msg = "item_ids must be unique"
+            raise ValueError(msg)
+        return value
+
+
+class BatchApprovalResult(BaseModel):
+    """One line per requested item — ``approved`` or ``skipped`` with the refusal **code**
+    (never a message from the lifecycle): ``content_not_found``, ``invalid_transition``,
+    ``approval_requires_owner``, ``entitlement_quota_exceeded``, ``entitlement_plan_inactive``…"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: UUID
+    status: Literal["approved", "skipped"]
+    error: str | None = None
+
+
+class BatchApprovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[BatchApprovalResult]
+    approved: int
+    skipped: int
 
 
 class ScheduleRequest(BaseModel):
