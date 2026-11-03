@@ -77,6 +77,7 @@ from src.modules.whatsapp.infrastructure.postgres_repository import PostgresWhat
 from src.modules.whatsapp.lead_loop import (
     LeadLoopService,
     PublishedPostLookup,
+    get_lead_loop_enabled,
     get_published_post_lookup,
 )
 from src.modules.whatsapp.learning import record_expired
@@ -439,6 +440,7 @@ def _consent(
 Consent = Annotated[BrandConsentReader, Depends(_consent)]
 Quota = Annotated[CounterGuard | None, Depends(get_counter_guard)]  # SPRINT-11.1 A-2
 Posts = Annotated[PublishedPostLookup | None, Depends(get_published_post_lookup)]  # SPRINT-12
+LeadLoopOn = Annotated[bool, Depends(get_lead_loop_enabled)]  # SPRINT-13 A-2 (DB flag first)
 
 WEBHOOK_PATH = "/webhooks/whatsapp"
 
@@ -476,6 +478,7 @@ async def receive_webhook(
     consent: Consent,
     quota: Quota,
     posts: Posts,
+    lead_loop_on: LeadLoopOn,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, int | list[str]]:
     raw_body = await read_body_capped(request)  # A-5 (1): 1 MiB cap, streamed
@@ -515,7 +518,7 @@ async def receive_webhook(
         counters.increment("wa_webhook_rejected")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"error": "webhook_unverified"})
 
-    lead_loop = LeadLoopService(repo, posts=posts, enabled=settings.feature_lead_loop)
+    lead_loop = LeadLoopService(repo, posts=posts, enabled=lead_loop_on)
     outcome = await WebhookProcessor(
         repo, consent=consent, quota=quota, lead_loop=lead_loop
     ).handle_webhook_payload(payload, accounts=accounts)

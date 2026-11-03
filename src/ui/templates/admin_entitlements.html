@@ -7,6 +7,16 @@
   <button type="submit" class="outline">{{ t("admin.lookup") }}</button>
 </form>
 {% if ent %}
+{% if brand %}
+<article data-card="suspension" data-suspended="{{ brand.suspended | lower }}">
+  <header><strong>{{ brand.name }}</strong> · {% if brand.suspended %}<mark>{{ t("admin.suspended") }}</mark>{% else %}{{ t("admin.not_suspended") }}{% endif %}</header>
+  {% set act = "unsuspend" if brand.suspended else "suspend" %}
+  <form method="post" action="/app/admin/entitlements/{{ act }}" data-form="{{ act }}" hx-confirm="{{ t('admin.confirm_' ~ act) }}" onsubmit="return confirm(this.getAttribute('hx-confirm'))">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="brand_id" value="{{ brand_id }}">
+    <button type="submit" class="{{ 'outline' if brand.suspended else 'secondary' }}">{{ t("admin." ~ act) }}</button>
+  </form>
+</article>
+{% endif %}
 <article data-card="entitlement" data-plan="{{ ent.plan }}">
   <header><strong>{{ t("plan." ~ ent.plan) }}</strong>{% if not ent.is_active %} <mark>{{ t("plan.inactive") }}</mark>{% endif %} · {{ t("settings.active_until") }}: {{ ent.active_until or "—" }}</header>
   <ul>{% for key, limit in ent.limits.items() %}<li data-limit="{{ key }}">{{ t("limit." ~ key) }}: {{ limit }}</li>{% endfor %}</ul>

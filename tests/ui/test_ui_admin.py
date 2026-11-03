@@ -448,3 +448,106 @@ def test_playbook_loader_fails_on_malformed_file(tmp_path) -> None:  # noqa: ANN
     (tmp_path / "clinics.json").unlink()
     with pytest.raises(pb.PlaybookLoadError, match="missing"):
         pb.load_playbooks(tmp_path)
+
+
+# ------------------------------------------------ SPRINT-13 A: audit / dead-letter ---
+def test_admin_audit_tab_lists_actions_and_toggles_flags(
+    admin_ui: FastAPI, ui_client: TestClient
+) -> None:
+    """``?tab=audit`` renders the kill switches + the last admin acts (read-only); flipping a
+    flag goes through ``PUT /admin/flags/{key}`` (D-068) and lands as one audit row."""
+    from src.modules.ops.service import PLATFORM_FLAGS
+
+    PLATFORM_FLAGS.invalidate()
+    login(ui_client)
+    res = ui_client.get(ADMIN_AI)
+    assert res.status_code == 200
+    for tab in ("audit", "dead_letter"):
+        assert f"?tab={tab}" in res.text and MESSAGES[f"admin.tab_{tab}"] in res.text
+    res = ui_client.get(f"{ADMIN_AI}?tab=audit", headers=HX)
+    assert res.status_code == 200, res.text
+    assert 'data-flag="platform_readonly" data-value="false"' in res.text
+    assert MESSAGES["flag.platform_readonly"] in res.text and "data-empty" in res.text
+    csrf = csrf_of(ui_client.get(ADMIN_AI).text)
+    res = ui_client.post(
+        f"{ADMIN_AI}/audit/flag",
+        data={"csrf": csrf, "key": "feature_pulse", "value": "false"},
+        headers=HX,
+    )
+    assert res.status_code == 200 and MESSAGES["admin.saved"] in res.text, res.text
+    assert 'data-flag="feature_pulse" data-value="false"' in res.text
+    assert "data-action=" in res.text and "flag_set" in res.text and "data-empty" not in res.text
+    ops_repo = admin_ui.state.ops_repo
+    assert [a.action for a in ops_repo.actions] == ["flag_set"]
+    # unknown key ⇒ 404 page (no API call), bad tab action ⇒ 404 too
+    res = ui_client.post(
+        f"{ADMIN_AI}/audit/flag", data={"csrf": csrf, "key": "nope", "value": "true"}
+    )
+    assert res.status_code == 404
+    ui_client.post(
+        f"{ADMIN_AI}/audit/flag", data={"csrf": csrf, "key": "feature_pulse", "value": "true"}
+    )
+    PLATFORM_FLAGS.invalidate()
+
+
+def test_admin_dead_letter_tab_lists_and_requeues(
+    admin_ui: FastAPI, ui_client: TestClient
+) -> None:
+    from datetime import UTC, datetime
+
+    from src.modules.ops.domain import DeadLetterJob
+
+    ops_repo = admin_ui.state.ops_repo
+    job = DeadLetterJob(
+        job_id=uuid4(),
+        item_id=uuid4(),
+        brand_id=BRAND_ID,
+        channel="facebook_page",
+        error_class="transient",
+        attempt_count=3,
+        max_attempts=3,
+        failed_at=datetime(2026, 11, 3, tzinfo=UTC),
+    )
+    ops_repo.jobs[job.job_id] = {"status": "failed", "revision_id": uuid4(), "job": job}
+    login(ui_client)
+    res = ui_client.get(f"{ADMIN_AI}?tab=dead_letter", headers=HX)
+    assert res.status_code == 200 and f'data-job="{job.job_id}"' in res.text
+    assert (
+        "transient" in res.text and "3 / 3" in res.text and MESSAGES["admin.requeue"] in res.text
+    )
+    csrf = csrf_of(ui_client.get(ADMIN_AI).text)
+    res = ui_client.post(
+        f"{ADMIN_AI}/dead_letter/requeue", data={"csrf": csrf, "id": str(job.job_id)}, headers=HX
+    )
+    assert res.status_code == 200 and MESSAGES["admin.saved"] in res.text, res.text
+    assert MESSAGES["admin.dead_letter_empty"] in res.text  # the job left the dead letter
+    assert ops_repo.jobs[job.job_id]["status"] == "queued"
+    assert [a.action for a in ops_repo.actions] == ["job_requeued"]
+    # second requeue ⇒ 409 job_not_failed ⇒ translated flash, never a 500
+    res = ui_client.post(
+        f"{ADMIN_AI}/dead_letter/requeue", data={"csrf": csrf, "id": str(job.job_id)}, headers=HX
+    )
+    assert res.status_code == 200 and MESSAGES["error.job_not_failed"] in res.text
+    assert "job_not_failed" not in res.text
+
+
+def test_admin_entitlements_suspend_and_unsuspend_brand(
+    admin_ui: FastAPI, ui_client: TestClient
+) -> None:
+    login(ui_client)
+    res = ui_client.get(f"{ADMIN_ENT}?brand_id={BRAND_ID}")
+    assert res.status_code == 200, res.text
+    assert 'data-card="suspension" data-suspended="false"' in res.text
+    assert 'data-form="suspend"' in res.text and MESSAGES["admin.confirm_suspend"] in res.text
+    csrf = csrf_of(res.text)
+    res = ui_client.post(f"{ADMIN_ENT}/suspend", data={"csrf": csrf, "brand_id": str(BRAND_ID)})
+    assert res.status_code == 200 and MESSAGES["admin.saved"] in res.text, res.text
+    assert 'data-suspended="true"' in res.text and 'data-form="unsuspend"' in res.text
+    assert MESSAGES["admin.suspended"] in res.text
+    ops_repo = admin_ui.state.ops_repo
+    assert [a.action for a in ops_repo.actions] == ["brand_suspended"]
+    res = ui_client.post(f"{ADMIN_ENT}/unsuspend", data={"csrf": csrf, "brand_id": str(BRAND_ID)})
+    assert res.status_code == 200 and 'data-suspended="false"' in res.text
+    assert [a.action for a in ops_repo.actions] == ["brand_suspended", "brand_unsuspended"]
+    # missing brand_id ⇒ 404 page (no API call)
+    assert ui_client.post(f"{ADMIN_ENT}/suspend", data={"csrf": csrf}).status_code == 404

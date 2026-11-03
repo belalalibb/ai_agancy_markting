@@ -285,7 +285,8 @@ def test_b_migration_0016_round_trip_on_pg() -> None:
     """``head ⇒ 0015 ⇒ head``: three tables, five columns and eleven named constraints
     vanish and come back; nothing else is dropped; CHECKs refuse bad rows."""
     cfg = alembic_config(TEST_DATABASE_URL)
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0016"
+    command.upgrade(cfg, "head")  # self-heal if an earlier round-trip left the DB behind
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0017"
     _run(f"TRUNCATE {', '.join(TABLES)} CASCADE")
 
     def _tables() -> set[str]:
@@ -305,7 +306,8 @@ def test_b_migration_0016_round_trip_on_pg() -> None:
 
     assert NEW_TABLES <= _tables() and NEW_CONSTRAINTS <= _constraints()
     assert NEW_COLUMNS <= _columns()
-    before = _tables() - NEW_TABLES
+    # SPRINT-13: ``head`` is 0017, so going to 0015 also drops the 0017 tables.
+    before = _tables() - NEW_TABLES - {"admin_actions", "platform_flags", "brand_exports"}
 
     command.downgrade(cfg, "0015")
     assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0015"
@@ -316,7 +318,7 @@ def test_b_migration_0016_round_trip_on_pg() -> None:
     assert {"ai_providers", "wa_conversations", "brand_recommendations"} <= _tables()
 
     command.upgrade(cfg, "head")
-    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0016"
+    assert _run("SELECT version_num FROM alembic_version", scalar=True) == "0017"
     assert NEW_TABLES <= _tables() and NEW_CONSTRAINTS <= _constraints()
     assert NEW_COLUMNS <= _columns()
     assert {

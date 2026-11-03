@@ -70,8 +70,17 @@ Repo = Annotated[PulseRepository, Depends(get_pulse_repository)]
 Resolver = Annotated[BrandAccessResolver, Depends(get_brand_access_resolver)]
 
 
-def _ensure_enabled(settings: Settings) -> None:
-    if not settings.feature_pulse:
+def get_pulse_enabled(settings: Annotated[Settings, Depends(get_settings)]) -> bool:
+    """SPRINT-13 A-2: consumer-owned port for the ``feature_pulse`` switch — ``Settings``
+    here; ``src/main.py`` overrides it with the DB-first platform flag (D-016)."""
+    return settings.feature_pulse
+
+
+PulseOn = Annotated[bool, Depends(get_pulse_enabled)]
+
+
+def _ensure_enabled(enabled: bool) -> None:
+    if not enabled:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             detail={"error": "pulse_disabled", "message": "Pulse is disabled (FEATURE_PULSE)"},
@@ -98,11 +107,11 @@ async def list_alerts(
     actor: CurrentUser,
     resolver: Resolver,
     repo: Repo,
-    settings: Annotated[Settings, Depends(get_settings)],
+    enabled: PulseOn,
     open: Annotated[bool, Query(description="Only alerts not yet acknowledged")] = True,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 50,
 ) -> AlertPage:
-    _ensure_enabled(settings)
+    _ensure_enabled(enabled)
     await _authorise(resolver, actor.tenant_id, brand_id, READ_ROLES)
     alerts = await repo.list_alerts(brand_id, open_only=open, limit=limit)
     return AlertPage(
@@ -120,9 +129,9 @@ async def acknowledge_alert(
     actor: CurrentUser,
     resolver: Resolver,
     repo: Repo,
-    settings: Annotated[Settings, Depends(get_settings)],
+    enabled: PulseOn,
 ) -> AlertPublic:
-    _ensure_enabled(settings)
+    _ensure_enabled(enabled)
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     alert = await repo.acknowledge(
         brand_id, alert_id, actor_user_id=actor.user_id, now=datetime.now(tz=UTC)

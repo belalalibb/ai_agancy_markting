@@ -103,9 +103,12 @@ _PUBLISH_FAILED = text(
     "SELECT id, brand_id, last_error_class FROM publish_jobs "
     "WHERE status = 'failed' AND updated_at >= :since"
 )
+# SPRINT-13 A-4: a connection whose periodic refresh failed is ``reauth_required`` (the marker
+# ``social_connect`` already writes) ⇒ same alert kind with ``reason = refresh_failed``.
 _TOKEN_EXPIRING = text(
-    "SELECT id, brand_id, token_expires_at FROM social_connections "
-    "WHERE status = 'active' AND token_expires_at IS NOT NULL AND token_expires_at <= :until"
+    "SELECT id, brand_id, token_expires_at, status FROM social_connections "
+    "WHERE (status = 'active' AND token_expires_at IS NOT NULL AND token_expires_at <= :until) "
+    "OR status = 'reauth_required'"
 )
 _ACCOUNT_COLUMNS = text(
     "SELECT column_name FROM information_schema.columns "
@@ -252,19 +255,23 @@ class PgPulseRepository:
 
     async def token_expiring(self, now: datetime, *, days: int) -> list[Finding]:
         rows = await self._session.execute(_TOKEN_EXPIRING, {"until": now + timedelta(days=days)})
-        return [
-            Finding(
-                brand_id=brand_id,
-                kind="meta_token_expiring",
-                severity="critical" if expires <= now else "warning",
-                payload={
-                    "ref": str(conn_id),
-                    "connection_id": str(conn_id),
-                    "token_expires_at": expires.isoformat(),
-                },
+        out: list[Finding] = []
+        for conn_id, brand_id, expires, conn_status in rows.all():
+            failed = conn_status == "reauth_required"
+            out.append(
+                Finding(
+                    brand_id=brand_id,
+                    kind="meta_token_expiring",
+                    severity="critical" if failed or expires <= now else "warning",
+                    payload={
+                        "ref": str(conn_id),
+                        "connection_id": str(conn_id),
+                        "token_expires_at": expires.isoformat() if expires else None,
+                        "reason": "refresh_failed" if failed else "expiring",
+                    },
+                )
             )
-            for conn_id, brand_id, expires in rows.all()
-        ]
+        return out
 
     async def quality_degraded(self, now: datetime) -> list[Finding]:
         columns = {c for (c,) in (await self._session.execute(_ACCOUNT_COLUMNS)).all()}

@@ -466,8 +466,9 @@ async def test_pg_pulse_repository_eight_checks_map_rows_to_findings() -> None:
             StubResult(rows=[(job, BRAND_ID, "permanent")]),
             StubResult(
                 rows=[
-                    (conn, BRAND_ID, NOW - timedelta(days=1)),
-                    (conn, BRAND2_ID, NOW + timedelta(days=3)),
+                    (conn, BRAND_ID, NOW - timedelta(days=1), "active"),
+                    (conn, BRAND2_ID, NOW + timedelta(days=3), "active"),
+                    (uuid4(), BRAND2_ID, None, "reauth_required"),  # SPRINT-13 A-4
                 ]
             ),
             StubResult(rows=[("id",), ("brand_id",)]),  # information_schema: no quality column
@@ -509,7 +510,9 @@ async def test_pg_pulse_repository_eight_checks_map_rows_to_findings() -> None:
     assert session.executed[3][1] == {"since": NOW - timedelta(hours=24)}
 
     t = await repo.token_expiring(NOW, days=7)
-    assert [f.severity for f in t] == ["critical", "warning"] and t[0].payload["ref"] == str(conn)
+    assert [f.severity for f in t] == ["critical", "warning", "critical"]
+    assert t[0].payload["ref"] == str(conn) and t[0].payload["reason"] == "expiring"
+    assert t[2].payload["reason"] == "refresh_failed" and t[2].payload["token_expires_at"] is None
     assert session.executed[4][1] == {"until": NOW + timedelta(days=7)}
 
     assert await repo.quality_degraded(NOW) == []  # column absent ⇒ documented deviation

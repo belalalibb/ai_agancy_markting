@@ -105,4 +105,36 @@
   {% if probe.preview %}<pre data-preview>{{ probe.preview }}</pre>{% endif %}
 </article>
 {% endif %}
+{% elif tab == "audit" %}
+<article data-card="flags">
+  <header><strong>{{ t("admin.flags") }}</strong></header>
+  {% for f in flags %}
+  <form method="post" action="{{ base }}flag" hx-post="{{ base }}flag" hx-target="#admin-tab" data-form="flag-{{ f.key }}" class="grid" hx-confirm="{{ t('admin.confirm_flag') }}" onsubmit="return confirm(this.getAttribute('hx-confirm'))">
+    {{ hidden(none) }}<input type="hidden" name="key" value="{{ f.key }}"><input type="hidden" name="value" value="{{ 'false' if f.value else 'true' }}">
+    <span data-flag="{{ f.key }}" data-value="{{ f.value | lower }}">{{ t("flag." ~ f.key) }} · <small>{{ t("admin.flag_on") if f.value else t("admin.flag_off") }} ({{ t("admin.flag_source_" ~ f.source) }})</small></span>
+    <button type="submit" class="{{ 'secondary' if not f.value else '' }} outline">{{ t("admin.flag_turn_off") if f.value else t("admin.flag_turn_on") }}</button>
+  </form>
+  {% endfor %}
+</article>
+<table data-table="actions">
+  <thead><tr><th>{{ t("admin.at") }}</th><th>{{ t("admin.action") }}</th><th>{{ t("admin.target") }}</th><th>{{ t("admin.actor") }}</th></tr></thead>
+  <tbody>
+    {% for a in actions %}
+    <tr data-action="{{ a.id }}"><td>{{ a.at }}</td><td>{{ a.action }}</td><td>{{ a.target_kind }} · <small>{{ a.target_id }}</small></td><td><small>{{ a.actor_user_id or t("admin.system") }}</small></td></tr>
+    {% else %}<tr><td colspan="4" data-empty>{{ t("admin.empty") }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% elif tab == "dead_letter" %}
+<table data-table="dead-letter">
+  <thead><tr><th>{{ t("admin.failed_at") }}</th><th>{{ t("admin.channel") }}</th><th>{{ t("admin.error_class") }}</th><th>{{ t("admin.attempts") }}</th><th>{{ t("admin.target") }}</th><th></th></tr></thead>
+  <tbody>
+    {% for j in jobs %}
+    <tr data-job="{{ j.job_id }}">
+      <td>{{ j.failed_at }}</td><td>{{ j.channel }}</td><td>{{ j.error_class or "—" }}</td><td>{{ j.attempt_count }} / {{ j.max_attempts }}</td>
+      <td><small>{{ j.brand_id }} · {{ j.item_id }}</small></td>
+      <td><form method="post" action="{{ base }}requeue" hx-post="{{ base }}requeue" hx-target="#admin-tab" hx-confirm="{{ t('admin.confirm_requeue') }}" onsubmit="return confirm(this.getAttribute('hx-confirm'))">{{ hidden(j.job_id) }}<button type="submit" class="outline">{{ t("admin.requeue") }}</button></form></td>
+    </tr>
+    {% else %}<tr><td colspan="6" data-empty>{{ t("admin.dead_letter_empty") }}</td></tr>{% endfor %}
+  </tbody>
+</table>
 {% endif %}

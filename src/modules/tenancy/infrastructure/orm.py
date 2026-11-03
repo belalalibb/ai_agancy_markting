@@ -58,6 +58,8 @@ class BrandRow(Base):
     referred_by_brand_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("brands.id", ondelete="SET NULL"), nullable=True
     )
+    # SPRINT-13 A-2 (migration 0017): admin kill switch.
+    suspended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )

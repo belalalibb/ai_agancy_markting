@@ -39,6 +39,7 @@ from src.modules.auth.dependencies import (
 from src.modules.auth.domain.rate_limit import RateLimiter
 from src.modules.content.exceptions import ContentError
 from src.modules.content.router import to_http as content_to_http
+from src.modules.ops.audit import Audit  # SPRINT-13 A-1
 from src.modules.tenancy.dependencies import (
     get_brand_access_resolver,
     get_brand_consent_reader,
@@ -97,6 +98,7 @@ from src.modules.whatsapp.infrastructure.postgres_repository import (
 from src.modules.whatsapp.lead_loop import (
     LeadLoopService,
     PublishedPostLookup,
+    get_lead_loop_enabled,
     get_published_post_lookup,
 )
 from src.modules.whatsapp.schemas import (
@@ -208,13 +210,12 @@ def get_suggestion_service(
 
 Suggestions = Annotated[ReplySuggestionService, Depends(get_suggestion_service)]
 Posts = Annotated[PublishedPostLookup | None, Depends(get_published_post_lookup)]  # SPRINT-12
+LeadLoopOn = Annotated[bool, Depends(get_lead_loop_enabled)]  # SPRINT-13 A-2 (DB flag first)
 
 
-def get_lead_loop_service(
-    repo: Repo, settings: Annotated[Settings, Depends(get_settings)], posts: Posts
-) -> LeadLoopService:
+def get_lead_loop_service(repo: Repo, enabled: LeadLoopOn, posts: Posts) -> LeadLoopService:
     """SPRINT-12 B-2 (D-079): the lead loop over the request repository."""
-    return LeadLoopService(repo, posts=posts, enabled=settings.feature_lead_loop)
+    return LeadLoopService(repo, posts=posts, enabled=enabled)
 
 
 LeadLoop = Annotated[LeadLoopService, Depends(get_lead_loop_service)]
@@ -788,7 +789,7 @@ admin_router = APIRouter(prefix="/admin/entitlements", tags=["Platform admin"])
     responses={404: {"description": "whatsapp_account_not_found"}},
 )
 async def patch_number_cap(
-    account_id: UUID, payload: NumberCapPatch, actor: PlatformAdmin, repo: Repo
+    account_id: UUID, payload: NumberCapPatch, actor: PlatformAdmin, repo: Repo, audit: Audit
 ) -> NumberCapPublic:
     if payload.daily_reply_cap is None and payload.kill_switch is None:
         raise HTTPException(
@@ -814,6 +815,17 @@ async def patch_number_cap(
         updated_at=now,
     )
     await repo.upsert_number_cap(cap)
+    await audit.record(  # SPRINT-13 A-1 — same session as the upsert
+        actor_user_id=actor.user_id,
+        action="wa_caps_set",
+        target_kind="whatsapp_account",
+        target_id=str(account_id),
+        before={
+            "daily_reply_cap": current.daily_reply_cap if current else None,
+            "kill_switch": current.kill_switch if current else None,
+        },
+        after={"daily_reply_cap": cap.daily_reply_cap, "kill_switch": cap.kill_switch},
+    )
     used = await repo.count_outbound_since(
         account_id, since=now.replace(hour=0, minute=0, second=0, microsecond=0)
     )

@@ -260,6 +260,10 @@ def app(
         get_entitlement_repository,
     )
     from src.modules.entitlements.service import PgEntitlementLimitsReader
+    from src.modules.ops.audit import get_admin_audit
+    from src.modules.ops.guards import get_ops_repository
+    from src.modules.ops.router import get_ops_service
+    from src.modules.ops.service import OpsService
     from src.modules.social_connect.router import get_repository, get_status_marker
     from src.modules.tenancy.dependencies import (
         get_brand_access_resolver,
@@ -270,8 +274,22 @@ def app(
     )
     from src.modules.whatsapp.lead_loop import get_published_post_lookup
 
+    from tests.fakes import FakeOpsRepository
+
     seed_world(store)
     application = create_app(settings)
+    # SPRINT-13 A: the readonly / suspension guards and the audit hook run on every write —
+    # one shared in-memory ops repository so the fake-wired app never opens a session.
+    application.state.ops_repo = FakeOpsRepository(store)
+    application.dependency_overrides[get_ops_repository] = lambda: application.state.ops_repo
+    application.dependency_overrides[get_ops_service] = lambda: OpsService(
+        application.state.ops_repo
+    )
+    from src.modules.ops.audit import AdminAudit
+
+    application.dependency_overrides[get_admin_audit] = lambda: AdminAudit(
+        OpsService(application.state.ops_repo)
+    )
     application.dependency_overrides[get_repository] = lambda: fake_repo
     application.dependency_overrides[get_status_marker] = lambda: status_marker
     # SPRINT-12 B-2 (D-079): ``main.py`` binds the PG-backed published-post lookup; the

@@ -428,6 +428,10 @@ class StubResult:
     def all(self) -> list[object]:
         return list(self._rows) if self._rows else list(self._scalars)
 
+    def first(self) -> object:
+        """SPRINT-13 ``ops`` repository: ``Result.first()`` over scripted ``rows``."""
+        return self._rows[0] if self._rows else None
+
 
 class StubSession:
     """Records every statement; replays scripted :class:`StubResult`s in order.
@@ -1857,3 +1861,86 @@ class FakeCatalogRepository:
             models=list(self.models.values()),
             routes=list(self.routes),
         )
+
+
+# --------------------------------------------------------------- SPRINT-13 ops ---
+class FakeOpsRepository:
+    """In-memory ``PgOpsRepository`` twin (SPRINT-13 Part A): audit rows, flags, brand
+    suspension, a dead-letter job table and platform-wide alerts. ``fail_next_action`` lets a
+    test prove the audit row rolls back with the act (A-1)."""
+
+    def __init__(self, store: FakeStore | None = None) -> None:
+        self.store = store
+        self.actions: list[Any] = []
+        self.flags: dict[str, Any] = {}
+        self.suspended: dict[UUID, datetime | None] = {}
+        self.jobs: dict[UUID, dict[str, Any]] = {}  # job_id ⇒ {status, revision_id, job}
+        self.alerts: list[dict[str, Any]] = []
+        self.flag_reads = 0
+        self.fail_next_action = False
+        self.requeue_events: list[tuple[UUID, UUID]] = []  # (item_id, actor_user_id)
+
+    async def add_action(self, action: Any) -> Any:
+        if self.fail_next_action:
+            self.fail_next_action = False
+            raise RuntimeError("audit write failed")
+        self.actions.append(action)
+        return action
+
+    async def list_actions(self, *, target_kind: str | None, target_id: str | None, limit: int):  # noqa: ANN201
+        rows = [
+            a
+            for a in self.actions
+            if (not target_kind or a.target_kind == target_kind)
+            and (not target_id or a.target_id == target_id)
+        ]
+        return sorted(rows, key=lambda a: a.at, reverse=True)[:limit]
+
+    async def get_flags(self) -> dict[str, Any]:
+        self.flag_reads += 1
+        return dict(self.flags)
+
+    async def set_flag(self, key: str, value: bool, *, now: datetime) -> Any:
+        from src.modules.ops.domain import PlatformFlag
+
+        flag = PlatformFlag(key=key, value=value, updated_at=now)  # type: ignore[arg-type]
+        self.flags[key] = flag
+        return flag
+
+    async def brand_suspension(self, brand_id: UUID) -> Any:
+        from src.modules.ops.domain import BrandSuspension
+
+        known = self.store is not None and brand_id in self.store.brands
+        if not known and brand_id not in self.suspended:
+            return None
+        return BrandSuspension(brand_id=brand_id, suspended_at=self.suspended.get(brand_id))
+
+    async def set_suspended(self, brand_id: UUID, at: datetime | None) -> bool:
+        self.suspended[brand_id] = at
+        if self.store is not None and brand_id in self.store.brands:  # mirror brands.suspended_at
+            self.store.brands[brand_id] = self.store.brands[brand_id].model_copy(
+                update={"suspended_at": at}
+            )
+        return True
+
+    async def dead_letter(self, *, limit: int) -> list[Any]:
+        failed = [j["job"] for j in self.jobs.values() if j["status"] == "failed"]
+        return sorted(failed, key=lambda j: j.failed_at, reverse=True)[:limit]
+
+    async def job_status(self, job_id: UUID) -> Any:
+        row = self.jobs.get(job_id)
+        return None if row is None else (row["job"], row["status"], row["revision_id"])
+
+    async def requeue(
+        self, job: Any, *, revision_id: UUID, actor_user_id: UUID, now: datetime
+    ) -> bool:
+        row = self.jobs[job.job_id]
+        if row["status"] != "failed":
+            return False
+        row["status"] = "queued"
+        row["job"] = job.model_copy(update={"attempt_count": 0})
+        self.requeue_events.append((job.item_id, actor_user_id))
+        return True
+
+    async def admin_alerts(self, *, kind: str, limit: int) -> list[dict[str, Any]]:
+        return [a for a in self.alerts if a["kind"] == kind][:limit]
