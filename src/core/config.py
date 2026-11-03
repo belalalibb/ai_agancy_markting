@@ -141,6 +141,11 @@ class Settings(BaseSettings):
     # admin route answers 403 ``platform_admin_required`` (safe by default). Moves to the
     # database in SPRINT-11.1.
     platform_admin_user_ids: Annotated[list[UUID], NoDecode] = Field(default_factory=list)
+    # SPRINT-12.1-B D-3: privacy-friendly analytics for the ``/app`` UI. ``None`` (default)
+    # ⇒ **no tag at all** in any page; set ⇒ one ``<script defer>`` with the website id.
+    # Read-only settings — they change no other behaviour.
+    umami_website_id: str | None = None
+    umami_script_url: str = "https://cloud.umami.is/script.js"
     # SPRINT-11.1 B-3 (D-077 + D-076 kill switch): ``True`` routes every completion through
     # the runtime provider catalog (``ai_providers`` / ``ai_models`` / ``ai_routing``) with
     # per-model prices; ``False`` (default) keeps the ``AI_PROVIDER`` / ``AI_DEFAULT_MODEL`` /

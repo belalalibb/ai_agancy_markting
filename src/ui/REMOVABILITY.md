@@ -6,7 +6,8 @@ any API behaviour, migration, or test outside `tests/ui/` and `tests/isolation/`
 ## What it owns
 
 * `src/ui/router.py` — `/app/*` routes (login, brand pick, today, inbox, content, diagnosis,
-  settings — SPRINT-12.1-B C) — `include_in_schema=False`. Every screen reads/writes only through
+  settings — SPRINT-12.1-B C; `/app/admin/ai` 4 tabs + probe and `/app/admin/entitlements` —
+  D, non-admins ⇒ 404 before any API call) — `include_in_schema=False`. Every screen reads/writes only through
   `ApiClient`; roles, entitlements, consent and the content state machine are enforced upstream.
 * `src/ui/session.py` — three `Path=/app` cookies: `app_session` (copy of the auth refresh value),
   `app_access` (the short-lived access JWT, decoded locally — `/auth/refresh` is called only on
@@ -15,6 +16,10 @@ any API behaviour, migration, or test outside `tests/ui/` and `tests/isolation/`
 * `src/ui/api.py` — in-process ASGI client over the public JSON API (transport built by
   `src.core.http.build_in_process_client`; `src/ui` itself never imports `httpx` — D-068).
 * `src/ui/templates/**`, `src/ui/i18n/ar.json`, `src/ui/static/vendor/**` (+ `LICENSES.md`).
+* The optional Umami tag (`Settings.umami_website_id` / `umami_script_url`, D-3) is rendered by
+  `base.html` only when the id is set; removing `src/ui` leaves the two settings unused.
+* The Today playbook card reads `GET /api/v1/playbooks` (`brand_brain/playbooks.py`, D-4) — the
+  API route stays when the UI is removed.
 
 ## What it may import (enforced by `tests/isolation/test_ui_removable.py`)
 

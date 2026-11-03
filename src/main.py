@@ -30,6 +30,7 @@ from src.core.database import get_db_session
 from src.core.http import build_http_client
 from src.core.logging import configure_logging
 from src.modules.auth import router as auth_router
+from src.modules.brand_brain.playbooks import router as playbooks_router
 from src.modules.brand_brain.router import router as brand_brain_router
 from src.modules.brand_brain.share import public_router as diagnosis_public_router
 from src.modules.brand_brain.share import router as diagnosis_share_router
@@ -218,6 +219,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(whatsapp_webhook_router)
     api_v1.include_router(whatsapp_router)  # SPRINT-09 B-2/B-3: /brands/{id}/whatsapp/…
     api_v1.include_router(brand_brain_router)  # SPRINT-10 B-1: /brands/{id}/brain/…
+    api_v1.include_router(playbooks_router)  # SPRINT-12.1-B D-4: GET /playbooks (CurrentUser)
     # SPRINT-12 C-1: share/unshare (OWNER) + the public, watermarked ``GET /d/{token}``.
     api_v1.include_router(diagnosis_share_router)
     api_v1.include_router(diagnosis_public_router)

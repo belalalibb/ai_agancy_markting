@@ -6,6 +6,7 @@
   <title>{% block title %}{{ t("app.title") }}{% endblock %} · {{ app_name }}</title>
   <link rel="stylesheet" href="/app/static/vendor/pico.min.css">
   <script src="/app/static/vendor/htmx.min.js" defer></script>
+  {% if umami_website_id %}<script defer src="{{ umami_script_url }}" data-website-id="{{ umami_website_id }}"></script>{% endif %}
 </head>
 <body>
 <header class="container">
@@ -22,6 +23,7 @@
     </ul>
     <ul>
       {% if brand %}<li><span data-brand="{{ brand.id }}">{{ brand.name }}</span></li>{% endif %}
+      {% if is_admin %}<li><a href="/app/admin/ai" data-nav="admin">{{ t("nav.admin") }}</a> · <a href="/app/admin/entitlements">{{ t("nav.admin_entitlements") }}</a></li>{% endif %}
       {% if user %}
       <li>
         <form method="post" action="/app/logout">

@@ -46,7 +46,14 @@
     {% else %}<p data-empty>{{ t("today.no_pending") }}</p>{% endif %}
   </article>
   <article data-card="playbooks">
-    <header><strong>{{ t("today.playbooks") }}</strong></header>
-    <p data-empty>{{ t("today.playbooks_soon") }}</p>
+    <header><strong>{{ t("today.playbooks") }}</strong>{% if playbook %} · <span data-sector="{{ playbook.sector }}">{{ t("sector." ~ playbook.sector) }}</span>{% endif %}</header>
+    {% if playbook %}
+    <ol data-tips>{% for tip in playbook.today_tips %}<li>{{ tip }}</li>{% endfor %}</ol>
+    {% else %}
+    <form method="get" action="/app/b/{{ brand.id }}/today" data-form="sector" class="grid">
+      <select name="sector">{% for p in playbooks %}<option value="{{ p.sector }}">{{ t("sector." ~ p.sector) }}</option>{% endfor %}</select>
+      <button type="submit" class="outline">{{ t("today.pick_sector") }}</button>
+    </form>
+    {% endif %}
   </article>
 </div>

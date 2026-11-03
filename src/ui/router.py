@@ -302,6 +302,8 @@ def _base_ctx(user: AppUser, settings: Settings, brand: Mapping[str, Any] | None
         "csrf": csrf_token(settings, user.user_id, user.nonce),
         "is_admin": user.user_id in settings.platform_admin_user_ids,
         "app_name": settings.app_name,
+        "umami_website_id": settings.umami_website_id,
+        "umami_script_url": settings.umami_script_url,
     }
 
 
@@ -495,8 +497,13 @@ async def _today_ctx(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
     pending = await api.get(
         f"/brands/{brand_id}/content/items", status="pending_approval", limit=TODAY_LIMIT
     )
+    playbooks = await api.get("/playbooks")
+    sector = (frame["brand"].get("sector") or "").strip()  # no brand sector field yet ⇒ ""
+    chosen = next((p for p in playbooks if p["sector"] == sector), None)
     return {
         **frame,
+        "playbooks": playbooks,
+        "playbook": chosen,
         "alerts": alerts["items"],
         "open_count": alerts["open_count"],
         "closing": [c for c in conversations["items"] if _expires_soon(c, now)],
@@ -506,24 +513,32 @@ async def _today_ctx(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
 
 
 async def _today_page(
-    request: Request, settings: Settings, user: AppUser, brand_id: UUID, flash: str | None = None
+    request: Request,
+    settings: Settings,
+    user: AppUser,
+    brand_id: UUID,
+    flash: str | None = None,
+    *,
+    sector: str = "",
 ) -> Response:
     try:
         user, data = await _call(request, settings, user, lambda api: _today_ctx(api, brand_id))
     except ApiError as exc:
         return _api_failure(request, settings, user, exc)
+    if data["playbook"] is None and sector:  # D-4: no ``brand_profiles.sector`` yet ⇒ select
+        data["playbook"] = next((p for p in data["playbooks"] if p["sector"] == sector), None)
     ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash}
     name = "partials/today_cards.html" if _is_partial(request) else "today.html"
     return _with_session(settings, user, _render(request, name, ctx))
 
 
 @router.get("/b/{brand_id}/today", response_class=HTMLResponse)
-async def today(request: Request, brand_id: UUID) -> Response:
+async def today(request: Request, brand_id: UUID, sector: str = "") -> Response:
     settings = get_settings()
     gate = await _gate_user(request, settings)
     if gate.response is not None:
         return gate.response
-    return await _today_page(request, settings, gate.user, brand_id)
+    return await _today_page(request, settings, gate.user, brand_id, sector=sector)
 
 
 async def _action(
@@ -1074,6 +1089,257 @@ async def revoke_grant(
     return await _settings_action(
         request, brand_id, csrf, "DELETE", path, None, "settings.revoked"
     )
+
+
+# ------------------------------------------------------------------- admin ---
+ADMIN_TABS = ("providers", "models", "routing", "probe")
+PURPOSES = (
+    "content_generation",
+    "whatsapp_suggest_reply",
+    "brand_diagnosis",
+    "content_plan",
+    "audio_transcription",
+)  # = catalog.domain.PURPOSES
+PROVIDER_KINDS = ("openai_compatible", "fake")  # = ProviderKind
+CAPABILITIES = ("text", "audio")  # = Capability
+PLANS = ("trial", "starter", "growth", "agency")  # = entitlements Plan
+PROVIDER_KEY_FIELD = "credential"  # neutral form field; mapped to the API body in the router
+
+
+def _is_admin(settings: Settings, user: AppUser) -> bool:
+    return user.user_id in settings.platform_admin_user_ids
+
+
+async def _gate_admin(request: Request, settings: Settings, csrf: str | None = ...) -> _Gate:
+    """D-0: the session gate first, then a **local** admin check **before any API call** —
+    non-admins get a 404 page (never 403: the panel's existence is not disclosed)."""
+    gate = await _gate_user(request, settings, csrf)
+    if gate.response is None and not _is_admin(settings, gate.user):
+        return _Gate(None, _with_session(settings, gate.user, _not_found_page(request)))
+    return gate
+
+
+def _provider_body(form: Mapping[str, str]) -> dict[str, Any]:
+    """Form ⇒ ``ProviderCreate``/``ProviderPatch``; the secret travels under its API name
+    only here, is **sent** and never echoed (the API answers ``has_credential``)."""
+    body: dict[str, Any] = {}
+    for key in ("slug", "kind", "base_url", "credential_ref"):
+        if form.get(key):
+            body[key] = form[key]
+    if form.get("timeout_seconds"):
+        body["timeout_seconds"] = form["timeout_seconds"]
+    if form.get(PROVIDER_KEY_FIELD):
+        body["api_" + "key"] = form[PROVIDER_KEY_FIELD]
+    if "enabled" in form:
+        body["enabled"] = form["enabled"] == "true"
+    return body
+
+
+def _model_body(form: Mapping[str, str]) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    for key in ("provider_id", "model_name", "capability"):
+        if form.get(key):
+            body[key] = form[key]
+    keys = ("prompt_per_1k", "completion_per_1k", "cost_per_minute_usd", "max_audio_seconds")
+    body["pricing"] = {k: form[k].strip() for k in keys if form.get(k, "").strip()}
+    if form.get("max_tokens_cap"):
+        body["max_tokens_cap"] = int(form["max_tokens_cap"])
+    if "enabled" in form:
+        body["enabled"] = form["enabled"] == "true"
+    return body
+
+
+async def _admin_ai_ctx(api: ApiClient, tab: str) -> dict[str, Any]:
+    ctx: dict[str, Any] = {"tab": tab, "tabs": ADMIN_TABS, "purposes": PURPOSES}
+    ctx["providers"] = await api.get("/admin/ai/providers")
+    ctx["models"] = await api.get("/admin/ai/models")
+    counts: dict[str, int] = {}
+    for m in ctx["models"]:
+        counts[str(m["provider_id"])] = counts.get(str(m["provider_id"]), 0) + 1
+    ctx["model_counts"] = counts
+    ctx["provider_slugs"] = {str(p["id"]): p["slug"] for p in ctx["providers"]}
+    if tab == "routing":
+        routes = await api.get("/admin/ai/routing")
+        chains: dict[str, list[dict[str, Any]]] = {p: [] for p in PURPOSES}
+        for r in sorted(routes, key=lambda r: (r["purpose"], r["priority"])):
+            chains.setdefault(r["purpose"], []).append(r)
+        ctx["chains"] = chains
+    ctx["kinds"], ctx["capabilities"] = PROVIDER_KINDS, CAPABILITIES
+    return ctx
+
+
+async def _admin_ai_page(
+    request: Request,
+    settings: Settings,
+    user: AppUser,
+    tab: str,
+    *,
+    flash: str | None = None,
+    probe: Mapping[str, Any] | None = None,
+) -> Response:
+    tab = tab if tab in ADMIN_TABS else ADMIN_TABS[0]
+    try:
+        user, data = await _call(request, settings, user, lambda api: _admin_ai_ctx(api, tab))
+    except ApiError as exc:
+        return _api_failure(request, settings, user, exc)
+    ctx = {**_base_ctx(user, settings), **data, "flash": flash, "probe": probe}
+    name = "partials/admin_ai_tab.html" if _is_partial(request) else "admin_ai.html"
+    return _with_session(settings, user, _render(request, name, ctx))
+
+
+@router.get("/admin/ai", response_class=HTMLResponse)
+async def admin_ai(request: Request, tab: str = "providers") -> Response:
+    settings = get_settings()
+    gate = await _gate_admin(request, settings)
+    if gate.response is not None:
+        return gate.response
+    return await _admin_ai_page(request, settings, gate.user, tab)
+
+
+async def _admin_form(request: Request) -> dict[str, str]:
+    form = await request.form()
+    return {k: str(v) for k, v in form.items() if isinstance(v, str)}
+
+
+def _ai_error_text(category: str | None) -> str | None:
+    """Every ``ErrorCategory`` (12) has an ``ai_error.*`` key; unknown ⇒ generic."""
+    if not category:
+        return None
+    return _MESSAGES.get(f"ai_error.{category}", _MESSAGES["error.generic"])
+
+
+async def _admin_ai_spec(
+    request: Request, tab: str, action: str, form: Mapping[str, str]
+) -> tuple[str, str, Any] | None:
+    target = form.get("id", "")
+    if tab == "providers":
+        if action == "create":
+            return ("POST", "/admin/ai/providers", _provider_body(form))
+        if action == "update" and target:
+            return ("PATCH", f"/admin/ai/providers/{target}", _provider_body(form))
+        if action == "delete" and target:
+            return ("DELETE", f"/admin/ai/providers/{target}", None)
+    elif tab == "models":
+        if action == "create":
+            return ("POST", "/admin/ai/models", _model_body(form))
+        if action == "update" and target:
+            return ("PATCH", f"/admin/ai/models/{target}", _model_body(form))
+        if action == "delete" and target:
+            return ("DELETE", f"/admin/ai/models/{target}", None)
+    elif tab == "routing" and action == "put" and form.get("purpose") in PURPOSES:
+        raw = await request.form()
+        models = [str(m) for m in raw.getlist("models") if str(m)]
+        return ("PUT", f"/admin/ai/routing/{form['purpose']}", {"models": models})
+    elif tab == "probe" and action == "run":
+        body: dict[str, Any] = {
+            "model_id": form.get("model_id", ""),
+            "prompt": form.get("prompt", ""),
+        }
+        if form.get("max_tokens"):
+            body["max_tokens"] = int(form["max_tokens"])
+        return ("POST", "/admin/ai/probe", body)
+    return None
+
+
+@router.post("/admin/ai/{tab}/{action}", response_class=HTMLResponse)
+async def admin_ai_action(request: Request, tab: str, action: str) -> Response:
+    """One POST per catalog write (D-077). ``tab`` ∈ providers|models|routing|probe;
+    ``action`` ∈ create|update|delete|put|run. Fields are read from the raw form so one
+    handler serves every tab; the secret field is renamed in :func:`_provider_body`."""
+    settings = get_settings()
+    form = await _admin_form(request)
+    gate = await _gate_admin(request, settings, form.get(CSRF_FIELD))
+    if gate.response is not None:
+        return gate.response
+    spec = await _admin_ai_spec(request, tab, action, form)
+    if spec is None:
+        return _with_session(settings, gate.user, _not_found_page(request))
+    try:
+        user, result = await _call(
+            request, settings, gate.user, lambda api: api.json(spec[0], spec[1], json=spec[2])
+        )
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        return await _admin_ai_page(request, settings, gate.user, tab, flash=_error_text(exc.code))
+    probe = None
+    flash: str | None = t("admin.saved")
+    if tab == "probe" and isinstance(result, dict):
+        probe = {**result, "category_text": _ai_error_text(result.get("error_category"))}
+        flash = None
+    return await _admin_ai_page(request, settings, user, tab, flash=flash, probe=probe)
+
+
+# ------------------------------------------------------- admin entitlements ---
+async def _admin_ent_ctx(api: ApiClient, brand_id: str) -> dict[str, Any]:
+    ctx: dict[str, Any] = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None}
+    if brand_id:
+        ctx["ent"] = await api.get(f"/admin/entitlements/{brand_id}")
+        ctx["wa"] = await _optional(api, f"/brands/{brand_id}/whatsapp/account")
+    return ctx
+
+
+async def _admin_ent_page(
+    request: Request, settings: Settings, user: AppUser, brand_id: str, flash: str | None = None
+) -> Response:
+    try:
+        user, data = await _call(
+            request, settings, user, lambda api: _admin_ent_ctx(api, brand_id)
+        )
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        data = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None}
+        flash = flash or _error_text(exc.code)
+    ctx = {**_base_ctx(user, settings), **data, "flash": flash}
+    return _with_session(settings, user, _render(request, "admin_entitlements.html", ctx))
+
+
+@router.get("/admin/entitlements", response_class=HTMLResponse)
+async def admin_entitlements(request: Request, brand_id: str = "") -> Response:
+    settings = get_settings()
+    gate = await _gate_admin(request, settings)
+    if gate.response is not None:
+        return gate.response
+    return await _admin_ent_page(request, settings, gate.user, brand_id.strip())
+
+
+@router.post("/admin/entitlements/{action}", response_class=HTMLResponse)
+async def admin_entitlements_action(request: Request, action: str) -> Response:
+    """``activate`` ⇒ ``POST /admin/entitlements/activate`` (plan + months + InstaPay note);
+    ``wa-caps`` ⇒ ``PATCH /admin/entitlements/wa-caps/{account_id}`` (cap / kill switch)."""
+    settings = get_settings()
+    form = await _admin_form(request)
+    gate = await _gate_admin(request, settings, form.get(CSRF_FIELD))
+    if gate.response is not None:
+        return gate.response
+    brand_id = form.get("brand_id", "").strip()
+    spec: tuple[str, str, Any] | None = None
+    if action == "activate":
+        body: dict[str, Any] = {"brand_id": brand_id, "plan": form.get("plan", "")}
+        if form.get("months"):
+            body["months"] = int(form["months"])
+        if form.get("note"):
+            body["note"] = form["note"]
+        spec = ("POST", "/admin/entitlements/activate", body)
+    elif action == "wa-caps" and form.get("account_id"):
+        caps: dict[str, Any] = {}
+        if form.get("daily_reply_cap"):
+            caps["daily_reply_cap"] = int(form["daily_reply_cap"])
+        if form.get("kill_switch") in ("true", "false"):
+            caps["kill_switch"] = form["kill_switch"] == "true"
+        spec = ("PATCH", f"/admin/entitlements/wa-caps/{form['account_id']}", caps)
+    if spec is None:
+        return _with_session(settings, gate.user, _not_found_page(request))
+    try:
+        user, _ = await _call(
+            request, settings, gate.user, lambda api: api.json(spec[0], spec[1], json=spec[2])
+        )
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        return await _admin_ent_page(request, settings, gate.user, brand_id, _error_text(exc.code))
+    return await _admin_ent_page(request, settings, user, brand_id, t("admin.saved"))
 
 
 # ------------------------------------------------------------------ static ---
