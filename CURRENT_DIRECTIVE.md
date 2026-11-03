@@ -1,6 +1,6 @@
 # 🎯 CURRENT DIRECTIVE — التوجيه التنفيذي النشط
 
-> **المصدر الوحيد للمهمة الحالية.** SPRINT-12 رُوجع مستقلاً على PostgreSQL 17.11 UTF8 و**قُبل ودُمج** (PR #45 ⇒ `main @ b98cffe`؛ التقرير [`sprints/SPRINT-12_REVIEW.md`](./sprints/SPRINT-12_REVIEW.md)). H1–H6 مُغلقة؛ **الحظر التشغيلي مرفوع**. هذا التوجيه = **SPRINT-12.1**: الواجهة L1 (ست شاشات Jinja2 + htmx + Pico، RTL) فوق الخلفية المكتملة + ما أُجِّل من SPRINT-12 (Batch Approval C-2، ملاحظة S-1) + Umami + Playbooks + تبويب AI للمشرف. **بوابة G6 تفرض تقسيماً صريحاً إلى نصفين (12.1-أ ثم 12.1-ب) — انظر البطاقة.**
+> **المصدر الوحيد للمهمة الحالية.** SPRINT-12.1-A رُوجع مستقلاً على PostgreSQL 17.11 UTF8 و**قُبل ودُمج** (PR #49 ⇒ `main @ 278de36`؛ التقرير [`sprints/SPRINT-12.1-A_REVIEW.md`](./sprints/SPRINT-12.1-A_REVIEW.md)). المِجسّ الحي أثبت **U1-a/U1-b/U2/U3/U4** في طبقة الواجهة فقط (لا مسار `/api/v1/*` متأثر) ⇒ تُغلق **أولاً** في Part C-0 أدناه قبل أي شاشة جديدة. 🔴 **لا تجربة حيّة لـ`/app` ولا تصوير App Review ولا قياس TTFV قبل دمج C-0.**
 
 ---
 
@@ -8,78 +8,132 @@
 
 | البند | القيمة |
 |---|---|
-| **معرف المهمة** | `SPRINT-12.1-L1-UI-AND-DEFERRED` |
-| **النوع** | **12.1-أ (هذا الكوميتان A+B):** Part A إغلاقات صغيرة (S-1 + Batch Approval C-2) ⇒ Part B أساس الواجهة (قوالب أساسية + جلسة cookie + 3 شاشات: تسجيل الدخول/الاختيار، لوحة العلامة «اليوم»، صندوق واتساب) · **12.1-ب (كوميتان C+D بعد قبول 12.1-أ ودمجه):** Part C الشاشات الثلاث الباقية (المحتوى والموافقات، التشخيص والتوصيات، الإعدادات/الاتصالات) ⇒ Part D تبويب `/admin/ai` + `/admin/entitlements` + Umami + Playbooks JSON |
+| **معرف المهمة** | `SPRINT-12.1-B-L1-HARDEN-AND-COMPLETE` |
+| **النوع** | **C-0** تصليب الجلسة/CSRF/htmx (إغلاق U1–U4، بلا هجرة) ⇒ **C** شاشات المشغّل الثلاث (`content`, `diagnosis`, `settings`) ⇒ **D** تبويبا المشرف (`/app/admin/ai` D-077 + `/app/admin/entitlements`) + Umami + بذور Playbooks ⇒ docs |
 | **الحالة** | `ISSUED` — جاهز فور دمج هذا التوجيه في `main` (المخطط يدمجه — D-063) |
 | **يبدأ من** | `main` @ **SHA دمج هذا التوجيه** (يسجَّل في `WORK_STATE.md` §6). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
-| **الفرع المستهدف** | `work/implementation` ⇒ **PR أول** بعنوان `SPRINT-12.1-A: S-1 + batch approval + L1 base (login, today, inbox)` ⇒ بعد دمجه **PR ثانٍ** `SPRINT-12.1-B: L1 content/diagnosis/settings + admin tabs + Umami + playbooks` |
-| **الكوميتات** | **A** `fix(sprint-12.1): exclude dismissed from public card + batch approval (D-055)` ⇒ **B** `feat(sprint-12.1): L1 UI base — session cookie, layout, login/today/inbox (RTL)` ⇒ docs ⇒ **[مراجعة ودمج]** ⇒ **C** `feat(sprint-12.1): L1 content/approvals, diagnosis, settings screens` ⇒ **D** `feat(sprint-12.1): admin AI/entitlements tabs + Umami + playbooks seeds` ⇒ docs. كل كوميت يُدفع فور اكتماله. |
-| **تبعيات جديدة (D-054 مُتحقَّق 2026-11-02)** | `jinja2>=3.1.6` (**BSD-3-Clause**، مثبَّت ضمنياً عبر starlette — يصبح صريحاً في `pyproject.toml`) · `python-multipart` (**Apache-2.0**؛ للنماذج HTML — تحقق أنه غير موجود أصلاً) · **ملفات ثابتة مُلزَمة في المستودع** (لا CDN، لا npm): `htmx.min.js` 2.x (**0BSD**) + `pico.min.css` 2.x (**MIT**) تحت `src/ui/static/vendor/` مع ملف `LICENSES.md` يذكر الإصدار وsha256. Umami **MIT** يُشغَّل خارجياً (خدمة منفصلة) — الكود يُضمّن `<script>` اختيارياً فقط عند `UMAMI_WEBSITE_ID` مضبوطاً. أضف الرخص الثلاث إلى `scripts/license_allowlist.txt` إن لزم. |
-| **الحجم المتوقع (G6)** | **12.1-أ:** A ≈ 150 سطر `src/` · B ≈ 900 (قوالب HTML تُحتسب ضمن `src/ui/templates/`) ⇒ **≈ 1,050**. **12.1-ب:** C ≈ 800 · D ≈ 600 ⇒ **≈ 1,400**. **صمّام 12.1-أ:** إن تجاوز A+B معاً **1,400** سطر فعلياً، سلّم B بشاشتين (تسجيل الدخول + «اليوم») وانقل صندوق واتساب إلى C وسجّل. **صمّام 12.1-ب:** إن تجاوز C+D **1,600**، أجّل Umami + Playbooks إلى SPRINT-13 وسجّل. |
-| **المسارات المحمية بعد 12.1-أ** | **`PROTECTED_ROUTE_COUNT == 84`** = 83 + **1** (`POST /brands/{id}/content/approvals/batch`) · العامة **7** بلا تغيير. **مسارات HTML للواجهة لا تُحتسب في العدّاد** لأنها تحت بادئة `/app` (ليست `/api/v1`) وتُحمى بجلسة cookie؛ عدّل حارس `tests/test_auth_guard.py` ليستثني `/app/*` **صراحةً** ويُثبت أن كل مسار `/app/*` (عدا `/app/login` و`/app/logout`) يعيد **303 ⇒ `/app/login`** بلا cookie (اختبار جديد `test_app_routes_redirect_without_session`). **12.1-ب:** لا مسارات API جديدة (84 يبقى) — تبويبا الأدمن يستهلكان `/api/v1/admin/*` القائمة. |
-| **الهجرات** | **لا هجرة** في 12.1-أ ولا 12.1-ب (الخلفية مكتملة بـ0016). إن احتجت عموداً، توقّف وسجّل توصية D-019 في §6 بدل الإضافة. |
+| **الفرع المستهدف** | `work/implementation` ⇒ **PR واحد** بعنوان `SPRINT-12.1-B: L1 hardening (U1–U4) + content/diagnosis/settings + admin tabs + Umami + playbooks` |
+| **الكوميتات (بالترتيب، كلٌّ يُدفع فور اكتماله)** | **C-0** `fix(sprint-12.1): UI session — app_access cookie, refresh only on expiry, per-login CSRF nonce, HX-Redirect, flash in partials (U1–U4)` — **يُدفع وحده أولاً** ⇒ **C** `feat(sprint-12.1): L1 content/diagnosis/settings screens` ⇒ **D** `feat(sprint-12.1): admin AI catalog + entitlements tabs, Umami tag, sector playbooks` ⇒ **docs** (§6 + `WORK_STATE.md`) |
+| **تبعيات جديدة** | **لا شيء.** (Umami = وسم `<script>` خارجي اختياري فقط؛ Playbooks = JSON) |
+| **الحجم المتوقع (G6)** | C-0 ≈ 150 · C ≈ 750 · D ≈ 600 ⇒ **≈ 1,500 سطر فعلي ≤ 1,600**. **صمّام مرتَّب الأولوية** (§1-ج). |
+| **المسارات المحمية** | **`PROTECTED_ROUTE_COUNT == 84`** بلا تغيير · العامة **7** · `/app/*` يرتفع من 11 إلى ≈ 30 مساراً خارج العدّاد (يُحصى في `test_ui_routes_are_hidden_from_openapi_and_counted`) |
+| **الهجرات** | **لا هجرة.** إن احتجت عموداً، توقّف وسجّل توصية D-019 في §6. |
 | **تاريخ الإصدار** | 2026-11-03 |
 
 ---
 
 ## 0. لماذا؟ (ما يجب أن يفهمه المنفذ قبل أي سطر)
 
-1. **الخلفية جاهزة للعرض:** `lead_stage` + `pulse_alerts` + أسقف الرقم + `/d/{token}` + الكتالوج كلها على `main`. L1 **لا تُنشئ منطقاً جديداً** — كل شاشة تستدعي مسارات `/api/v1` القائمة من الخادم (server-side) أو عبر htmx. **ممنوع** أي استعلام SQL أو استيراد مستودع داخل `src/ui/` (اختبار عزل AST: `src/ui` يستورد `fastapi`, `jinja2`, `starlette`, `src.core.config`, `src.modules.auth.*` **فقط**؛ البيانات عبر `httpx.AsyncClient(app=…)` الداخلي أو عبر استدعاء دوال الخدمة من خلال منافذ `main.py` — اختر **الأول** لبساطة العزل وسجّل).
-2. **TTFV ≤ 30 دقيقة** (POST_M7 §1-د) يُقاس في نهاية 12.1-ب على 3 علامات تجريبية: من تسجيل الدخول إلى أول توصية مقبولة أو أول ردّ واتساب مُرسَل. شاشة «اليوم» هي القلب: تنبيهات Pulse المفتوحة + محادثات تنتهي نافذتها + عناصر تنتظر الموافقة + استهلاك الباقة.
-3. **S-1 (مراجعة SPRINT-12 §3):** البطاقة العامة تعرض التوصيات `dismissed` ومشاركتها تعيد 201. يُغلق **أولاً** في Part A لأنه يمس سطحاً عاماً.
-4. **Batch Approval (C-2 المؤجَّل):** `POST /brands/{id}/content/approvals/batch` ≤ 50 عنصراً؛ **صف `approval_events` مستقل لكل عنصر** (D-055)؛ فحص الحصة `plan_posts` مرة لكل عنصر عبر `_ensure_post_quota` القائم؛ استجابة لكل عنصر `{item_id, status: approved|skipped, error?}` — **لا يفشل الكل بسبب عنصر** (207-style داخل 200)؛ 402/404 لعنصر تُسجَّل في `error` بالرمز. OWNER/MANAGER (نفس `approve_item`).
-5. **الجلسة في الواجهة:** cookie `HttpOnly; Secure; SameSite=Lax` يحمل **refresh token القائم** (لا آلية جديدة)؛ `/app/login` يستدعي `POST /api/v1/auth/login` ثم يضبط الـcookie؛ كل طلب HTML يحصل على access token قصير عبر `/auth/refresh` القائم. **CSRF:** كل نموذج `POST` في `/app` يحمل حقل `csrf` = HMAC(`token_encryption_key`, session id) ويُتحقق منه. لا تخزين جديد.
-6. **RTL/عربية أولاً:** `<html lang="ar" dir="rtl">`؛ النصوص من قاموس `src/ui/i18n/ar.json` (مفتاح ⇒ نص) — **لا نص عربي مُضمَّن في القوالب** (يسهّل الإنجليزية لاحقاً). الأخطاء تُعرض بالرموز المُترجمة (D-069): `entitlement_plan_inactive` ⇒ «الباقة موقوفة — جدّد للمتابعة» إلخ.
+1. **الجذر المعماري لـU1/U2** (`[VERIFIED live]` في المراجعة §3): `_resolve_user` يعامل `POST /auth/refresh` كمصادقة **لكل طلب**. النتائج المُقاسة بالمحدِّد الحقيقي: الطلب العاشر بعد الدخول ⇒ `303 /app/login` + مسح الكوكي + إعادة الدخول ⇒ 429 (U1-a)؛ وطلبان بنفس الكوكي (استطلاع `every 30s` + نقرة) ⇒ `revoke_all_for_user` ⇒ **خروج من كل الأجهزة** (U1-b). ولأن `sid` يتغيّر كل طلب، رُبط CSRF بـ`user_id` ⇒ ختم ثابت مدى الحياة (U2).
+2. **الحل الواحد بلا هجرة:** كوكي ثانية **`app_access`** تحمل access JWT القصير القائم (`auth_access_ttl_seconds` = 15 دقيقة) يُفكّ محلياً بـ`AccessTokenCodec` — `/auth/refresh` يُستدعى **فقط** عند انتهاء الصلاحية أو 401 من API. CSRF = nonce عشوائي لدورة الدخول. التفاصيل الملزمة في §2 C-0.
+3. **`CurrentUserFresh` لا يتأثر:** المسارات الحساسة في API تفحص `refresh_sessions` بنفسها؛ إبطال من جهاز آخر ⇒ API يعيد 401 ⇒ الواجهة تمسح الكوكيات وتعيد `303` (+`HX-Redirect`). نافذة 15 دقيقة على القراءة فقط = عقد الـSPA الأصلي.
+4. **D-077 عملياً:** `/app/admin/ai` ليس «عرضاً» للكتالوج بل **لوحة تحكم حيّة كاملة**: إضافة/تعديل/تعطيل مزود، نماذج وتسعير (بما فيه `$0` والصوت و`max_tokens_cap`)، سلاسل توجيه/fallback لكل غرض، ومختبر `probe` بنقرة. بلا SSH ولا كود. الأسرار **لا تُعرض أبداً** (API لا يعيدها أصلاً — `has_api_key`/`credential_ref` فقط).
+5. **TTFV ≤ 30 دقيقة** يُقاس **بعد** هذا السبرنت على 3 علامات تجريبية: دخول ⇒ أول توصية مقبولة أو أول ردّ واتساب مُرسَل. الـPlaybook القطاعي يُسرّعه (قيم أولية للملف + أعمدة محتوى + عتبات Pulse).
 
 ---
 
 ## 1. النطاق
 
 ### 1-أ. داخل النطاق
-- **Part A:** S-1 (استبعاد `dismissed` من `build_public_share` + رفض مشاركتها 409 `recommendation_dismissed` **بلا** ErrorCategory جديد — خطأ HTTP محلي كما في `catalog_invalid_pricing`) · Batch Approval كما في §0-4 · اختبار PG لكل منهما.
-- **Part B:** `src/ui/` (router `/app`, templates, static/vendor, i18n) · جلسة cookie + CSRF · الشاشات: `/app/login` (+ اختيار العلامة إن تعددت) · `/app/b/{brand_id}/today` · `/app/b/{brand_id}/inbox` (قائمة المحادثات + محادثة واحدة + ردّ نصي + اقتراح ردّ + تعيين `lead_stage`) · `REMOVABILITY.md` لـ`ui` + اختبار عزل AST.
-- **Part C:** `/app/b/{brand_id}/content` (المسودات، توليد، موافقة فردية **وجماعية** عبر Batch، جدولة) · `/app/b/{brand_id}/diagnosis` (تشغيل التشخيص، قبول/رفض التوصيات، **مشاركة `/d/{token}` ونسخ الرابط وإلغاؤه**) · `/app/b/{brand_id}/settings` (الاتصالات Meta/WA، الباقة والاستهلاك، أعضاء العلامة).
-- **Part D:** `/app/admin/ai` (مزودون/نماذج/توجيه/probe — يُعرض فقط لـ`PLATFORM_ADMIN_USER_IDS`) · `/app/admin/entitlements` (تفعيل/تمديد/تعليق + wa-caps) · Umami snippet اختياري · `playbooks/*.json` (3 بذور: «إطلاق منتج»، «موسم عروض»، «إعادة تنشيط العملاء») تُعرض في «اليوم» كاقتراحات **ثابتة** (لا نموذج) — تُقرأ من القرص عند الإقلاع.
+- **C-0** (ملزم أولاً): `src/ui/session.py`, `src/ui/router.py`, `base.html`, `partials/today_cards.html`, `partials/thread.html`, `i18n/ar.json` + اختبارات §3-1.
+- **C**: `/app/b/{brand_id}/content` · `/app/b/{brand_id}/diagnosis` · `/app/b/{brand_id}/settings` (+ جزئيات htmx).
+- **D**: `/app/admin/ai` (4 تبويبات: providers/models/routing/probe) · `/app/admin/entitlements` · وسم Umami · `src/modules/brand_brain/playbooks/{restaurants,clinics}.json` + قارئ عند الإقلاع + بطاقة «Playbook» في «اليوم».
+- `src/ui/REMOVABILITY.md` يُحدَّث؛ `tests/isolation/test_ui_removable.py` يُوسَّع للملفات الجديدة.
 
-### 1-ب. خارج النطاق (مؤجَّل صراحةً)
-- أي React/Next/Tailwind build step؛ أي CDN؛ WebSocket/SSE (htmx polling كل 30s يكفي).
-- **SPRINT-13:** تنبيه 800 رسالة خدمة/شهر، Day-2 Ops، الاحتفاظ D-081، تفريغ الصوت، `quality_rating` webhook، فيديوهات App Review (تُسجَّل على L1 بعد 12.1-ب).
-- أي تغيير في `ErrorCategory` (12)، `contract.py`، `public_fetch.py`، D-075–D-082 (إلا عبر توصية D-019 في §6)، أي هجرة.
+### 1-ب. خارج النطاق (رفض صريح)
+- أي هجرة · أي `ErrorCategory` · أي تبعية Python جديدة · أي SPA/bundler · أي CDN · أي منطق أعمال في `src/ui` (الواجهة تستدعي `/api/v1` فقط عبر `ApiClient`) · تعديل `src/modules/auth/*` (الحل كله في `src/ui`) · `media_jobs` · SRI (قرار المالك: مؤجَّل).
+
+### 1-ج. صمّام الحجم (G6) — مرتَّب الأولوية، **لا يُضحّى بالبنود 1–4 أبداً**
+| الأولوية | البند | عند الاقتراب من 1,600 |
+|---|---|---|
+| 1 | **C-0** كاملاً | لا يُمسّ |
+| 2 | `/app/b/{id}/content` + `/app/b/{id}/diagnosis` | لا يُمسّ |
+| 3 | `/app/admin/ai` بتبويباته الأربعة **بما فيها probe** | لا يُمسّ |
+| 4 | `/app/b/{id}/settings` | لا يُمسّ |
+| 5 | `/app/admin/entitlements` | يُختصر إلى تفعيل/تمديد + wa-caps فقط |
+| 6 | بذور Playbooks + بطاقة اليوم | قطاع واحد بدل اثنين |
+| 7 | وسم Umami | يُؤجَّل إلى SPRINT-13 (سجّل في §6) |
+
+تجاوز 1,600 فعلياً بعد تطبيق 5⇒7 = توقّف وسجّل في §6 لقرار المخطط.
 
 ---
 
 ## 2. المواصفات (مقتضبة — الكود القائم هو المرجع §5-5)
 
-| البند | المطلوب | أين |
-|---|---|---|
-| **A-1 (S-1)** | `public_diagnosis`: `list_recommendations(..., status=None)` ⇒ تصفية `status in ("proposed","accepted","materialized")` (في الذاكرة أو عبر المستودع — لا توسيع للبروتوكول إن أمكن)؛ `share_diagnosis` على توصية `dismissed` ⇒ **409** `recommendation_dismissed`؛ اختبار PG يعيد سيناريو المِجسّ P2/P3 | `brand_brain/share.py:160–180, 226–232` |
-| **A-2 (Batch)** | `POST {BRAND_PREFIX}/content/approvals/batch` body `{item_ids: list[UUID] (1–50, unique)}` ⇒ `{results: [{item_id, status, error}], approved: n, skipped: m}`؛ كل عنصر يمرّ بـ`_authorise` مرة (خارج الحلقة) ثم `_ensure_post_quota` + `_act(approve)` داخل حلقة مع التقاط `ContentError`/`CounterQuotaExceededError`/`CounterPlanInactiveError` ⇒ `error` بالرمز؛ عنصر غير موجود ⇒ `item_not_found`؛ صف `approval_events` لكل عنصر ناجح؛ `counters.increment("content_batch_approved", n)` | `content/router.py:487–524` |
-| **B-1 الجلسة** | `src/ui/session.py`: `set_session(resp, refresh_token)`, `current_app_user(request) -> CurrentUser | RedirectResponse(303 /app/login)`, `csrf_token(session_id)`/`verify_csrf` | — |
-| **B-2 القالب الأساسي** | `base.html`: Pico + htmx محليان، شريط علوي (العلامة الحالية، التبديل، خروج)، تنقّل جانبي (اليوم/الصندوق/المحتوى/التشخيص/الإعدادات/[أدمن])، منطقة `hx-target="#main"`، شريط «الباقة: X/Y منشورات · Z/W محادثات» من `/api/v1/brands/{id}/entitlements/usage` القائم (أو ما يقابله — تحقق) | `src/ui/templates/` |
-| **B-3 اليوم** | 4 بطاقات: تنبيهات Pulse المفتوحة (`GET …/pulse/alerts?open=true` + زر ack) · محادثات تنتهي ≤ 4h · عناصر `pending_approval` · اقتراحات Playbooks (12.1-ب) ؛ polling 30s | — |
-| **B-4 الصندوق** | قائمة المحادثات (مرتبة بآخر وارد؛ شارة `lead_stage`) ⇒ تفاصيل: الرسائل + نموذج ردّ (`POST …/messages`) + «اقترح ردّاً» (`POST …/suggest`) + قائمة `lead_stage` (`PATCH …/lead-stage`) ؛ أخطاء 402/423/429 تُعرض بالرموز المُترجمة | `whatsapp/router.py` |
-| **C-1/2/3** | كما في §1-أ؛ شاشة التشخيص تعرض درجة الأدلة لكل توصية (`evidence_kinds_summary`) وزر مشاركة يُظهر الرابط **مرة واحدة** (كما يعيده API) | `brand_brain/router.py`, `share.py` |
-| **D-1 الأدمن** | يظهر الرابط في التنقّل فقط إن `actor.user_id in settings.platform_admin_user_ids`؛ الشاشتان تستهلكان `/api/v1/admin/ai/*` و`/api/v1/admin/entitlements/*`؛ **لا** عرض لأي سر (API يعيد `has_credential` فقط) | `ai_gateway/catalog/router.py`, `entitlements/router.py` |
-| **D-2 Umami** | `UMAMI_SCRIPT_URL` + `UMAMI_WEBSITE_ID` اختياريان في `Settings`؛ عند ضبطهما يُحقن `<script defer data-website-id=…>` في `base.html`؛ لا PII في الأحداث (أسماء الصفحات فقط) | `core/config.py` |
-| **D-3 Playbooks** | `src/ui/playbooks/*.json` ⇒ `{id, title_key, steps: [{kind: content|whatsapp|diagnosis, action_key}]}`؛ تُحمَّل مرة عند الإقلاع؛ تُعرض في «اليوم» | — |
+### C-0 — تصليب الجلسة (يغلق U1-a, U1-b, U2, U3, U4)
+
+**C-0.1 كوكيان بدل واحدة** (`session.py`):
+- `app_session` كما هي (قيمة refresh، `Path=/app`, `HttpOnly; Secure; SameSite=Lax`, `Max-Age=auth_refresh_ttl_seconds`).
+- **جديدة** `app_access` = access JWT الخام من `/auth/login` أو `/auth/refresh`؛ نفس الخصائص؛ `Max-Age=auth_access_ttl_seconds`.
+- **جديدة** `app_csrf` = `secrets.token_urlsafe(32)` يُولَّد **عند الدخول فقط**؛ `HttpOnly; Secure; SameSite=Lax; Path=/app`; `Max-Age=auth_refresh_ttl_seconds`. تُمسح الثلاث عند الخروج/الطرد.
+
+**C-0.2 `_resolve_user` الجديد** (`router.py`):
+1. اقرأ `app_access` ⇒ `AccessTokenCodec.decode` محلياً (يرفض المنتهي/التالف). **نجاح ⇒ `AppUser` بلا أي نداء شبكة** و**بلا تدوير** للكوكي.
+2. فشل/غياب ⇒ `app_session` موجودة؟ ⇒ `POST /auth/refresh` **مرة واحدة**:
+   - 200 ⇒ `AppUser` + علامة `rotated=True` ⇒ الاستجابة تضبط `app_access` + `app_session` الجديدتين.
+   - **429 ⇒ لا مسح للجلسة**: أعد `None` مع علامة `retry_after` ⇒ الصفحة تعرض `error.rate_limited` مترجَماً بـ`503 Retry-After` (أو، إن كان الطلب htmx، `HX-Retarget` إلى `#flash`) — **الكوكيات تبقى كما هي**.
+   - 401 (منتهٍ/مُبطَل/reuse) ⇒ `None` ⇒ `_denied` يمسح الثلاث.
+3. **401 من أي نداء API أثناء عرض الصفحة** (إبطال من جهاز آخر — H6/`CurrentUserFresh`): محاولة refresh **واحدة** ثم إعادة النداء؛ إن فشلت ⇒ `_denied`.
+4. **تزامن الطلبات:** لأن refresh لا يُستدعى إلا عند الانتهاء، التوأم المتأخر يحمل `app_access` صالحاً ويُخدَم محلياً. في الحالة الهامشية (توأمان كلاهما منتهٍ) أضف **قفلاً داخل العملية** `asyncio.Lock` مفتاحه sha256(refresh_value) حتى يستدعي واحد فقط refresh والآخر ينتظر ويقرأ النتيجة (قاموس `dict[str, tuple[expires_at, AppUser]]` محدود بـ256 مدخلاً، يُنظَّف lazily). **لا Redis، لا جدول.**
+
+**C-0.3 CSRF**: `csrf_token(settings, nonce)` = `HMAC(token_encryption_key ∥ fallback auth_jwt_secret, nonce)[:32]`؛ `verify_csrf` يقرأ `app_csrf` من الطلب. **يُفحص على كل `POST /app/*` بلا استثناء بما فيها `/app/logout`** (فشل ⇒ 403 + الكوكيات تبقى). اختبار: ختمان من دورتي دخول **مختلفان**.
+
+**C-0.4 htmx**: (أ) كل استجابة `_denied` لطلب `HX-Request: true` ⇒ `HX-Redirect: /app/login?next=…` مع **200 جسم فارغ** (لا 303 — المتصفح يتبعه شفافاً ويحقن صفحة الدخول). (ب) `partials/today_cards.html` و`partials/thread.html` يبدآن بـ`{% if flash %}<p role="alert" data-flash>…{% endif %}` (thread يحويه أصلاً — أضفه لـtoday). (ج) 403 CSRF لطلب htmx ⇒ `HX-Retarget: #flash` + `HX-Reswap: innerHTML` وجسم `<p role="alert" data-flash>…</p>`؛ أضف `<div id="flash"></div>` في `base.html` داخل `<main>` قبل `{% block content %}`.
+
+**C-0.5 U4**: `ar.json` + `severity.info` · شريط الباقة: `{{ t("plan.posts") }}: X / Y · {{ t("plan.conversations") }}: Z / W` من `plan.usage.monthly_wa_conversations` / `plan.limits.monthly_wa_conversations` (أضف `plan.conversations`). **اختبار:** مفاتيح `severity.*` في `ar.json` ⊇ قيم `Severity`؛ مفاتيح `stage.*` ⊇ `LeadStage`؛ `objection.*` ⊇ `ObjectionCode`؛ `alert.*` ⊇ `ALERT_KINDS`؛ `delivery.*` ⊇ `DeliveryStatus` (اختبار واحد مُعمَّم يمنع تسرّب مفتاح خام مستقبلاً).
+
+**C-0.6 static**: `app.mount("/app/static", StaticFiles(...))` يبقى؛ أضف middleware خفيفاً **داخل `src/ui`** (أو `Response` wrapper في `main.py` بسطرين) يضبط `Cache-Control: public, max-age=86400, immutable` على `/app/static/vendor/*` فقط.
+
+### C — شاشات المشغّل الثلاث (كلها عبر `ApiClient`؛ أدوار API هي المرجع؛ أخطاء ⇒ flash مترجَم)
+
+**C-1 `/app/b/{brand_id}/content`**: قائمة `GET …/content/items` مع مرشّح `status` (tabs: draft/pending_approval/approved/scheduled/published/failed) · أزرار لكل عنصر حسب حالته (`submit`/`withdraw`/`approve`/`reject`/`schedule`/`unschedule`/`publish/retry`) · **«وافق على المحدَّد»** ⇒ `POST …/approvals/batch` (checkboxes ≤ 50؛ النتيجة تُعرض لكل عنصر `approved`/`skipped:<code مترجَم>`) · نموذج «توليد» ⇒ `POST …/items/{id}/generate` (402/429 ⇒ flash) · نموذج جدولة بتاريخ/وقت ⇒ `schedule`. **لا ينشر إلا ما وافق عليه إنسان** (D-055 — الأزرار تعكس آلة الحالات القائمة؛ لا اختصار).
+
+**C-2 `/app/b/{brand_id}/diagnosis`**: زر «شخّص الآن» ⇒ `POST …/brain/diagnose` (402/429/`consent` ⇒ flash) · قائمة `GET …/brain/recommendations` مع **`evidence_grade`** ظاهراً كشارة (`measured`/`inferred`/`estimated` مترجَمة) + عدد الأدلة · لكل توصية `accept`/`dismiss` · لكل توصية غير `dismissed` زر «مشاركة رابط عام» ⇒ `POST …/brain/diagnoses/{id}/share` ⇒ الرابط يُعرض **مرة واحدة** في `<input readonly>` + زر نسخ (JS سطر واحد inline `navigator.clipboard`) + زر «إلغاء المشاركة» ⇒ `DELETE …/share` · 409 `recommendation_dismissed` ⇒ flash · تكلفة اليوم من `GET …/brain/cost` كسطر صغير.
+
+**C-3 `/app/b/{brand_id}/settings`**: (أ) اتصالات Meta: `GET …/connections` بحالة كل اتصال + زر `resync` + رابط `connections/start` (يفتح OAuth في نافذة جديدة) · (ب) واتساب: `GET …/whatsapp/account` (الرقم، `quality_rating`، `daily_reply_cap`، `kill_switch` للقراءة فقط) · (ج) الباقة: `GET …/entitlement` كاملة (الخطة، الحدود، الاستهلاك، `active_until`) · (د) موافقة التعلّم: `GET/PUT …/learning-consent` كمفتاح تبديل · (هـ) الأعضاء: `GET …/grants` + إضافة (`POST`) بالبريد والدور + حذف (`DELETE`) — OWNER فقط (API يفرض؛ الواجهة تُخفي الأزرار لغيره عبر `brand.role`).
+
+### D — تبويبا المشرف + Umami + Playbooks
+
+**D-0 الحراسة**: مسارات `/app/admin/*` تتحقق محلياً `user.user_id in settings.platform_admin_user_ids` **قبل** أي نداء ⇒ غير المشرف 404 صفحة (لا 403 — لا نكشف وجود اللوحة). رابط «الإدارة» يظهر في `base.html` فقط إذا `is_admin`. API تفرض `PlatformAdmin` بنفسها على كل نداء.
+
+**D-1 `/app/admin/ai`** (D-077) — 4 تبويبات بـhtmx `hx-get` لكل تبويب:
+- **المزودون**: جدول `GET /admin/ai/providers` (slug, kind, base_url, `has_api_key`/`credential_ref`, timeout, enabled, عدد النماذج) · نموذج إضافة (`POST`) بحقول `ProviderCreate` — `api_key` حقل `type=password` **يُرسَل ولا يُعاد أبداً**؛ بعد الحفظ يُعرض `has_api_key=true` فقط · تعديل (`PATCH`) + تعطيل/تفعيل · حذف (`DELETE`) مع تأكيد `confirm()` · أخطاء `provider_host_not_allowed`/`provider_in_use` ⇒ flash مترجَم.
+- **النماذج**: جدول `GET /admin/ai/models` مع `provider`, `model_name`, `capability` (text/audio/…), تسعير لكل 1k (إدخال `0` صالح), `max_tokens_cap`, enabled · إضافة/تعديل/حذف.
+- **التوجيه**: لكل `purpose` (من `GET /admin/ai/routing`) قائمة مرتَّبة primary ⇒ fallbacks (select متعدد مرتَّب بسيط: صفوف `model_id` + ترتيب) ⇒ `PUT /admin/ai/routing/{purpose}` · عرض «المفعَّل فعلياً الآن» لكل غرض.
+- **المختبر (probe)**: اختيار نموذج + prompt (≤ 500) + `max_tokens` (≤ 64) ⇒ `POST /admin/ai/probe` ⇒ بطاقة نتيجة: `ok`, `latency_ms`, `prompt_tokens`/`completion_tokens`, `estimated_cost_usd`, `preview`, و`error_category` **مترجَمة** (12 فئة ⇒ 12 مفتاح `ai_error.*` في `ar.json`). **بلا إعادة محاولة تلقائية.**
+- **قواعد عرض الأخطاء:** كل كود D-069 من `/admin/ai/*` يحتاج مفتاح `error.<code>`؛ الاختبار المُعمَّم C-0.5 يُوسَّع ليشمل أكواد `catalog/exceptions.py`.
+
+**D-2 `/app/admin/entitlements`**: نموذج بحث بـ`brand_id` ⇒ `GET /admin/entitlements/{brand_id}` ⇒ بطاقة الخطة + نموذج `POST /admin/entitlements/activate` (plan, months/active_until, ملاحظة InstaPay) + **wa-caps**: `PATCH /admin/entitlements/wa-caps/{account_id}` (`daily_reply_cap`, `kill_switch` كمفتاح تبديل أحمر مع تأكيد).
+
+**D-3 Umami**: إعداد جديد `umami_website_id: str | None = None` + `umami_script_url: str = "https://cloud.umami.is/script.js"` في `Settings` (قراءة فقط — لا يغيّر سلوكاً آخر). `base.html`: `{% if umami_website_id %}<script defer src="{{ umami_script_url }}" data-website-id="{{ umami_website_id }}"></script>{% endif %}` — **لا وسم إطلاقاً عند الغياب** (اختبار). يُستثنى من grep الـCDN بتعليق صريح في الاختبار (الرابط من الإعدادات لا من القالب).
+
+**D-4 Playbooks**: `src/modules/brand_brain/playbooks/restaurants.json` و`clinics.json` (POST_M7 §1-ج: أعمدة محتوى، عتبات Pulse، قوالب ردود أولية، مقاييس، نبرة، تقويم مناسبات) + `playbooks.py` قارئ عند الإقلاع (`load_playbooks()` يُحقّق المخطط بـPydantic ويفشل الإقلاع عند ملف تالف) + `GET /api/v1/playbooks` **عام-للمصادَق** (`CurrentUser`، بلا علامة ⇒ **يرفع `PROTECTED_ROUTE_COUNT` إلى 85** — سجّله) يعيد القائمة · بطاقة «Playbook» في «اليوم» تعرض قطاع العلامة (من `brand_profiles.sector` إن وُجد وإلا select) و3 نصائح اليوم من الـJSON. **تطبيق الـPlaybook على `brand_profiles` كقيمة أولية ⇒ SPRINT-13** (يحتاج قرار على حقول الملف).
 
 ---
 
-## 3. معايير القبول (المخطط يتحقق منها حرفياً على PG 17 UTF8 ببيئة مُعاد بناؤها)
+## 3. معايير القبول (المخطط يتحقق منها حرفياً على PG 17 UTF8 ببيئة مُعاد بناؤها + مِجسّ حي بالمحدِّد الحقيقي)
 
-**12.1-أ:**
-1. توصية `dismissed` **لا تظهر** في `/d/{token}` ومشاركتها ⇒ 409 (اختبار PG).
-2. Batch: 50 عنصراً مختلطاً (موجود/غير موجود/فوق الحصة) ⇒ 200 مع نتائج لكل عنصر؛ `approval_events` = عدد الناجحين **فقط**؛ 51 عنصراً ⇒ 422؛ VIEWER ⇒ 403؛ `plan_inactive` ⇒ كل عنصر `error=entitlement_plan_inactive` (لا 402 للطلب كله).
-3. `/app/*` بلا cookie ⇒ 303 إلى `/app/login` (كل مسار؛ اختبار يعدّها من `app.routes`)؛ cookie منتهٍ ⇒ 303 أيضاً.
-4. تسجيل دخول صحيح ⇒ cookie `HttpOnly; Secure; SameSite=Lax` ⇒ `/app/b/{id}/today` 200 مع `dir="rtl"` و4 بطاقات؛ علامة بلا منحة ⇒ 404.
-5. الصندوق: ردّ على محادثة ⇒ 201 عبر الواجهة (Graph مُحاكى)؛ 423 kill switch ⇒ رسالة مترجمة لا 500؛ تعيين `lead_stage` يظهر فوراً (htmx swap).
-6. نموذج `POST` بلا `csrf` صحيح ⇒ 403.
-7. عزل: `src/ui` لا يستورد أي `src.modules.*.infrastructure` ولا `sqlalchemy` (اختبار AST) + `REMOVABILITY.md`.
-8. `PROTECTED_ROUTE_COUNT == 84`؛ العامة 7؛ `ErrorCategory` 12؛ greps الثمانية 0 + جديد: `grep -rn "sqlalchemy\|infrastructure" src/ui --include=*.py` = 0.
-9. `pip install .` في venv نظيف ⇒ `scripts/check_licenses.py` أخضر مع jinja2/python-multipart؛ `src/ui/static/vendor/LICENSES.md` يطابق sha256 الملفات.
-10. البوابات: ruff 0/0 · وحدات بلا DB ≥ 95.00% · تكامل PG 0 فشل · CI 5/5.
+### 3-1 C-0 (كلها اختبارات جديدة في `tests/ui/`)
+1. `test_u1a_thirty_requests_in_a_minute_no_kick`: بالمحدِّد الحقيقي `InMemoryRateLimiter` (override صريح) — دخول ثم **≥ 30 طلب GET/POST على `/app/*` خلال النافذة** ⇒ كلها 200 (لا 303)؛ عدّاد نداءات `/auth/refresh` الفعلية **≤ 1**.
+2. `test_u1b_twin_requests_same_cookies_keep_all_sessions`: طلبان بنفس الكوكيات (بما فيها حالة `app_access` منتهٍ مُزوَّر بـ`ttl=0`) ⇒ كلاهما 200 ⇒ جلسات المستخدم الحيّة **= 1** (لا `revoke_all`).
+3. `test_refresh_429_keeps_cookies_and_shows_rate_limited`: محاكاة 429 ⇒ لا `Max-Age=0` في `Set-Cookie`؛ الجسم يحوي `error.rate_limited`.
+4. `test_api_401_mid_page_triggers_one_refresh_then_denied`: إبطال الجلسة في المستودع الوهمي ⇒ الصفحة ⇒ 303 + مسح الثلاث كوكيات؛ مع `HX-Request` ⇒ 200 + `HX-Redirect`.
+5. `test_logout_requires_csrf`: بلا/خاطئ ⇒ 403 والجلسة حيّة؛ صحيح ⇒ 303 + مُبطَلة + الكوكيات الثلاث `Max-Age=0`.
+6. `test_csrf_nonce_differs_per_login` + `test_csrf_stamp_from_other_user_rejected`.
+7. `test_htmx_action_error_shows_flash_in_partial` (today + thread) · `test_htmx_csrf_403_retargets_flash`.
+8. `test_i18n_covers_all_enums` (C-0.5) · شريط الباقة يحوي `Z / W` للمحادثات.
+9. `test_vendor_cache_control_immutable`.
+10. `tests/test_auth_guard.py::test_app_routes_redirect_without_session` ما زال أخضر (303 أو `HX-Redirect` حسب الترويسة).
 
-**12.1-ب (تُفصَّل في توجيه قصير بعد دمج 12.1-أ):** الشاشات الثلاث + أدمن + Umami اختياري + Playbooks؛ TTFV ≤ 30 دقيقة على 3 علامات تجريبية (يقيسه المالك ويسجّله).
+### 3-2 C + D
+11. كل شاشة: اختبار عرض + اختبار إجراء واحد ناجح + اختبار خطأ ⇒ flash مترجَم (لا 500، لا نص خام).
+12. `content`: batch بـ3 عناصر مختلطة ⇒ 3 أسطر نتيجة بترجمة الأكواد · `diagnosis`: الرابط العام يظهر مرة ويُلغى؛ 409 مترجَم؛ `evidence_grade` ظاهر · `settings`: VIEWER لا يرى أزرار المنح.
+13. `/app/admin/*` لغير المشرف ⇒ **404** (ليس 403)؛ المشرف ⇒ 200 · إضافة مزود بمفتاح ⇒ الاستجابة والصفحة التالية **لا تحويان المفتاح** (اختبار يبحث عن القيمة حرفياً) · probe بفشل مزوّد ⇒ `error_category` مترجَمة بلا 500 · كل `ErrorCategory` الـ12 لها مفتاح.
+14. Umami: بلا `UMAMI_WEBSITE_ID` ⇒ لا `<script` خارجي في أي صفحة؛ معه ⇒ وسم واحد بالـid.
+15. Playbooks: ملفان يُحمَّلان؛ ملف تالف ⇒ الإقلاع يفشل برسالة واضحة؛ `GET /api/v1/playbooks` 401 بلا Bearer.
+16. `PROTECTED_ROUTE_COUNT == 85` (84 + `GET /api/v1/playbooks`) — أو 84 إن أُجِّل D-4 بالصمّام (سجّل).
+17. وحدات بلا DB ≥ **95.00%** (نصفان إن لزم) · تكامل PG **0 فشل** · ruff 0/0 · greps §4 كلها 0 · sha256 vendor مطابق · `contract.py`/`public_fetch.py`/`alembic/`/`src/modules/auth/**` بلا تغيير.
+18. الحجم الفعلي C-0+C+D ≤ 1,600 أو صمّام §1-ج مطبَّق ومسجَّل.
 
 ---
 
@@ -89,21 +143,22 @@
 # 0) البداية
 git checkout work/implementation && git fetch origin && git merge --ff-only origin/main
 
-# 1) بيئة PG 17 UTF8 — كما في SPRINT-12 §4 (initdb -E UTF8 --locale=C.UTF-8 … CREATE EXTENSION vector) ثم:
-pip install -e ".[dev]"
+# 1) بيئة PG 17 UTF8 — كما في SPRINT-12 §4 ثم:
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/ai_growth_os_test pytest -m integration -q
 
 # 2) بعد كل Part
 ruff check src tests alembic scripts && ruff format --check src tests alembic scripts
-TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/ai_growth_os_test pytest -m integration -q
-# بوابة الوحدات بلا DB — إن قُتلت OOM (ساندبوكس 1 GB) شغّلها على نصفين بـ--cov-append ثم coverage report --fail-under=95 (انظر sprints/SPRINT-12_REVIEW.md §5)
 env -u TEST_DATABASE_URL pytest -m "not integration" -q --cov=src --cov-fail-under=95 --cov-precision=2
+# OOM؟ نصفان بـ--cov-append ثم: coverage report --precision=2 --fail-under=95
 
 # 3) greps الملزمة (0 نتائج) — الثمانية من SPRINT-12 §4-3 كما هي + :
-grep -rn "sqlalchemy\|\.infrastructure" src/ui --include=*.py                 # 0 — الواجهة لا تلمس البيانات مباشرة
-grep -rn "cdn\.\|unpkg\|jsdelivr\|googleapis" src/ui                             # 0 — لا CDN
-grep -rn "[\u0600-\u06FF]" src/ui/templates                                       # 0 — لا عربية مضمَّنة (كلها في i18n/ar.json)
-sha256sum src/ui/static/vendor/*.{js,css} && cat src/ui/static/vendor/LICENSES.md # تطابق
-git diff origin/main -- src/modules/ai_gateway/contract.py src/modules/brand_brain/public_fetch.py alembic/ | wc -l   # 0
+grep -rn "sqlalchemy\|\.infrastructure" src/ui --include=*.py                 # 0
+grep -rn "import httpx\|from httpx" src/ui --include=*.py                       # 0 (D-068)
+grep -rn "cdn\.\|unpkg\|jsdelivr\|googleapis" src/ui --exclude=LICENSES.md      # 0 (Umami من Settings لا من القالب)
+grep -rnP "[\x{0600}-\x{06FF}]" src/ui/templates                                 # 0
+grep -rn "api_key\|get_secret_value" src/ui/templates                            # 0 — لا سرّ يصل قالباً
+git diff origin/main -- src/modules/auth/ src/modules/ai_gateway/contract.py src/modules/brand_brain/public_fetch.py alembic/ | wc -l   # 0
+sha256sum src/ui/static/vendor/*.js src/ui/static/vendor/*.css                  # يطابق LICENSES.md
 
 # 4) الدفع بعد كل كوميت
 git push origin work/implementation
@@ -113,34 +168,36 @@ git push origin work/implementation
 
 ## 5. التزامات المنفذ
 
-1. **لا دمج** إلى `main` (D-063). PR أول لـ12.1-أ؛ **توقّف** بعده حتى مراجعة المخطط ودمجه؛ ثم PR ثانٍ لـ12.1-ب.
-2. **لا** `ErrorCategory` جديد؛ **لا** هجرة؛ **لا** `# pragma: no cover` جديد؛ **لا** تبعية غير المذكورة في البطاقة؛ **لا** CDN.
-3. **Part A أولاً ويُدفع وحده** (S-1 سطح عام).
-4. **ادفع بعد كل كوميت** وحدّث §6 في كوميت docs لكل PR.
-5. إن تعارض هذا التوجيه مع الكود الفعلي، **الكود الفعلي هو المرجع**: نفّذ المقصود وسجّل الفرق في §6.
-6. **صمّاما الحجم** في البطاقة ملزمان؛ تجاوزهما بلا تسجيل = رفض.
-7. لا نص خام من العميل يُعاد في أي قالب دون `autoescape` (Jinja2 افتراضياً للـ`.html` — **تحقق أنه مفعَّل** واكتب اختباراً يحقن `<script>` في اسم محادثة ويؤكد الهروب).
+1. **لا دمج** إلى `main` (D-063). PR واحد؛ **C-0 يُدفع وحده أولاً** ويُشغَّل عليه CI قبل C.
+2. **لا** `ErrorCategory` جديد؛ **لا** هجرة؛ **لا** `# pragma: no cover` جديد؛ **لا** تبعية؛ **لا** CDN؛ **لا** تعديل في `src/modules/auth/**` (الحل في `src/ui` فقط).
+3. **لا سرّ في قالب أو سجل:** `api_key` يُرسَل إلى API ولا يُعاد؛ لا `print`/`logger` لحمولات النماذج.
+4. **ادفع بعد كل كوميت** وحدّث §6 في كوميت docs.
+5. إن تعارض هذا التوجيه مع الكود الفعلي، **الكود هو المرجع**: نفّذ المقصود وسجّل الفرق في §6.
+6. **صمّام §1-ج ملزم بترتيبه**؛ تجاوز بلا تسجيل = رفض.
+7. كل نص من العميل أو من المزوّد (`preview` في probe!) يمرّ عبر `autoescape` — اختبار يحقن `<script>` في `preview`.
+8. **لا تجربة حيّة على `/app` قبل دمج C-0** (U1 سيطرد المستخدم).
 
 ---
 
 ## 6. تقرير المنفذ (يملؤه المنفذ)
 
-> **12.1-أ فقط** (A ⇒ B ⇒ docs). 12.1-ب (C + D) تنتظر التوجيه القصير بعد المراجعة.
-
 | البند | القيمة |
 |---|---|
-| SHA الكوميتات | على `work/implementation` فوق `main` @ `08e1258` (ff من `b266b95`): **A** `85b9fcd` `fix(sprint-12.1): exclude dismissed from public card + batch approval (D-055)` — دُفع وحده · `ff7f893` `test(sprint-12.1): content route inventory …` (اختبار فقط — جرد مسارات content كان يُحصي 13/14 حرفياً) · **B** `a0d3d10` `feat(sprint-12.1): L1 UI base — session cookie, layout, login/today/inbox (RTL)` · `e1ae039` `fix(sprint-12.1): UI keeps D-068 No-Bypass (httpx only in core/http) + session check precedes form validation` (إصلاح فشلَي CI unit على `a0d3d10`) · **docs** (هذا الكوميت). |
-| نتائج `pytest` (العدد/التغطية) لكل كوميت — كامل **و** بلا DB | **CI (GitHub, PG 17 خدمة):** `85b9fcd` 4/5 (unit ❌ جرد content فقط) ⇒ `ff7f893` **5/5** · `a0d3d10` 4/5 (unit ❌: `test_b0_u1_no_bypass_imports` بسبب `import httpx` في `src/ui/api.py` + `test_app_routes_redirect_without_session` لأن `POST …/reply` بلا جسم أعاد 422 قبل فحص الجلسة) ⇒ `e1ae039` **5/5** — بلا DB **1,472 ناجحاً / 0 فشل / 1 متخطى · 95.25%** (`--cov-fail-under=95`)؛ تكامل ✅. **محلياً PG 17 UTF8+vector (5433، بيئة مُعاد بناؤها بعد كل إعادة ضبط):** تكامل **142/0** على `a0d3d10` و`e1ae039` (140 من SPRINT-12 + 2 جديدان: `test_sprint12_1_a_pg.py` S-1 + batch 50 مختلطاً) · وحدات الواجهة `tests/ui` + `tests/isolation/test_ui_removable.py` **39/39** · A-1 12/12 · A-2 5/5 · حارس المسارات + `/app/*` ✅. **بلا DB محلياً:** الساندبوكس 985 MB يقتل المجموعة الكاملة مع التغطية حتى على نصفين (OOM عند ~930 MB) ⇒ رقم التغطية المعتمد هو رقم CI (95.25%). |
-| `PROTECTED_ROUTE_COUNT` / العامة / عدد مسارات `/app/*` | **84** (83 + `POST /brands/{id}/content/approvals/batch`) / **7** (بلا تغيير) / **11** مساراً `/app/*` (`GET+POST /login`, `POST /logout`, `GET /`, `GET /b/{id}/today`, `POST …/today/alerts/{alert_id}/ack`, `POST …/today/items/{item_id}/approve`, `GET /b/{id}/inbox`, `POST …/inbox/{cid}/reply`, `…/suggest`, `…/stage`) — **8** منها محروسة بالجلسة (303 ⇒ `/app/login` بلا cookie أو بـcookie منتهٍ/تالف — مُثبَت في `tests/ui/test_ui_session.py` **و** `tests/test_auth_guard.py::test_app_routes_redirect_without_session`)؛ `include_in_schema=False` + استثناء صريح لـ`/app` في `_protected_operations()`. `ErrorCategory` 12 (بلا تغيير). |
-| أسطر `src/` المضافة لكل Part (خام/فعلي) + حالة الصمّام | **A:** 156 مضافاً / 8 محذوفاً (`share.py` 42 · `content/schemas.py` 36 · `content/router.py` 78) ≈ التقدير 150. **B (+إصلاح CI):** **729** سطر Python فعلي (`src/ui/*.py` 694: `router.py` 497 · `session.py` 103 · `api.py` 86 · `__init__.py` 8 + `main.py` 8 + `core/http.py` 27) + 356 سطراً غير Python (8 قوالب 190 · `i18n/ar.json` 104 · `REMOVABILITY.md` 31 · `LICENSES.md` 18) + أصلان مُلزَمان (`htmx.min.js` 50,917 B · `pico.min.css` 82,194 B — ليسا كوداً مكتوباً). **A + B Python = 885 ≤ 1,400 ⇒ الصمّام لم يُفعَّل؛ inbox بقي في B.** حتى مع احتساب القوالب/i18n/md (1,241) يبقى تحت السقف. اختبارات: A +490 سطراً (11 وحدة + 2 تكامل)، B +686 سطراً (39 وحدة + حارس). |
-| نتائج grep الملزمة (§4-3) + sha256 vendor | الثمانية من SPRINT-12 §4-3 = **0** (بلا تغيير في نطاقها) · `grep -rn "sqlalchemy\|\.infrastructure" src/ui --include=*.py` = **0** · `grep -rn "cdn\.\|unpkg\|jsdelivr\|googleapis" src/ui` = **0** (الـURLs الوحيدة في `LICENSES.md` كمصادر موثّقة فقط؛ لا قالب ولا Python) · عربية في `src/ui/templates` = **0** (كلها في `i18n/ar.json`؛ اختبار `test_templates_have_no_cdn_and_no_arabic_literals`) · `import httpx` في `src/ui` = **0** (بعد `e1ae039`) · `# pragma: no cover` في `src/` = 20 (بلا تغيير) · `git diff origin/main -- contract.py public_fetch.py alembic/` = **0** · ملفات ممنوعة (`ARCHITECTURE_LOCK`, `SESSION_RECOVERY`, `imaster_planner`, `README`, `Hub/**`, `sprints/**`) = **0** فرق · `wip/*` = 0. **sha256 vendor** (مطابق لـ`LICENSES.md`، مُختبَر في `test_vendor_sha256_matches_licenses_md`): `htmx.min.js` 2.0.4 0BSD `e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447` · `pico.min.css` 2.0.6 MIT `dd5fd5591afd81ee21dcc117ad85c014dc3f1f19dc2d7b7d101ea0acc29274c2`. `scripts/check_licenses.py`: Jinja2 3.1.6 BSD ✅ · MarkupSafe 3.0.3 BSD-3 ✅ · python-multipart 0.0.33 Apache-2.0 ✅ (CI licenses ✅). |
-| انحرافات عن §2 (مع السبب) | **(1) CSRF مربوط بـ`user_id` لا `sid`:** §2 يقول `HMAC(token_encryption_key, session id)`، لكن وحدة auth الفعلية تُدوِّر `sid` عند **كل** `/auth/refresh` (كشف إعادة الاستخدام I-A2) — والواجهة تستدعي refresh في كل طلب `/app/*`، فختم مربوط بـsid لن يطابق أبداً الطلب الذي يقدّمه. الختم = `HMAC(token_encryption_key ∥ fallback auth_jwt_secret, user_id)[:32]` بمقارنة زمن ثابت؛ اختبار `test_csrf_stamp_survives_refresh_rotation`. **(2) cookie الجلسة نسخة من قيمة refresh بمسار `/app` و`SameSite=lax`:** cookie auth الأصلية محصورة بـ`Path=/api/v1/auth` و`strict`، فالمتصفح لا يرسلها لـ`/app/*`؛ الواجهة تنسخ القيمة ذاتها إلى `app_session` (`HttpOnly`، `Secure` + بادئة `__Secure-` عند `auth_cookie_secure`، `Max-Age=auth_refresh_ttl_seconds`)، وتستبدلها بالقيمة المُدوَّرة في كل استجابة (بما فيها 403 CSRF)؛ `lax` لأن روابط `GET` الواردة من البريد/واتساب إلى `/app/...` يجب أن تعمل — الكتابة محمية بالختم. **(3) `httpx` داخل `src/ui` — مسحوب:** `a0d3d10` استورد `httpx` مع `# noqa: TID251`؛ حارس `test_b0_u1_no_bypass_imports` رفضه في CI، فنُقل النقل الداخلي إلى `src/core/http.py::build_in_process_client()` (الوحدة المسموح لها وحدها) في `e1ae039`؛ `src/ui` لا يستورد `httpx` إطلاقاً، واختبار العزل يمنع ذلك صراحة. **(4) حقول النماذج اختيارية:** FastAPI يُحقّق `Form()` قبل الدخول إلى الدالة ⇒ `POST /reply` بلا جسم أعاد 422 لمستخدم مجهول؛ جُعلت الحقول اختيارية بافتراض فارغ حتى يسبق فحص الجلسة (303) وCSRF (403) أي تحقق؛ الجسم الفارغ يصل إلى API ويعود 422 كـflash مترجَم للمستخدم المصادق. **(5) `pyproject.toml` عُدِّل** (استثناء تصريح البطاقة): `jinja2>=3.1.6` + `python-multipart>=0.0.18` فقط. **(6) قيم `LeadStage`/`ObjectionCode` الفعلية:** القوائم في الواجهة = `new/qualified/quoted/won/lost/not_lead` و`price/timing/trust/competitor/no_response/other` (الكود هو المرجع). **(7) S-1 ⇒ 409 `recommendation_dismissed` لا 404:** مشاركة توصية `dismissed` تُرفَض بـ409 (تمييز عن غير الموجود 404)؛ الرابط العام لتوصية صارت `dismissed` بعد مشاركتها ⇒ 404 والأشقاء غير العامين يُحذفون من البطاقة (`PUBLIC_STATUSES = {proposed, accepted, materialized}`). **(8) Batch ⇒ فحص الخطة يسبق دورة الحياة** (كما في المسار المفرد): بعد بلوغ سقف `monthly_posts` تُبلَّغ العناصر المفقودة أيضاً `entitlement_quota_exceeded` بدل `content_not_found`. **(9) 423 kill-switch في الواجهة ⇒ 200 + flash مترجَم** (`error.wa_number_disabled`)، ليس تمرير 423؛ أخطاء API الأخرى ⇒ flash؛ أخطاء التحميل ⇒ صفحة خطأ 403/404 كما هي وإلا 502. **(10) `test_auth_guard.py` كاملاً بطيء محلياً** (168 حالة × بناء التطبيق) — نُفِّذ كاملاً في CI؛ محلياً نُفِّذ اختبار `/app/*` + العدّاد. **(11) إعادات ضبط الساندبوكس ×4 خلال 12.1-أ** مسحت `src/ui` غير المُلتزَم مرتين (أُعيد بناؤه حرفياً) — لذلك دُفع B فور اكتمال اختباراته المحلية ثم أُصلح من CI. **(12) `concurrency: cancel-in-progress`:** دفعُ `ff7f893` ألغى تشغيل `85b9fcd` قبل اكتمال unit — النتيجة النهائية لكل شجرة مُثبَتة على الكوميت التالي. |
-| ما يحتاج قرار المالك | **(أ)** 🔑 تدوير `ghp_…` — ظهر ≥ **66** مرة (يُرسَل في كل دور) + حماية `main`. **(ب)** قبول انحراف CSRF (`user_id` بدل `sid`) أو طلب بديل (ختم مُخزَّن في الجلسة = يتطلب عموداً ⇒ D-019 ⇒ ليس في 12.1). **(ج)** `SameSite=lax` لـ`app_session` (مقابل `strict` في auth) — مقبول؟ **(د)** `/app/static/vendor/*` يُقدَّم عبر `StaticFiles` بلا `Cache-Control` مخصص وبلا SRI — يكفي لـL1؟ **(هـ)** بدء 12.1-ب (C: content/diagnosis/settings + D: admin AI/entitlements + Umami + Playbooks) يحتاج التوجيه القصير الموعود. |
+| SHA الكوميتات | |
+| نتائج `pytest` (العدد/التغطية) لكل كوميت — كامل **و** بلا DB | |
+| `PROTECTED_ROUTE_COUNT` / العامة / عدد مسارات `/app/*` | |
+| أسطر `src/` الفعلية لكل Part + حالة صمّام §1-ج | |
+| نتائج greps §4 + sha256 vendor | |
+| نتيجة اختبارات U1–U4 (3-1) بالأرقام (عدد الطلبات بلا طرد، عدد نداءات refresh) | |
+| انحرافات عن §2 (مع السبب) | |
+| ما يحتاج قرار المالك | |
 
 ---
 
 ## 7. ما ينتظر المالك
 
-1. 🔑 **تدوير التوكن** (`ghp_…` ظهر ≥ 18 مرة في جلسة المخطط وحدها) + حماية فرع `main`.
-2. **الحظر التشغيلي مرفوع** (SPRINT-12 دُمج). قبل الربط الحي راجع: `FEATURE_PULSE`/`FEATURE_LEAD_LOOP` (افتراضهما `true`)، `PULSE_INTERVAL_SECONDS=900`، سقف D-082 = 300.
-3. تجهيز **3 علامات تجريبية** + نشر Umami (اختياري) لقياس TTFV في نهاية 12.1-ب.
+1. 🔑 **تدوير التوكن** (ظهر ≥ 21 مرة في محادثة المخطط وحدها) + حماية `main`.
+2. **بعد دمج 12.1-ب:** 3 علامات تجريبية (مطعم/كافيه ×2 + عيادة ×1) بحسابات Meta/WABA حقيقية لقياس TTFV ≤ 30 دقيقة + تصوير فيديوهات App Review (الرحلة: دخول ⇒ اليوم ⇒ صندوق الوارد ⇒ ردّ ⇒ تشخيص ⇒ مشاركة رابط).
+3. ضبط `PLATFORM_ADMIN_USER_IDS` لحساب المالك فقط (يفعّل `/app/admin/*`).
+4. اختيار: `UMAMI_WEBSITE_ID` (Umami Cloud أو self-host MIT) أو تركه فارغاً.
+5. مراجعة `FEATURE_PULSE` / `FEATURE_LEAD_LOOP` / `PULSE_INTERVAL_SECONDS` / السقف 300 قبل التشغيل الحي.
