@@ -80,14 +80,13 @@
 
 ## 3. المهمة النشطة الحالية (Active Task)
 
-- **معرف المهمة:** **`SPRINT-12-CLOSURES-LEAD-LOOP-PULSE`** — **`DELIVERED`** (A `8ed1346` · B `5233aaa` · C `38bd73d` C-1 فقط · `f606350` إصلاح اختبار · docs فوقها؛ PR `work/implementation → main` ينتظر مراجعة المخطط) — كان `ISSUED` · يبدأ المنفذ من `main` @ **`0efaa92`** (دمج PR #43) · ثلاثة كوميتات **A** (إغلاق H1–H6 — يُدفع وحده أولاً) ⇒ **B** (هجرة 0016 + lead loop + `pulse` + أسقف D-082) ⇒ **C** (`/d/{token}` + Batch Approval) + docs.
-- **السابق:** `SPRINT-11.1-PROVIDER-CATALOG` **مقبول ومدموج** `main` @ `ffb3f5d` (A `67dceb4` · B `4c396c8` · C `2d26c28` · docs `9d944ce`).
-- **وثيقة التوجيه المعتمدة:** [`CURRENT_DIRECTIVE.md`](./CURRENT_DIRECTIVE.md) (SPRINT-12، 2026-11-02؛ 12 معياراً).
-- **قرار `[DECISION]` H1:** webhook موقَّع ⇒ **200 دائماً** + تخزين + علامة `plan_inactive`؛ كل مسار صادر ⇒ **402 `entitlement_plan_inactive`** (لا 429).
-- **بوابة G6:** خارطة POST_M7 لـSPRINT-12 ≈ 3,600–4,200 سطر `src/` ⇒ قُسمت: **12** خلفية (≈ 1,600) · **12.1** واجهة L1 (Jinja2 BSD-3 + htmx 0BSD + Pico MIT + Umami MIT — تراخيص مُتحقَّقة D-054 عبر GitHub API).
-- **المسارات المحمية الفعلية:** **83** (77 + lead-stage + pulse×2 + wa-caps + `POST`/`DELETE …/brain/diagnoses/{diag_id}/share`؛ **بلا** batch — مؤجَّل بالصمّام)؛ العامة **7** (+ `GET /api/v1/d/{token}`). (التوقع كان 82.)
-- **التالي بعد القبول:** **SPRINT-12.1** (L1 + Umami + Playbooks + App Review) ⇒ SPRINT-13 (Day-2 Ops + D-081 + تنبيه 800/شهر) ⇒ SPRINT-14 ⇒ V1.
-- 🔴 **حظر تشغيلي على المالك حتى دمج SPRINT-12 Part A:** لا `FEATURE_PROVIDER_CATALOG_ENABLED=true`، لا `PLATFORM_ADMIN_USER_IDS`، لا `suspend` لعلامة لها webhook واتساب حيّ.
+- **معرف المهمة:** **`SPRINT-12.1-L1-UI-AND-DEFERRED`** — **`ISSUED`** · يبدأ المنفذ من `main` @ **SHA دمج PR التوجيه** (يُسجَّل في §6) · **نصفان بقرار G6:** **12.1-أ** = A (S-1 + Batch Approval C-2) ⇒ B (أساس L1: جلسة cookie + CSRF + login/today/inbox، RTL) ⇒ docs ⇒ **PR أول ⇒ مراجعة ودمج** ⇒ **12.1-ب** = C (content/diagnosis/settings) ⇒ D (أدمن AI/entitlements + Umami + Playbooks) ⇒ docs ⇒ PR ثانٍ.
+- **السابق:** `SPRINT-12-CLOSURES-LEAD-LOOP-PULSE` **مقبول ومدموج** `main` @ **`b98cffe`** (PR #45؛ A `8ed1346` · B `5233aaa` · C `38bd73d` C-1 · `f606350` · docs `6b512a8`) — التقرير [`sprints/SPRINT-12_REVIEW.md`](./sprints/SPRINT-12_REVIEW.md): 1,421/0 · 95.28% · تكامل 140/0 · 0016 ذهاباً وإياباً · greps 8 = 0 · H1–H6 ✅ مُغلقة · مِجسّ حي 16 فرضية ⇒ **S-1** (التوصيات `dismissed` تظهر في `/d/{token}` — غير مانع ⇒ 12.1 A-1) + **S-2** (`ack` ثانٍ ⇒ 200 idempotent — مقبول).
+- **وثيقة التوجيه المعتمدة:** [`CURRENT_DIRECTIVE.md`](./CURRENT_DIRECTIVE.md) (SPRINT-12.1، 2026-11-03؛ 10 معايير لـ12.1-أ).
+- **تبعيات 12.1 (D-054 مُتحقَّقة):** `jinja2` BSD-3-Clause (صريحة) · `python-multipart` Apache-2.0 · ملفات ثابتة مُلزَمة: htmx 0BSD + Pico MIT (`src/ui/static/vendor/LICENSES.md` + sha256) · Umami MIT خارجي اختياري. **لا CDN، لا هجرة، لا ErrorCategory جديد.**
+- **المسارات المحمية المتوقعة بعد 12.1-أ:** **84** (83 + `POST …/content/approvals/batch`)؛ العامة 7؛ مسارات `/app/*` HTML خارج العدّاد وتعيد 303 ⇒ `/app/login` بلا cookie (اختبار جديد).
+- **التالي:** 12.1-ب ⇒ قياس TTFV ≤ 30 دقيقة على 3 علامات تجريبية ⇒ SPRINT-13 (Day-2 Ops + D-081 + تنبيه 800/شهر + `quality_rating` + فيديوهات App Review) ⇒ SPRINT-14 ⇒ V1.
+- ✅ **الحظر التشغيلي مرفوع** (SPRINT-12 Part A مدموج). قبل الربط الحي: راجع `FEATURE_PULSE`/`FEATURE_LEAD_LOOP` (=`true`)، `PULSE_INTERVAL_SECONDS=900`، سقف D-082 = 300.
 
 ## 4. معايير القبول للمهمة الحالية (Acceptance Criteria)
 
@@ -99,16 +98,18 @@
 - [x] **المنفذ:** SPRINT-11.1 A ⇒ B ⇒ C على `work/implementation` (`67dceb4` / `4c396c8` / `2d26c28`)؛ `PROTECTED_ROUTE_COUNT == 77` ✅؛ هجرة 0015 ذهاباً وإياباً ✅؛ وحدات بلا DB ≥ 95.00% بدقة 2 ✅؛ Zero-secret للمفاتيح ✅ (cipher `gAAAA`، لا نص خام في أي استجابة/openapi/log). 1,467/0/98.18%.
 - [x] **المخطط:** مراجعة SPRINT-11.1 على PG 17 ⇒ `sprints/SPRINT-11.1_REVIEW.md` (H1–H6 حياً) ⇒ دمج PR #42 (`ffb3f5d`) ⇒ حذف `wip/sprint11.1-*` ⇒ إصدار SPRINT-12 (تقسيم G6 ⇒ 12.1).
 - [x] **المنفذ:** SPRINT-12 A ⇒ B ⇒ C على `work/implementation` (`8ed1346` / `5233aaa` / `38bd73d`)؛ Part A دُفع وحده أولاً (CI 5/5)؛ `PROTECTED_ROUTE_COUNT == 83` (الفعلي؛ batch مؤجَّل بالصمّام ⇒ 12.1) ✅؛ هجرة 0016 ذهاباً وإياباً على PG 17.11 ✅؛ 0 حالات 500 عند `plan_inactive` ✅؛ وحدات بلا DB 1,421/0 · 95.28% (CI) ✅؛ تكامل 140/0 ✅.
-- [ ] **المخطط:** مراجعة SPRINT-12 على PG 17 ⇒ `sprints/SPRINT-12_REVIEW.md` ⇒ دمج ⇒ SPRINT-12.1 (L1).
+- [x] **المخطط:** مراجعة SPRINT-12 على PG 17.11 (بيئة مُعاد بناؤها ×2) ⇒ `sprints/SPRINT-12_REVIEW.md` ⇒ دمج PR #45 (`b98cffe`) ⇒ إصدار SPRINT-12.1 (G6: نصفان).
+- [ ] **المنفذ:** 12.1-أ (A `fix` S-1+Batch ⇒ B `feat` L1 base ⇒ docs) على `work/implementation`؛ `PROTECTED_ROUTE_COUNT == 84`؛ `/app/*` 303 بلا cookie؛ CSRF 403؛ عزل `src/ui` (لا sqlalchemy/infrastructure)؛ vendor sha256 + LICENSES.md؛ وحدات ≥ 95.00%؛ تكامل PG 0 فشل.
+- [ ] **المخطط:** مراجعة 12.1-أ ⇒ دمج ⇒ توجيه قصير لـ12.1-ب.
 
 ## 5. الخطوة الدقيقة التالية (Exact Next Step)
 
 | الترتيب | الدور | الخطوة |
 |---|---|---|
-| 1 | **المخطط** | ✅ SPRINT-11.1 مراجَع ومدموج (`ffb3f5d`) + ✅ SPRINT-12 مكتوب ⇒ يدمج PR هذا التوجيه في `main` (D-063) ويسجّل SHA في §6. |
-| 2 | **المنفذ** | ✅ SPRINT-12 مُسلَّم (A `8ed1346` ⇒ B `5233aaa` ⇒ C `38bd73d` C-1 ⇒ `f606350` إصلاح اختبار ⇒ docs)؛ PR #45 `work/implementation → main` مفتوح. لا دمج (D-063). **ينتظر.** |
-| 3 | **المالك** | 🔑 **تدوير توكن GitHub (الطلب ≥ السادس عشر)** + حماية فرع `main`؛ 🔴 **الحظر التشغيلي الثلاثي** حتى دمج Part A (لا كتالوج/لا مشرف/لا suspend). |
-| 4 | **المخطط** | **الآن:** مراجعة مستقلة على PG 17 ⇒ `sprints/SPRINT-12_REVIEW.md` ⇒ قرار الصمّام (Batch ⇒ 12.1) + قرار استثناء `token` في الحارس ⇒ دمج ⇒ إصدار **SPRINT-12.1** (Batch Approval + L1 الست + Umami + Playbooks). |
+| 1 | **المخطط** | ✅ SPRINT-12 مراجَع ومدموج (`b98cffe`) + ✅ SPRINT-12.1 مكتوب ⇒ يدمج PR هذا التوجيه في `main` (D-063) ويسجّل SHA في §6. |
+| 2 | **المنفذ** | **يبدأ فور دمج التوجيه:** `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` ⇒ **Part A** (S-1 + Batch) يُدفع وحده ⇒ **Part B** (L1 base) ⇒ docs ⇒ PR `SPRINT-12.1-A` ⇒ **يتوقف** حتى المراجعة. لا دمج (D-063). |
+| 3 | **المالك** | 🔑 **تدوير توكن GitHub (الطلب ≥ الثامن عشر)** + حماية فرع `main`؛ مراجعة افتراضات `FEATURE_PULSE`/`FEATURE_LEAD_LOOP`/سقف 300؛ تجهيز 3 علامات تجريبية لقياس TTFV. |
+| 4 | **المخطط** | بعد PR 12.1-أ: مراجعة مستقلة على PG 17 (+ اختبار XSS/CSRF حي) ⇒ `sprints/SPRINT-12.1A_REVIEW.md` ⇒ دمج ⇒ توجيه 12.1-ب. |
 
 > **ثلاث قواعد:** (1) لا يبدأ المنفذ قبل دمج توجيه المخطط في `main`. (2) المخطط يفرّع `genspark_ai_developer` من `main` **فقط**. (3) **المالك لا يدمج يدوياً** — المخطط يدمج توجيهاته فوراً وPRs المنفذ بعد الاعتماد (D-063).
 
@@ -120,6 +121,8 @@
 
 | التاريخ | الوكيل | الفرع | الكوميت | ما تم تأكيده | الخطوة التالية |
 |---|---|---|---|---|---|
+| 2026-11-03 | المخطط | `plan/sprint12-review` → `main` | **(SHA دمج PR التوجيه — يُسجَّل في checkpoint التالي)** | **`SPRINT_12_1_ISSUED`:** `CURRENT_DIRECTIVE.md` = SPRINT-12.1 (نصفان G6) · `sprints/SPRINT-12_REVIEW.md` · Hub (CHANGELOG محطة 11، SECURITY_BASELINE: H1–H6 ✅ `b98cffe`، SSRF كتالوج ✅، D-082 ✅ جزء 1) · 0 فرق في `src/ tests/ alembic/`. | المنفذ: 12.1-أ Part A يُدفع وحده. المالك: 🔑 تدوير التوكن (≥ 18). |
+| 2026-11-03 | المخطط | `main` | **`b98cffe`** (دمج PR [#45](https://github.com/belalalibb/ai_agancy_markting/pull/45)) | **SPRINT-12 مقبول:** ruff 0/0 (الرأس + 3 أشجار) · وحدات بلا DB **1,421/0 · 95.28%** (نصفان `--cov-append` — OOM في الساندبوكس) · تكامل PG 17.11 **140/0** · `0016⇒0015⇒0016` (3 جداول/5 أعمدة/11 قيداً) · greps 8 = 0 · ErrorCategory 12 · 83/7 · CI 5/5 ×2 · 12 انحرافاً مقبولة · مِجسّ 16 فرضية: 14 ✅ + S-1 ⚠️ (dismissed في البطاقة العامة ⇒ 12.1 A-1) + S-2 ℹ️ (ack idempotent). **الحظر التشغيلي مرفوع.** | المخطط: إصدار SPRINT-12.1. |
 | 2026-11-03 | المنفذ | `work/implementation` (من `main` @ `e66e561`) → PR إلى `main` | A `8ed1346` / B `5233aaa` / C `38bd73d` / `f606350` (اختبار) / docs (هذا الكوميت) | **SPRINT-12 مُسلَّم:** A إغلاق H1–H6 (webhook 200 دائماً + `plan_inactive`؛ 402 للصادر؛ تفويض قبل الحصة؛ Brand Brain عبر الكتالوج؛ SSRF-DNS؛ `CatalogPriceTable` مفتاح مزوّد+اسم) · B هجرة 0016 (3 جداول + 5 أعمدة + 11 قيداً) + حلقة الليد D-079 (lead-stage + attribution `measured` من referral مرة واحدة + `owner_input` بالرمز) + `pulse` (8 فحوص SQL، idempotent حتى ack، `extra_steps` على `independent_session`، `REMOVABILITY.md` + عزل AST) + أسقف D-082 (429 `wa_daily_cap_reached` + 423 `wa_number_disabled` + أدمن wa-caps) · C-1 `/d/{token}` (OWNER share/unshare، sha256 فقط، بطاقة عامة مُنظَّفة بعلامة مائية، 60/دقيقة/IP، `Cache-Control: public, max-age=300`، ملغى ⇒ 404) — **Batch مؤجَّل بالصمّام**. CI: A 5/5، شجرة C 5/5 (1,421/0 · 95.28% بلا DB؛ تكامل 140/0)؛ PG 17.11 محلياً 140/0 + `0016⇒0015⇒0016`. 83 محمياً / 7 عامة؛ greps 0؛ 11 انحرافاً في §6. | **المخطط:** مراجعة مستقلة على PG 17 ⇒ `sprints/SPRINT-12_REVIEW.md` ⇒ قرارا الصمّام والحارس ⇒ دمج ⇒ SPRINT-12.1. **المالك:** 🔑 تدوير التوكن (≥ 58 ظهوراً) + حماية `main`. |
 | 2026-11-02 | المخطط | `main` | `0efaa92` (دمج PR [#43](https://github.com/belalalibb/ai_agancy_markting/pull/43)) | **نقطة الاستئناف المؤكدة:** `SPRINT_12_ISSUED` على `main`؛ `verify_hub` ✅ 57 وثيقة؛ 0 فرق في `src/ tests/ alembic/`. **SHA بداية المنفذ لـSPRINT-12 = `0efaa92`.** | المنفذ: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` ⇒ Part A (H1–H6) ويُدفع وحده. المالك: تدوير التوكن + الحظر التشغيلي الثلاثي. |
 | 2026-11-02 | المخطط | `main` | `ffb3f5d` (دمج PR [#42](https://github.com/belalalibb/ai_agancy_markting/pull/42)) | **نقطة الاستئناف المؤكدة:** SPRINT-11.1 مدموج في `main` بعد مراجعة PG 17 مستقلة؛ H1–H6 مُثبَتة حياً؛ `wip/sprint11.1-chain` و`wip/sprint11.1-squash` حُذفا. | المخطط يدمج PR التخطيط (مراجعة + SPRINT-12 + WORK_STATE). |
