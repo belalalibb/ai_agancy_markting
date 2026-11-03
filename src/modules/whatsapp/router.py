@@ -16,11 +16,13 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.audit import AuditPort, audit, get_audit_port
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.core.flags import effective_flag
 from src.core.http import HttpClient
 from src.core.security import (
     EncryptionKeyMissingError,
@@ -210,11 +212,16 @@ Suggestions = Annotated[ReplySuggestionService, Depends(get_suggestion_service)]
 Posts = Annotated[PublishedPostLookup | None, Depends(get_published_post_lookup)]  # SPRINT-12
 
 
-def get_lead_loop_service(
-    repo: Repo, settings: Annotated[Settings, Depends(get_settings)], posts: Posts
+async def get_lead_loop_service(
+    request: Request,
+    repo: Repo,
+    settings: Annotated[Settings, Depends(get_settings)],
+    posts: Posts,
 ) -> LeadLoopService:
-    """SPRINT-12 B-2 (D-079): the lead loop over the request repository."""
-    return LeadLoopService(repo, posts=posts, enabled=settings.feature_lead_loop)
+    """SPRINT-12 B-2 (D-079): the lead loop over the request repository. SPRINT-13 A-2: the
+    switch is the DB flag ``feature_lead_loop`` first, ``Settings`` as fallback."""
+    enabled = await effective_flag(request.app, settings, "feature_lead_loop")
+    return LeadLoopService(repo, posts=posts, enabled=enabled)
 
 
 LeadLoop = Annotated[LeadLoopService, Depends(get_lead_loop_service)]
@@ -788,7 +795,11 @@ admin_router = APIRouter(prefix="/admin/entitlements", tags=["Platform admin"])
     responses={404: {"description": "whatsapp_account_not_found"}},
 )
 async def patch_number_cap(
-    account_id: UUID, payload: NumberCapPatch, actor: PlatformAdmin, repo: Repo
+    account_id: UUID,
+    payload: NumberCapPatch,
+    actor: PlatformAdmin,
+    repo: Repo,
+    log: Annotated[AuditPort | None, Depends(get_audit_port)],  # SPRINT-13 A-1
 ) -> NumberCapPublic:
     if payload.daily_reply_cap is None and payload.kill_switch is None:
         raise HTTPException(
@@ -814,6 +825,17 @@ async def patch_number_cap(
         updated_at=now,
     )
     await repo.upsert_number_cap(cap)
+    await audit(
+        log,
+        actor_user_id=actor.user_id,
+        action="wa_caps_set",
+        target_kind="whatsapp_account",
+        target_id=str(account_id),
+        before=current.model_dump(mode="json", include={"daily_reply_cap", "kill_switch"})
+        if current
+        else {},
+        after={"daily_reply_cap": cap.daily_reply_cap, "kill_switch": cap.kill_switch},
+    )
     used = await repo.count_outbound_since(
         account_id, since=now.replace(hour=0, minute=0, second=0, microsecond=0)
     )

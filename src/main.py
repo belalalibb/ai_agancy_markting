@@ -25,6 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core import database
+from src.core.audit import get_audit_port
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
 from src.core.http import build_http_client
@@ -130,7 +131,7 @@ def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | N
                 step
                 for step in (
                     settle_stale_cost_reservations_step(settings),
-                    pulse_scheduler_step(settings),
+                    pulse_scheduler_step(settings, app),
                 )
                 if step is not None
             ),
@@ -154,19 +155,24 @@ def settle_stale_cost_reservations_step(settings: Settings) -> SchedulerStep:
     return step
 
 
-def pulse_scheduler_step(settings: Settings) -> SchedulerStep | None:
+def pulse_scheduler_step(settings: Settings, app: FastAPI | None = None) -> SchedulerStep | None:
     """SPRINT-12 B-3: third scheduler step — ``Pulse.run(now)`` every
     ``PULSE_INTERVAL_SECONDS``. ``FEATURE_PULSE=false`` ⇒ ``None`` (nothing scheduled).
     Check (6) reads plan counters through the entitlements adapter bound here (D-016);
     removing ``pulse`` = delete this function and the two mounts in ``create_app``."""
     if not settings.feature_pulse:
         return None
+    from src.core.flags import effective_flag
     from src.modules.entitlements.dependencies import PgPlanCounterUsageReader
     from src.modules.pulse.scheduler_step import pulse_step
+
+    async def _enabled() -> bool:  # SPRINT-13 A-2: DB flag beats env each cycle
+        return await effective_flag(app, settings, "feature_pulse")
 
     return pulse_step(
         interval_seconds=settings.pulse_interval_seconds,
         counters_factory=lambda session: PgPlanCounterUsageReader(session),
+        enabled=_enabled,
     )
 
 
@@ -233,6 +239,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from src.modules.ai_gateway.catalog.router import router as admin_ai_router
 
     api_v1.include_router(admin_ai_router)
+    # SPRINT-13 A (D-076): Day-2 ops — admin audit trail, DB kill switches, dead-letter,
+    # admin alert digest. Removing ``ops`` = delete this block + the guard/flag lines below +
+    # the ``src/core/audit.py`` port stays inert (``None``) — see ops/REMOVABILITY.md.
+    from src.modules.ops.router import audit_port_dependency
+    from src.modules.ops.router import router as ops_admin_router
+
+    api_v1.include_router(ops_admin_router)
+    app.dependency_overrides[get_audit_port] = audit_port_dependency
     # SPRINT-11.1 A-2 (E2): bind the consumer-owned ``CounterGuard`` ports of ``content`` and
     # ``whatsapp`` to the entitlements adapter. Removing ``entitlements`` = delete these two
     # lines; the ports then yield ``None`` (no quota check) — see entitlements/REMOVABILITY.md.
@@ -261,6 +275,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         logger.warning("FEATURE_PULSE=false — Pulse routes and scheduler step are not mounted")
     app.include_router(api_v1)
+    # SPRINT-13 A-2: ``platform_readonly`` ⇒ 503 on every /api/v1 write (auth/admin exempt);
+    # ``brands.suspended_at`` ⇒ 403 on brand writes. The flag source lives on ``app.state`` so
+    # the fake-wired unit app can swap it (``None`` ⇒ guard inert).
+    from src.modules.ops.guard import KillSwitchGuard, PgFlagSource
+    from src.modules.ops.router import FLAG_CACHE
+
+    app.state.flag_source = PgFlagSource(FLAG_CACHE)
+    app.add_middleware(KillSwitchGuard, settings=settings)
     # SPRINT-12.1 B (D-076): L1 operator UI under /app — server-rendered, talks to the API
     # in-process only. Removing ``src/ui`` = delete the two imports above + these two lines
     # (see src/ui/REMOVABILITY.md).

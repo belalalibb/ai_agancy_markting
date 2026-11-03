@@ -278,6 +278,25 @@ def app(
     # fake-wired app must never open a session — ``None`` ⇒ no attribution (tests that
     # exercise attribution override this with ``FakePostLookup``).
     application.dependency_overrides[get_published_post_lookup] = lambda: None
+    # SPRINT-13 A: in-memory audit log + flag source — the real ones open PG sessions.
+    from src.core.audit import get_audit_port
+    from src.modules.ops.router import (
+        get_audit_writer,
+        get_dead_letter_repository,
+        get_flag_repository,
+    )
+
+    from tests.fakes import FakeAuditLog, FakeDeadLetterRepository, FakeFlagSource
+
+    application.state.audit_log = FakeAuditLog()
+    application.state.flag_source = FakeFlagSource(store)
+    application.dependency_overrides[get_audit_port] = lambda: application.state.audit_log
+    application.dependency_overrides[get_audit_writer] = lambda: application.state.audit_log
+    application.dependency_overrides[get_flag_repository] = lambda: application.state.flag_source
+    application.state.dead_letters = FakeDeadLetterRepository()
+    application.dependency_overrides[get_dead_letter_repository] = lambda: (
+        application.state.dead_letters
+    )
 
     def _content_repo_unit_of_work():  # noqa: ANN202
         # A-3: the PG session releases row locks on commit/rollback; the fake releases its

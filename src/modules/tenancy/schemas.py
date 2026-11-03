@@ -51,12 +51,16 @@ class BrandOut(BaseModel):
     slug: str
     name: str
     learning_consent: LearningConsent  # D-080; ``referred_by_brand_id`` is never exposed here
+    suspended: bool = False  # SPRINT-13 A-2 (criterion 9): reads stay, writes answer 403
+    suspended_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
     @classmethod
     def from_domain(cls, brand: Brand) -> BrandOut:
-        return cls.model_validate(brand.model_dump())
+        return cls.model_validate(
+            {**brand.model_dump(), "suspended": brand.suspended_at is not None}
+        )
 
 
 class BrandWithRoleOut(BrandOut):
@@ -64,7 +68,9 @@ class BrandWithRoleOut(BrandOut):
 
     @classmethod
     def from_domain_with_role(cls, brand: Brand, role: BrandRole) -> BrandWithRoleOut:
-        return cls.model_validate({**brand.model_dump(), "role": role})
+        return cls.model_validate(
+            {**brand.model_dump(), "suspended": brand.suspended_at is not None, "role": role}
+        )
 
 
 class GrantCreate(BaseModel):

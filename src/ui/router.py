@@ -1092,7 +1092,9 @@ async def revoke_grant(
 
 
 # ------------------------------------------------------------------- admin ---
-ADMIN_TABS = ("providers", "models", "routing", "probe")
+ADMIN_TABS = ("providers", "models", "routing", "probe", "audit", "dead_letter")  # 13 A
+FLAG_KEYS = ("platform_readonly", "feature_pulse", "feature_lead_loop")  # = ops.flags.FLAG_KEYS
+AUDIT_LIMIT = 50
 PURPOSES = (
     "content_generation",
     "whatsapp_suggest_reply",
@@ -1164,6 +1166,12 @@ async def _admin_ai_ctx(api: ApiClient, tab: str) -> dict[str, Any]:
         for r in sorted(routes, key=lambda r: (r["purpose"], r["priority"])):
             chains.setdefault(r["purpose"], []).append(r)
         ctx["chains"] = chains
+    elif tab == "audit":  # SPRINT-13 A-1/A-2: last 50 admin actions + DB flags
+        ctx["actions"] = await api.get("/admin/actions", limit=AUDIT_LIMIT)
+        stored = {f["key"]: f["value"] for f in await api.get("/admin/flags")}
+        ctx["flags"] = [(k, stored.get(k)) for k in FLAG_KEYS]
+    elif tab == "dead_letter":  # SPRINT-13 A-3
+        ctx["dead_letter"] = await api.get("/admin/publishing/dead-letter", limit=AUDIT_LIMIT)
     ctx["kinds"], ctx["capabilities"] = PROVIDER_KINDS, CAPABILITIES
     return ctx
 
@@ -1238,6 +1246,10 @@ async def _admin_ai_spec(
         if form.get("max_tokens"):
             body["max_tokens"] = int(form["max_tokens"])
         return ("POST", "/admin/ai/probe", body)
+    elif tab == "audit" and action == "flag" and form.get("key") in FLAG_KEYS:
+        return ("PUT", f"/admin/flags/{form['key']}", {"value": form.get("value") == "true"})
+    elif tab == "dead_letter" and action == "requeue" and target:
+        return ("POST", f"/admin/publishing/jobs/{target}/requeue", None)
     return None
 
 
@@ -1272,10 +1284,17 @@ async def admin_ai_action(request: Request, tab: str, action: str) -> Response:
 
 # ------------------------------------------------------- admin entitlements ---
 async def _admin_ent_ctx(api: ApiClient, brand_id: str) -> dict[str, Any]:
-    ctx: dict[str, Any] = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None}
+    ctx: dict[str, Any] = {
+        "plans": PLANS,
+        "brand_id": brand_id,
+        "ent": None,
+        "wa": None,
+        "brand": None,
+    }
     if brand_id:
         ctx["ent"] = await api.get(f"/admin/entitlements/{brand_id}")
         ctx["wa"] = await _optional(api, f"/brands/{brand_id}/whatsapp/account")
+        ctx["brand"] = await _optional(api, f"/brands/{brand_id}")  # SPRINT-13 A-2: suspended?
     return ctx
 
 
@@ -1289,7 +1308,7 @@ async def _admin_ent_page(
     except ApiError as exc:
         if exc.status == 401:
             return _denied(settings, request)
-        data = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None}
+        data = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None, "brand": None}
         flash = flash or _error_text(exc.code)
     ctx = {**_base_ctx(user, settings), **data, "flash": flash}
     return _with_session(settings, user, _render(request, "admin_entitlements.html", ctx))
@@ -1329,6 +1348,8 @@ async def admin_entitlements_action(request: Request, action: str) -> Response:
         if form.get("kill_switch") in ("true", "false"):
             caps["kill_switch"] = form["kill_switch"] == "true"
         spec = ("PATCH", f"/admin/entitlements/wa-caps/{form['account_id']}", caps)
+    elif action in ("suspend", "unsuspend") and brand_id:  # SPRINT-13 A-2
+        spec = ("POST", f"/admin/brands/{brand_id}/{action}", None)
     if spec is None:
         return _with_session(settings, gate.user, _not_found_page(request))
     try:

@@ -8,7 +8,7 @@ run uses one independent session (D-072) so a failing check never touches a requ
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -28,13 +28,17 @@ def pulse_step(
     interval_seconds: int,
     counters_factory: CountersFactory | None = None,
     session_factory: Callable[[], async_sessionmaker[AsyncSession]] = get_session_factory,
+    enabled: Callable[[], Awaitable[bool]] | None = None,
 ) -> Callable[[datetime], object]:
-    """Build the step; ``last_run`` is kept in the closure."""
+    """Build the step; ``last_run`` is kept in the closure. SPRINT-13 A-2: ``enabled`` (the DB
+    flag ``feature_pulse``, bound by ``src/main.py``) is consulted each cycle; ``False`` ⇒ skip."""
     state: dict[str, datetime | None] = {"last_run": None}
 
     async def step(now: datetime) -> int:
         last = state["last_run"]
         if last is not None and (now - last).total_seconds() < interval_seconds:
+            return 0
+        if enabled is not None and not await enabled():
             return 0
         state["last_run"] = now
         async with independent_session(session_factory()) as session:

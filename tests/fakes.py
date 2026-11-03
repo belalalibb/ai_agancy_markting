@@ -428,6 +428,17 @@ class StubResult:
     def all(self) -> list[object]:
         return list(self._rows) if self._rows else list(self._scalars)
 
+    def first(self) -> object:
+        rows = self.all()
+        return rows[0] if rows else None
+
+    def one(self) -> object:
+        rows = self.all()
+        if len(rows) != 1:
+            msg = "expected exactly one row"
+            raise LookupError(msg)
+        return rows[0]
+
 
 class StubSession:
     """Records every statement; replays scripted :class:`StubResult`s in order.
@@ -1857,3 +1868,97 @@ class FakeCatalogRepository:
             models=list(self.models.values()),
             routes=list(self.routes),
         )
+
+
+# ------------------------------------------------------------ SPRINT-13 ops fakes ----
+class FakeAuditLog:
+    """In-memory :class:`src.core.audit.AuditPort` + ``ops.audit.AuditWriter`` (list view)."""
+
+    def __init__(self) -> None:
+        self.actions: list[Any] = []
+
+    async def record(self, *args: Any, **fields: Any) -> Any:  # port *and* writer signature
+        from src.modules.ops.audit import AdminAction
+
+        action = args[0] if args else AdminAction(**fields)
+        self.actions.append(action)
+        return action
+
+    async def list_actions(
+        self, *, target_kind: str | None, target_id: str | None, limit: int
+    ) -> list[Any]:
+        rows = [
+            a
+            for a in self.actions
+            if (not target_kind or a.target_kind == target_kind)
+            and (not target_id or a.target_id == target_id)
+        ]
+        return sorted(rows, key=lambda a: a.at, reverse=True)[:limit]
+
+
+class FakeFlagSource:
+    """In-memory ``platform_flags`` + ``brands.suspended_at`` for the guard and the admin
+    router (``FlagRepository`` *and* ``FlagSource`` protocols)."""
+
+    def __init__(self, store: FakeStore | None = None) -> None:
+        self._s = store
+        self.values: dict[str, bool] = {}
+        self.suspended: dict[UUID, datetime] = {}
+        self.invalidations = 0
+
+    # FlagSource (guard)
+    async def flags(self) -> dict[str, bool]:
+        return dict(self.values)
+
+    async def suspended_at(self, brand_id: UUID) -> datetime | None | bool:
+        return await self.brand_suspended_at(brand_id)
+
+    def invalidate(self) -> None:
+        self.invalidations += 1
+
+    # FlagRepository (admin router)
+    async def all_flags(self) -> dict[str, bool]:
+        return dict(self.values)
+
+    async def set_flag(self, key: str, value: bool, *, now: datetime) -> Any:
+        from src.modules.ops.flags import PlatformFlag
+
+        self.values[key] = value
+        return PlatformFlag(key=key, value=value, updated_at=now)
+
+    async def brand_suspended_at(self, brand_id: UUID) -> datetime | None | bool:
+        if self._s is not None:  # the same column the brand read exposes (``brands``)
+            brand = self._s.brands.get(brand_id)
+            return False if brand is None else brand.suspended_at
+        return self.suspended.get(brand_id)
+
+    async def set_brand_suspended(self, brand_id: UUID, suspended_at: datetime | None) -> bool:
+        if self._s is not None:
+            brand = self._s.brands.get(brand_id)
+            if brand is None:
+                return False
+            self._s.brands[brand_id] = brand.model_copy(update={"suspended_at": suspended_at})
+            return True
+        if suspended_at is None:
+            self.suspended.pop(brand_id, None)
+        else:
+            self.suspended[brand_id] = suspended_at
+        return True
+
+
+class FakeDeadLetterRepository:
+    """In-memory ``ops.dead_letter.DeadLetterRepository``: ``jobs`` holds the failed ones."""
+
+    def __init__(self) -> None:
+        self.jobs: dict[UUID, Any] = {}
+        self.rescheduled: list[UUID] = []
+
+    async def list_failed(self, *, limit: int) -> list[Any]:
+        return list(self.jobs.values())[:limit]
+
+    async def requeue(self, job_id: UUID, *, now: datetime) -> Any:
+        return self.jobs.pop(job_id, None)
+
+    async def reschedule_item(self, item_id: UUID, revision_id: UUID, *, now: datetime) -> bool:
+        self.rescheduled.append(item_id)
+        return True

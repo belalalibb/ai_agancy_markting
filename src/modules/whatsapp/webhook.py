@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.core.flags import effective_flag
 from src.core.metrics import counters
 from src.core.security import (
     EncryptionKeyMissingError,
@@ -515,7 +516,9 @@ async def receive_webhook(
         counters.increment("wa_webhook_rejected")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"error": "webhook_unverified"})
 
-    lead_loop = LeadLoopService(repo, posts=posts, enabled=settings.feature_lead_loop)
+    lead_loop = LeadLoopService(
+        repo, posts=posts, enabled=await effective_flag(request.app, settings, "feature_lead_loop")
+    )  # SPRINT-13 A-2: DB flag first
     outcome = await WebhookProcessor(
         repo, consent=consent, quota=quota, lead_loop=lead_loop
     ).handle_webhook_payload(payload, accounts=accounts)

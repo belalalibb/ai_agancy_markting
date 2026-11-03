@@ -14,10 +14,12 @@ Error bodies follow the platform convention ``{"error": "<code>", "message": "..
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.core.audit import AuditPort, audit, get_audit_port
 from src.modules.auth.dependencies import CurrentUser, PlatformAdmin
 from src.modules.entitlements.dependencies import Counters, Service, UsageReader
 from src.modules.entitlements.domain.models import utcnow
@@ -39,6 +41,7 @@ from src.modules.tenancy.router import to_http as tenancy_to_http
 
 admin_router = APIRouter(prefix="/admin/entitlements", tags=["Platform admin"])
 router = APIRouter(tags=["Entitlements (D-073)"])
+AuditLog = Annotated[AuditPort | None, Depends(get_audit_port)]  # SPRINT-13 A-1 (same tx)
 
 
 # ------------------------------------------------------------------- admin --
@@ -48,7 +51,7 @@ router = APIRouter(tags=["Entitlements (D-073)"])
     summary="Activate or extend a brand's plan (platform admin; audited)",
 )
 async def activate_entitlement(
-    payload: ActivateRequest, actor: PlatformAdmin, service: Service
+    payload: ActivateRequest, actor: PlatformAdmin, service: Service, log: AuditLog
 ) -> BrandEntitlementOut:
     try:
         ent = await service.activate(
@@ -60,6 +63,14 @@ async def activate_entitlement(
         )
     except EntitlementsError as exc:
         raise to_http(exc) from exc
+    await audit(
+        log,
+        actor_user_id=actor.user_id,
+        action="entitlement_activated",
+        target_kind="brand",
+        target_id=str(payload.brand_id),
+        after={"plan": str(ent.plan), "months": payload.months},
+    )
     return BrandEntitlementOut.from_domain(ent, await service.recent_events(payload.brand_id))
 
 

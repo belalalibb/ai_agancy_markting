@@ -466,8 +466,8 @@ async def test_pg_pulse_repository_eight_checks_map_rows_to_findings() -> None:
             StubResult(rows=[(job, BRAND_ID, "permanent")]),
             StubResult(
                 rows=[
-                    (conn, BRAND_ID, NOW - timedelta(days=1)),
-                    (conn, BRAND2_ID, NOW + timedelta(days=3)),
+                    (conn, BRAND_ID, NOW - timedelta(days=1), "active"),
+                    (conn, BRAND2_ID, NOW + timedelta(days=3), "active"),
                 ]
             ),
             StubResult(rows=[("id",), ("brand_id",)]),  # information_schema: no quality column

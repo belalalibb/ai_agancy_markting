@@ -1475,7 +1475,7 @@ def test_b7_u3_protected_route_count_and_openapi_operations(client: TestClient) 
     (SPRINT-12.1 A-2 added ``POST …/approvals/batch``)."""
     from tests.test_auth_guard import PROTECTED, PROTECTED_ROUTE_COUNT
 
-    assert PROTECTED_ROUTE_COUNT == 85, PROTECTED  # 84 + GET /playbooks (12.1-B D-4)
+    assert PROTECTED_ROUTE_COUNT == 93, PROTECTED  # 85 + 8 ops admin routes (13 A)
     paths = client.get("/openapi.json").json()["paths"]
     content_paths = {p for p in paths if "/content/" in p}
     assert len(content_paths) == 14

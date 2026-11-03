@@ -21,6 +21,16 @@
   </form>
   {% if ent.events %}<details><summary>{{ t("admin.events") }}</summary><ul>{% for e in ent.events %}<li>{{ e.created_at }} · {{ e.kind }}</li>{% endfor %}</ul></details>{% endif %}
 </article>
+{% if brand %}
+<article data-card="suspend" data-suspended="{{ 'true' if brand.suspended else 'false' }}">
+  <h3>{{ t("admin.kill_switch") }}</h3>
+  <p>{{ t("admin.suspended_since") ~ " " ~ brand.suspended_at[:16] | replace("T", " ") if brand.suspended else t("admin.brand_active") }}</p>
+  <form method="post" action="/app/admin/entitlements/{{ 'unsuspend' if brand.suspended else 'suspend' }}" data-form="{{ 'unsuspend' if brand.suspended else 'suspend' }}" hx-confirm="{{ t('admin.confirm_suspend') }}" onsubmit="return confirm(this.getAttribute('hx-confirm'))">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="brand_id" value="{{ brand_id }}">
+    <button type="submit" class="{{ 'outline' if brand.suspended else 'secondary' }}">{{ t("admin.unsuspend") if brand.suspended else t("admin.suspend") }}</button>
+  </form>
+</article>
+{% endif %}
 <article data-card="wa-caps">
   <header><strong>{{ t("admin.wa_caps") }}</strong></header>
   {% if wa %}
