@@ -14,8 +14,8 @@ ALLOWED_PREFIXES = (
     "starlette",
     "jinja2",
     "jwt",
-    "httpx",  # ASGITransport only (in-process) — see src/ui/api.py
     "src.core.config",
+    "src.core.http",  # build_in_process_client — the only httpx holder (D-068)
     "src.modules.auth.",
     "src.ui",
 )
@@ -31,7 +31,7 @@ STDLIB = {
     "typing",
     "uuid",
 }
-FORBIDDEN = ("sqlalchemy", ".infrastructure")
+FORBIDDEN = ("sqlalchemy", ".infrastructure", "import httpx")
 
 
 def _modules(path: Path) -> list[str]:

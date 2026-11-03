@@ -7,13 +7,14 @@ any API behaviour, migration, or test outside `tests/ui/` and `tests/isolation/`
 
 * `src/ui/router.py` — `/app/*` routes (login, brand pick, today, inbox) — `include_in_schema=False`.
 * `src/ui/session.py` — `app_session` cookie (copy of the auth refresh value, `Path=/app`) + CSRF stamp.
-* `src/ui/api.py` — in-process `httpx.ASGITransport` client over the public JSON API.
+* `src/ui/api.py` — in-process ASGI client over the public JSON API (transport built by
+  `src.core.http.build_in_process_client`; `src/ui` itself never imports `httpx` — D-068).
 * `src/ui/templates/**`, `src/ui/i18n/ar.json`, `src/ui/static/vendor/**` (+ `LICENSES.md`).
 
 ## What it may import (enforced by `tests/isolation/test_ui_removable.py`)
 
-`fastapi`, `starlette`, `jinja2`, `jwt`, `httpx` (ASGI transport only), the standard
-library, `src.core.config`, `src.modules.auth.*` (token codec), and `src.ui.*`.
+`fastapi`, `starlette`, `jinja2`, `jwt`, the standard library, `src.core.config`,
+`src.core.http` (in-process client factory), `src.modules.auth.*` (token codec), and `src.ui.*`.
 It never imports `sqlalchemy`, any `*.infrastructure`, repositories, or services.
 
 ## What imports it

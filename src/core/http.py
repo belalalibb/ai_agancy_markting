@@ -34,3 +34,25 @@ def get_http_client(request: Request) -> httpx.AsyncClient:
 
 
 HttpClient = Annotated[httpx.AsyncClient, Depends(get_http_client)]
+
+
+def build_in_process_client(
+    app: object,
+    *,
+    base_url: str,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    client_ip: str = "127.0.0.1",
+) -> httpx.AsyncClient:
+    """SPRINT-12.1 B: an ``httpx`` client bound to *this* ASGI app (no socket is opened).
+
+    The L1 UI (``src/ui``) renders screens from the public JSON API through this transport
+    so it never imports repositories — and never imports ``httpx`` itself (D-068 No-Bypass:
+    the import stays in this one sanctioned module).
+    """
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=(client_ip, 0)),  # type: ignore[arg-type]
+        base_url=base_url,
+        headers=headers,
+        cookies=cookies,
+    )

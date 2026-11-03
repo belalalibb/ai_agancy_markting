@@ -1,17 +1,17 @@
 """In-process API client for the UI (SPRINT-12.1 B-1).
 
 The UI never touches repositories: every read/write goes through the public JSON API
-over an ASGI transport bound to the running app. ``httpx`` is imported here solely for
-that in-process transport — no network socket is ever opened (D-068 is about provider
-HTTP; the TID251 ban exists to keep provider calls inside the gateway).
+over an ASGI transport bound to the running app (:func:`src.core.http.build_in_process_client`
+— the one module allowed to import ``httpx`` under D-068). No network socket is opened.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import httpx  # noqa: TID251 — ASGITransport only; see module docstring + §6 of the directive
 from fastapi import FastAPI
+
+from src.core.http import build_in_process_client
 
 IN_PROCESS_BASE = "http://ui.internal"
 CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
@@ -48,11 +48,12 @@ class ApiClient:
         headers = dict(CSRF_HEADERS)
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
-        self._client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app, client=(client_ip, 0)),
+        self._client = build_in_process_client(
+            app,
             base_url=f"{IN_PROCESS_BASE}{prefix}",
             headers=headers,
             cookies=cookies,
+            client_ip=client_ip,
         )
 
     async def aclose(self) -> None:
@@ -60,7 +61,8 @@ class ApiClient:
 
     async def request(
         self, method: str, path: str, *, json: Any = None, params: dict[str, Any] | None = None
-    ) -> httpx.Response:
+    ) -> Any:
+        """The raw response (``status_code`` / ``json()`` / ``cookies`` / ``content``)."""
         return await self._client.request(method, path, json=json, params=params)
 
     async def json(
@@ -83,7 +85,7 @@ class ApiClient:
         return await self.json("PATCH", path, json=body)
 
 
-def _payload(response: httpx.Response) -> Any:
+def _payload(response: Any) -> Any:
     if response.status_code == 204 or not response.content:
         return None
     try:

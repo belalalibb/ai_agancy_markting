@@ -197,8 +197,8 @@ async def login_form(request: Request, next: str | None = None) -> Response:  # 
 @router.post("/login", response_class=HTMLResponse)
 async def login_submit(
     request: Request,
-    email: Annotated[str, Form()],
-    password: Annotated[str, Form()],
+    email: Annotated[str, Form()] = "",
+    password: Annotated[str, Form()] = "",
     next: Annotated[str, Form()] = "",  # noqa: A002
 ) -> Response:
     settings = get_settings()
@@ -455,9 +455,12 @@ async def reply(
     request: Request,
     brand_id: UUID,
     conversation_id: UUID,
-    body: Annotated[str, Form(min_length=1, max_length=MAX_REPLY_CHARS)],
+    body: Annotated[str, Form(max_length=MAX_REPLY_CHARS)] = "",
     csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
 ) -> Response:
+    """Form fields are optional on purpose: the session check (303) and the CSRF check
+    (403) run before any input validation; an empty body is a 422 from the API ⇒
+    translated flash — anonymous callers never see a schema error."""
     path = f"/brands/{brand_id}/whatsapp/conversations/{conversation_id}/messages"
     return await _inbox_action(
         request, brand_id, conversation_id, csrf, "POST", path, {"body": body}
@@ -482,7 +485,7 @@ async def set_stage(
     request: Request,
     brand_id: UUID,
     conversation_id: UUID,
-    lead_stage: Annotated[str, Form()],
+    lead_stage: Annotated[str, Form()] = "",
     objection_code: Annotated[str, Form()] = "",
     csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
 ) -> Response:
