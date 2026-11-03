@@ -891,6 +891,7 @@ def test_openapi_lists_exactly_the_content_routes(client: TestClient) -> None:
     b = f"{API}/brands/{{brand_id}}/content"
     content_paths = {p for p in paths if "/content/" in p}
     assert content_paths == {
+        f"{b}/approvals/batch",  # SPRINT-12.1 A-2 (D-055)
         f"{b}/items",
         f"{b}/items/{{item_id}}",
         f"{b}/items/{{item_id}}/body",
@@ -910,8 +911,9 @@ def test_openapi_lists_exactly_the_content_routes(client: TestClient) -> None:
             )
         ),
     }
-    # SPRINT-07 B7-U3: content + publishing = 14 routes (operations) over 13 paths.
-    assert sum(len(paths[p]) for p in content_paths) == 14
+    # SPRINT-07 B7-U3: content + publishing = 14 operations over 13 paths;
+    # SPRINT-12.1 A-2: + POST …/approvals/batch ⇒ 15 over 14.
+    assert sum(len(paths[p]) for p in content_paths) == 15
     assert set(paths[f"{b}/items/{{item_id}}/publish"]) == {"get"}
     assert set(paths[f"{b}/items/{{item_id}}/publish/retry"]) == {"post"}
     assert set(paths[f"{b}/items"]) == {"get", "post"}
@@ -1469,14 +1471,15 @@ def test_a3_u3_publish_max_attempts_zero_is_rejected_by_settings() -> None:
 def test_b7_u3_protected_route_count_and_openapi_operations(client: TestClient) -> None:
     """B7-U3 under its own name (A-4): the auth guard covers every non-auth route
     (``PROTECTED_ROUTE_COUNT`` imported from ``tests/test_auth_guard.py``, not repeated) and
-    the content + publishing module exposes exactly 14 operations over 13 paths."""
+    the content + publishing module exposes exactly 15 operations over 14 paths
+    (SPRINT-12.1 A-2 added ``POST …/approvals/batch``)."""
     from tests.test_auth_guard import PROTECTED, PROTECTED_ROUTE_COUNT
 
     assert PROTECTED_ROUTE_COUNT == 84, PROTECTED  # 77 + 4 (12 B) + 2 (12 C-1) + 1 (12.1 A-2)
     paths = client.get("/openapi.json").json()["paths"]
     content_paths = {p for p in paths if "/content/" in p}
-    assert len(content_paths) == 13
-    assert sum(len(paths[p]) for p in content_paths) == 14
+    assert len(content_paths) == 14
+    assert sum(len(paths[p]) for p in content_paths) == 15
     # Every content path is in the guard's protected list (``PROTECTED`` = ``(METHOD, path)``).
     assert content_paths <= {path for _method, path in PROTECTED}
 
