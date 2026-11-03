@@ -1,0 +1,51 @@
+<div class="grid">
+  <article data-card="alerts">
+    <header><strong>{{ t("today.alerts") }}</strong> <small>({{ open_count }})</small></header>
+    {% if alerts %}
+    <ul>
+      {% for a in alerts %}
+      <li data-alert="{{ a.id }}">
+        <span>{{ t("severity." ~ a.severity) }}</span> — {{ t("alert." ~ a.kind) }}
+        <form method="post" action="/app/b/{{ brand.id }}/today/alerts/{{ a.id }}/ack" hx-post="/app/b/{{ brand.id }}/today/alerts/{{ a.id }}/ack" hx-target="#today">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="outline">{{ t("today.ack") }}</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<p data-empty>{{ t("today.no_alerts") }}</p>{% endif %}
+  </article>
+  <article data-card="windows">
+    <header><strong>{{ t("today.windows") }}</strong></header>
+    {% if closing %}
+    <ul>
+      {% for c in closing %}
+      <li><a href="/app/b/{{ brand.id }}/inbox?conversation={{ c.id }}">{{ c.profile_name or c.wa_id }}</a>
+        <small>{{ t("today.window_until") }} {{ c.window_expires_at }}</small></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p data-empty>{{ t("today.no_windows") }}</p>{% endif %}
+  </article>
+</div>
+<div class="grid">
+  <article data-card="pending">
+    <header><strong>{{ t("today.pending") }}</strong> <small>({{ pending | length }})</small></header>
+    {% if pending %}
+    <ul>
+      {% for item in pending %}
+      <li data-item="{{ item.id }}">
+        <span>{{ item.channel }}</span>: {{ (item.current_body or "")[:120] }}
+        <form method="post" action="/app/b/{{ brand.id }}/today/items/{{ item.id }}/approve" hx-post="/app/b/{{ brand.id }}/today/items/{{ item.id }}/approve" hx-target="#today">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit">{{ t("today.approve") }}</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<p data-empty>{{ t("today.no_pending") }}</p>{% endif %}
+  </article>
+  <article data-card="playbooks">
+    <header><strong>{{ t("today.playbooks") }}</strong></header>
+    <p data-empty>{{ t("today.playbooks_soon") }}</p>
+  </article>
+</div>

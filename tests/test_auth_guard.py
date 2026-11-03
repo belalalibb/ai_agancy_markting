@@ -38,7 +38,9 @@ def _protected_operations() -> list[tuple[str, str]]:
     os.environ.setdefault("AUTH_JWT_SECRET", "guard-collection-secret-at-least-32-bytes!!")
     spec = create_app(Settings(_env_file=None)).openapi()  # type: ignore[call-arg]
     ops = [(m.upper(), path) for path, methods in spec["paths"].items() for m in methods]
-    return sorted(op for op in ops if op not in PUBLIC)
+    # SPRINT-12.1 B: the ``/app/*`` HTML UI is session-cookie guarded (303 ⇒ /app/login), not
+    # Bearer guarded; it is ``include_in_schema=False`` *and* excluded here explicitly.
+    return sorted(op for op in ops if op not in PUBLIC and not op[1].startswith("/app"))
 
 
 PROTECTED = _protected_operations()
@@ -120,3 +122,26 @@ def test_openapi_marks_every_protected_route_with_bearer_auth(app: FastAPI) -> N
     for method, path in PUBLIC:
         if path.startswith("/api/v1"):
             assert "security" not in spec["paths"][path][method.lower()], (method, path)
+
+
+def test_app_routes_redirect_without_session(client: TestClient) -> None:
+    """SPRINT-12.1 B: every ``/app/*`` route except login/logout answers 303 ⇒ ``/app/login``
+    without a session cookie (and with a garbage/expired one) — never 200, never 401 JSON."""
+    from src.ui.router import router as ui_router
+
+    guarded = [
+        (m, r.path)
+        for r in ui_router.routes
+        for m in sorted(getattr(r, "methods", None) or ())
+        if m != "HEAD" and r.path not in {"/app/login", "/app/logout"}
+    ]
+    assert len(guarded) == 8, guarded
+    for method, template in guarded:
+        path = _concrete(template)
+        for cookies in ({}, {"app_session": "expired.or.garbage"}):
+            client.cookies.clear()
+            for key, value in cookies.items():
+                client.cookies.set(key, value, path="/app")
+            res = client.request(method, path, data={"csrf": "x"}, follow_redirects=False)
+            assert res.status_code == 303, (method, path, res.status_code)
+            assert res.headers["location"].startswith("/app/login"), (method, path)

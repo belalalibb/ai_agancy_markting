@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ t("brands.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("brands.title") }}</h1>
+{% if brands %}
+<ul data-brands>
+  {% for b in brands %}
+  <li><a href="/app/b/{{ b.id }}/today">{{ b.name }}</a> <small>({{ t("role." ~ b.role) }})</small></li>
+  {% endfor %}
+</ul>
+{% else %}
+<p data-empty>{{ t("brands.empty") }}</p>
+{% endif %}
+{% endblock %}

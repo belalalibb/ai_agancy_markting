@@ -24,6 +24,9 @@ dependencies = [
     "pyjwt>=2.9",
     "argon2-cffi>=23.1",
     "email-validator>=2.0",
+    # SPRINT-12.1 B L1 UI (directive card, D-054 verified): BSD-3 templates + Apache-2.0 forms.
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.18",
 ]
 
 [project.optional-dependencies]

@@ -19,6 +19,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +53,8 @@ from src.modules.social_connect.infrastructure.status_marker import PostgresStat
 from src.modules.tenancy import router as tenancy_router
 from src.modules.whatsapp.router import router as whatsapp_router
 from src.modules.whatsapp.webhook import router as whatsapp_webhook_router
+from src.ui.router import STATIC_DIR as UI_STATIC_DIR
+from src.ui.router import router as ui_router
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +258,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         logger.warning("FEATURE_PULSE=false — Pulse routes and scheduler step are not mounted")
     app.include_router(api_v1)
+    # SPRINT-12.1 B (D-076): L1 operator UI under /app — server-rendered, talks to the API
+    # in-process only. Removing ``src/ui`` = delete the two imports above + these two lines
+    # (see src/ui/REMOVABILITY.md).
+    app.include_router(ui_router)
+    app.mount("/app/static", StaticFiles(directory=str(UI_STATIC_DIR)), name="ui-static")
 
     @app.get("/health", tags=["System"], summary="Liveness probe")
     def health() -> dict[str, str]:

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ t("today.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("today.title") }}</h1>
+<section id="today" hx-get="/app/b/{{ brand.id }}/today" hx-trigger="every 30s" hx-swap="innerHTML">
+  {% include "partials/today_cards.html" %}
+</section>
+{% endblock %}

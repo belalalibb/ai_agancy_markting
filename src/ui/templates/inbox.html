@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{{ t("inbox.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("inbox.title") }}</h1>
+<div class="grid">
+  <aside>
+    {% if conversations %}
+    <ul data-conversations>
+      {% for c in conversations %}
+      <li data-conversation="{{ c.id }}"{% if c.id == conversation_id|string %} aria-current="true"{% endif %}>
+        <a href="/app/b/{{ brand.id }}/inbox?conversation={{ c.id }}">{{ c.profile_name or c.wa_id }}</a>
+        {% if c.unread_count %}<mark>{{ c.unread_count }}</mark>{% endif %}
+        <small>{{ t("stage." ~ c.lead_stage) }}</small>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<p data-empty>{{ t("inbox.empty") }}</p>{% endif %}
+  </aside>
+  <section id="thread">
+    {% if thread %}{% include "partials/thread.html" %}{% else %}<p data-empty>{{ t("inbox.pick") }}</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,36 @@
+{% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
+<header>
+  <strong>{{ (current.profile_name if current else none) or (current.wa_id if current else "") }}</strong>
+  <span data-lead-stage="{{ current.lead_stage if current else 'new' }}">{{ t("stage." ~ (current.lead_stage if current else "new")) }}</span>
+  {% if current and not current.window_open %}<mark>{{ t("inbox.window_closed") }}</mark>{% endif %}
+</header>
+<ul data-messages>
+  {% for m in thread["items"] %}
+  <li data-direction="{{ m.direction }}">
+    <small>{{ m.created_at }}</small>
+    <p>{{ m.body or t("inbox.media_message") }}</p>
+    {% if m.direction == "outbound" %}<small>{{ t("delivery." ~ m.delivery_status) }}</small>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+<form method="post" action="/app/b/{{ brand.id }}/inbox/{{ conversation_id }}/reply" hx-post="/app/b/{{ brand.id }}/inbox/{{ conversation_id }}/reply" hx-target="#thread" data-form="reply">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <textarea name="body" rows="3" maxlength="4096" required placeholder="{{ t('inbox.reply_placeholder') }}">{{ draft }}</textarea>
+  <div class="grid">
+    <button type="submit">{{ t("inbox.send") }}</button>
+    <button type="submit" class="secondary" formaction="/app/b/{{ brand.id }}/inbox/{{ conversation_id }}/suggest" hx-post="/app/b/{{ brand.id }}/inbox/{{ conversation_id }}/suggest" hx-target="#thread">{{ t("inbox.suggest") }}</button>
+  </div>
+</form>
+<form method="post" action="/app/b/{{ brand.id }}/inbox/{{ conversation_id }}/stage" hx-post="/app/b/{{ brand.id }}/inbox/{{ conversation_id }}/stage" hx-target="#thread" data-form="stage">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="grid">
+    <select name="lead_stage">
+      {% for s in lead_stages %}<option value="{{ s }}"{% if current and current.lead_stage == s %} selected{% endif %}>{{ t("stage." ~ s) }}</option>{% endfor %}
+    </select>
+    <select name="objection_code">
+      <option value="">{{ t("objection.none") }}</option>
+      {% for o in objections %}<option value="{{ o }}">{{ t("objection." ~ o) }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="outline">{{ t("inbox.set_stage") }}</button>
+  </div>
+</form>

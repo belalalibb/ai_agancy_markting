@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ t("app.title") }}{% endblock %} · {{ app_name }}</title>
+  <link rel="stylesheet" href="/app/static/vendor/pico.min.css">
+  <script src="/app/static/vendor/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="container">
+  <nav>
+    <ul>
+      <li><strong><a href="/app/">{{ app_name }}</a></strong></li>
+      {% if brand %}
+      <li><a href="/app/b/{{ brand.id }}/today">{{ t("nav.today") }}</a></li>
+      <li><a href="/app/b/{{ brand.id }}/inbox">{{ t("nav.inbox") }}</a></li>
+      {% endif %}
+    </ul>
+    <ul>
+      {% if brand %}<li><span data-brand="{{ brand.id }}">{{ brand.name }}</span></li>{% endif %}
+      {% if user %}
+      <li>
+        <form method="post" action="/app/logout">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secondary outline">{{ t("nav.logout") }}</button>
+        </form>
+      </li>
+      {% endif %}
+    </ul>
+  </nav>
+  {% if plan %}
+  <p data-plan="{{ plan.plan }}" class="plan-bar">
+    {{ t("plan.label") }}: {{ t("plan." ~ plan.plan) }} ·
+    {{ t("plan.posts") }}: {{ plan.usage.get("monthly_posts", 0) }} / {{ plan.limits.monthly_posts }}
+    {% if not plan.is_active %} · <mark>{{ t("plan.inactive") }}</mark>{% endif %}
+  </p>
+  {% endif %}
+</header>
+<main class="container">
+  {% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>
