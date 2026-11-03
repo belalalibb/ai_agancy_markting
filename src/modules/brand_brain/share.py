@@ -13,6 +13,11 @@ or private provenance. No AI call, no session identity: a hash lookup and a proj
 * ``DELETE …/share`` — OWNER only; clears the hash ⇒ the old link is 404 from now on.
 * ``GET /api/v1/d/{token}`` — public (7th public route); 60/min/IP via the existing
   ``RateLimiter``; ``Cache-Control: public, max-age=300``; unknown/revoked ⇒ 404.
+
+SPRINT-12.1 A-1 (review S-1): a recommendation the owner **dismissed** is never part of the
+public surface — it is filtered out of the card (``PUBLIC_STATUSES``), sharing it answers
+**409 ``recommendation_dismissed``** (a local HTTP error, no new ``ErrorCategory``), and a
+link whose anchor was dismissed *after* sharing answers 404 like a revoked one.
 """
 
 from __future__ import annotations
@@ -53,6 +58,8 @@ MIN_RECOMMENDATIONS = 3
 MAX_RECOMMENDATIONS = 5
 MAX_PUBLIC_TITLE = 80
 EVIDENCE_GRADES = ("measured", "inferred", "estimated")
+# A-1 (S-1): the only recommendation statuses an anonymous visitor may ever see.
+PUBLIC_STATUSES = frozenset({"proposed", "accepted", "materialized"})
 # Anything that could leak a link, a number, a handle or an address out of a title.
 _SCRUB = re.compile(r"(https?://\S+|www\.\S+|\S+@\S+|@\w+|\+?\d[\d\s().-]{5,}\d|\d+)")
 
@@ -127,8 +134,9 @@ def overall_grade(rows: list[Recommendation]) -> str:
 def build_public_share(
     anchor: Recommendation, siblings: list[Recommendation], *, app_name: str, cta_url: str
 ) -> DiagnosisPublicShare:
-    """Anchor first, then the newest siblings of the same brand until five are shown."""
-    rows = [anchor] + [r for r in siblings if r.id != anchor.id]
+    """Anchor first, then the newest siblings of the same brand until five are shown.
+    Dismissed siblings are dropped here (A-1) whatever the repository returned."""
+    rows = [anchor] + [r for r in siblings if r.id != anchor.id and r.status in PUBLIC_STATUSES]
     rows = rows[:MAX_RECOMMENDATIONS]
     return DiagnosisPublicShare(
         title=scrub_title(anchor.title),
@@ -149,13 +157,27 @@ def _not_found() -> HTTPException:
     return HTTPException(status.HTTP_404_NOT_FOUND, detail={"error": "diagnosis_not_found"})
 
 
+def _dismissed() -> HTTPException:
+    """A-1: refusing to publish what the owner rejected — 409, codes only (D-069)."""
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail={
+            "error": "recommendation_dismissed",
+            "message": "a dismissed recommendation cannot be shared publicly",
+        },
+    )
+
+
 # ---------------------------------------------------------- owner routes --
 @router.post(
     f"{BRAIN_PREFIX}/diagnoses/{{diag_id}}/share",
     response_model=ShareLink,
     status_code=status.HTTP_201_CREATED,
     summary="Create (or rotate) the public link of a diagnosis — OWNER only, fresh session",
-    responses={404: {"description": "recommendation_not_found"}},
+    responses={
+        404: {"description": "recommendation_not_found"},
+        409: {"description": "recommendation_dismissed"},
+    },
 )
 async def share_diagnosis(
     brand_id: UUID,
@@ -166,8 +188,14 @@ async def share_diagnosis(
     repo: Repo,
     settings: SettingsDep,
 ) -> ShareLink:
-    """32 random bytes ⇒ only ``sha256(token)`` is stored; the URL is returned this once."""
+    """32 random bytes ⇒ only ``sha256(token)`` is stored; the URL is returned this once.
+    A-1: the row is read (locked) first — unknown ⇒ 404, ``dismissed`` ⇒ 409."""
     await _authorise(resolver, actor.tenant_id, brand_id, GRANT_ROLES)
+    current = await repo.get_recommendation_for_update(brand_id, diag_id)
+    if current is None:
+        raise to_http(RecommendationNotFoundError())
+    if current.status not in PUBLIC_STATUSES:
+        raise _dismissed()
     token = secrets.token_urlsafe(TOKEN_BYTES)
     now = datetime.now(UTC)
     changed = await repo.set_recommendation_share(
@@ -224,10 +252,12 @@ async def public_diagnosis(
             headers={"Retry-After": str(int(retry))},
         )
     anchor = await repo.get_recommendation_by_share_hash(hash_token(token))
-    if anchor is None:
-        raise _not_found()
+    if anchor is None or anchor.status not in PUBLIC_STATUSES:
+        raise _not_found()  # unknown, revoked, or dismissed after sharing (A-1)
+    # ``status=None`` keeps one query; ``build_public_share`` drops dismissed rows (A-1). The
+    # over-fetch covers up to ``MAX_RECOMMENDATIONS`` dismissed siblings on top of the shown ones.
     siblings = await repo.list_recommendations(
-        anchor.brand_id, status=None, limit=MAX_RECOMMENDATIONS + 1
+        anchor.brand_id, status=None, limit=2 * MAX_RECOMMENDATIONS + 1
     )
     response.headers["Cache-Control"] = CACHE_CONTROL
     base = str(request.base_url).rstrip("/")

@@ -269,3 +269,81 @@ def test_scrub_title_and_grades() -> None:
     alone = build_public_share(estimated, [estimated], app_name="X", cta_url="/")
     assert len(alone.recommendations) == 1 and alone.evidence_grade == "estimated"
     assert alone.generated_at == NOW  # the anchor's time — no actor on the card
+
+
+# ------------------------------------------------- SPRINT-12.1 A-1 (S-1) --
+def _dismiss(repo: FakeBrandBrainRepository, rec: Recommendation) -> Recommendation:
+    """What ``decide_recommendation`` leaves behind: the same row with a decision stamp."""
+    dismissed = rec.model_copy(
+        update={"status": "dismissed", "decided_by_user_id": uuid4(), "decided_at": NOW}
+    )
+    repo.recommendations[rec.id] = dismissed
+    return dismissed
+
+
+def test_a1_dismissed_siblings_never_appear_in_the_public_card(
+    brain_client: TestClient, brain_repo: FakeBrandBrainRepository, owner_headers: dict[str, str]
+) -> None:
+    """Review S-1 / probe P2: the owner rejected the newest sibling — the card must not show
+    it, even though the repository returns every status."""
+    anchor = _seed(brain_repo)
+    newest = max(
+        (r for r in brain_repo.recommendations.values() if r.brand_id == BRAND_ID),
+        key=lambda r: r.created_at,
+    )
+    assert newest.id != anchor.id
+    _dismiss(brain_repo, newest)
+    token = _token_of(_share(brain_client, owner_headers, anchor.id).json()["url"])
+    res = brain_client.get(f"/api/v1/d/{token}")
+    assert res.status_code == 200, res.text
+    card = res.json()
+    titles = [r["title"] for r in card["recommendations"]]
+    assert len(titles) == 5 and titles[0] == "Reply within hours to open chats"
+    # the dismissed sibling (grade ``inferred``, i = 5) is gone; the four newest *proposed*
+    # siblings fill the card — numbers are scrubbed, so we compare the evidence grades, which
+    # alternate estimated/inferred by index: i = 4, 3, 2, 1 ⇒ estimated, inferred, estimated,
+    # inferred. Had the dismissed row leaked, the sequence would start with ``inferred``.
+    assert [r["evidence_grade"] for r in card["recommendations"][1:]] == [
+        "estimated",
+        "inferred",
+        "estimated",
+        "inferred",
+    ]
+    assert all(t.startswith("Post about product") for t in titles[1:])
+
+
+def test_a1_sharing_a_dismissed_recommendation_is_409_and_stamps_nothing(
+    brain_client: TestClient, brain_repo: FakeBrandBrainRepository, owner_headers: dict[str, str]
+) -> None:
+    anchor = _dismiss(brain_repo, _seed(brain_repo))
+    res = _share(brain_client, owner_headers, anchor.id)
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"] == {
+        "error": "recommendation_dismissed",
+        "message": "a dismissed recommendation cannot be shared publicly",
+    }
+    assert anchor.id not in brain_repo.shares  # no hash written, no link exists
+    # unknown id is still 404 (checked before the status), VIEWER is still 403 (authorised first)
+    assert _share(brain_client, owner_headers, uuid4()).status_code == 404
+
+
+def test_a1_link_dies_when_its_anchor_is_dismissed_after_sharing(
+    brain_client: TestClient, brain_repo: FakeBrandBrainRepository, owner_headers: dict[str, str]
+) -> None:
+    anchor = _seed(brain_repo)
+    token = _token_of(_share(brain_client, owner_headers, anchor.id).json()["url"])
+    assert brain_client.get(f"/api/v1/d/{token}").status_code == 200
+    _dismiss(brain_repo, anchor)
+    res = brain_client.get(f"/api/v1/d/{token}")
+    assert res.status_code == 404 and res.json()["detail"]["error"] == "diagnosis_not_found"
+    assert "cache-control" not in res.headers
+
+
+def test_a1_build_public_share_filters_by_status_in_memory() -> None:
+    """The projection itself is the last line of defence — independent of the repository."""
+    repo = FakeBrandBrainRepository()
+    anchor = _rec(repo, title="Anchor")
+    kept = _rec(repo, title="Kept", kind="content_plan_item")
+    dropped = _dismiss(repo, _rec(repo, title="Dropped", kind="content_plan_item"))
+    card = build_public_share(anchor, [dropped, kept], app_name="X", cta_url="http://x/")
+    assert [r.title for r in card.recommendations] == ["Anchor", "Kept"]

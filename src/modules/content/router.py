@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
 from src.core.database import get_db_session
+from src.core.metrics import counters
 from src.modules.ai_gateway.budget_guard import BudgetGuardError
 from src.modules.ai_gateway.contract import AIError, ErrorCategory
 from src.modules.ai_gateway.dependencies import GuardedGateway
@@ -59,6 +60,9 @@ from src.modules.content.infrastructure.postgres_repository import PostgresConte
 from src.modules.content.schemas import (
     ApprovalEventPublic,
     ApprovalNoteRequest,
+    BatchApprovalRequest,
+    BatchApprovalResponse,
+    BatchApprovalResult,
     ContentBodyUpdate,
     ContentItemCreate,
     ContentItemDetail,
@@ -522,6 +526,80 @@ async def _ensure_post_quota(quota: CounterGuard | None, brand_id: UUID) -> None
         raise quota_exceeded_to_http(exc) from exc
     except CounterPlanInactiveError as exc:
         raise plan_inactive_http(plan=exc.plan, active_until=exc.active_until) from exc
+
+
+@router.post(
+    f"{BRAND_PREFIX}/approvals/batch",
+    response_model=BatchApprovalResponse,
+    summary="Approve up to 50 pending items in one call — per-item outcome (D-055)",
+    responses={
+        403: {"description": "insufficient_role"},
+        404: {"description": "brand_not_found"},
+        422: {"description": "1–50 unique item_ids"},
+    },
+)
+async def approve_items_batch(
+    brand_id: UUID,
+    payload: BatchApprovalRequest,
+    actor: CurrentUserFresh,
+    service: Service,
+    resolver: Resolver,
+    quota: PostQuota,
+) -> BatchApprovalResponse:
+    """SPRINT-12.1 A-2 (SPRINT-12 C-2, deferred by the size valve). Route admission happens
+    **once** (OWNER/MANAGER attempt; VIEWER ⇒ 403, stranger ⇒ 404 — same as ``approve``);
+    then every item runs the exact single-item path — plan check ``_ensure_post_quota`` **per
+    item**, then the lifecycle (``approval_requires_owner`` / ``invalid_transition`` /
+    ``content_not_found``) which writes **one ``approval_events`` row per approved item**
+    (D-055). A refusal never fails the batch: it becomes ``{status: skipped, error: <code>}``
+    (codes only — D-069), the request stays **200**, and ``counters["content_batch_approved"]``
+    grows by the number actually approved."""
+    role = await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
+    results: list[BatchApprovalResult] = []
+    for item_id in payload.item_ids:
+        error = await _approve_one(
+            service, quota, brand_id, item_id, role, actor, note=payload.note
+        )
+        results.append(
+            BatchApprovalResult(
+                item_id=item_id, status="approved" if error is None else "skipped", error=error
+            )
+        )
+    approved = sum(1 for r in results if r.status == "approved")
+    if approved:
+        counters.increment("content_batch_approved", approved)
+    skipped = len(results) - approved
+    return BatchApprovalResponse(results=results, approved=approved, skipped=skipped)
+
+
+async def _approve_one(
+    service: ContentService,
+    quota: CounterGuard | None,
+    brand_id: UUID,
+    item_id: UUID,
+    role: BrandRole,
+    actor: CurrentUser,
+    *,
+    note: str | None,
+) -> str | None:
+    """``None`` when approved, else the refusal code of the single-item route."""
+    try:
+        await _ensure_post_quota(quota, brand_id)
+        await service.act(
+            brand_id,
+            item_id,
+            Action.APPROVE,
+            actor_role=role,
+            actor_tenant_id=actor.tenant_id,
+            actor_user_id=actor.user_id,
+            note=note,
+        )
+    except ContentError as exc:
+        return exc.error
+    except HTTPException as exc:  # the two 402s of ``_ensure_post_quota``
+        detail = exc.detail
+        return detail["error"] if isinstance(detail, dict) else "entitlement_refused"
+    return None
 
 
 @router.post(
