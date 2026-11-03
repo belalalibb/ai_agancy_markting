@@ -63,8 +63,10 @@ def _concrete(template: str) -> str:
         "account_id",  # SPRINT-12 B (D-082)
         "alert_id",  # SPRINT-12 B-3 (Pulse)
         "diag_id",  # SPRINT-12 C-1 (public diagnosis link)
+        "rec_id",  # SPRINT-12.1-B C (UI)
     ):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
+    template = template.replace("{action}", "submit")  # SPRINT-12.1-B C (UI)
     return template.replace("{purpose}", "content_generation")  # SPRINT-11.1 C-1
 
 
@@ -135,7 +137,7 @@ def test_app_routes_redirect_without_session(client: TestClient) -> None:
         for m in sorted(getattr(r, "methods", None) or ())
         if m != "HEAD" and r.path not in {"/app/login", "/app/logout"}
     ]
-    assert len(guarded) == 8, guarded
+    assert len(guarded) == 20, guarded
     for method, template in guarded:
         path = _concrete(template)
         for cookies in ({}, {"app_session": "expired.or.garbage"}):

@@ -1,4 +1,5 @@
-"""``/app`` routes (SPRINT-12.1 B-2/B-3): login, brand pick, today, inbox.
+"""``/app`` routes (SPRINT-12.1 B/C): login, brand pick, today, inbox, content,
+diagnosis, settings.
 
 Every screen is rendered server-side (Jinja2, autoescape on) in Arabic/RTL; all copy
 comes from ``i18n/ar.json`` (templates contain no literal Arabic). Data is fetched
@@ -695,6 +696,384 @@ async def set_stage(
     if objection_code:
         body["objection_code"] = objection_code
     return await _inbox_action(request, brand_id, conversation_id, csrf, "PATCH", path, body)
+
+
+# ----------------------------------------------------------------- content ---
+CONTENT_TABS = (
+    "draft",
+    "pending_approval",
+    "approved",
+    "scheduled",
+    "published",
+    "publish_failed",
+)
+CONTENT_LIMIT = 50
+BATCH_MAX = 50
+ITEM_ACTIONS = ("submit", "withdraw", "approve", "unschedule", "archive")  # optional-note posts
+GRADES = ("measured", "inferred", "estimated")  # = share.EVIDENCE_GRADES (D-074 order)
+CONSENTS = ("signals_only", "none", "full")  # = tenancy LearningConsent
+GRANT_ROLES = ("manager", "viewer")  # = GrantRole
+
+
+def _grade_of(summary: Mapping[str, Any]) -> str:
+    """Strongest cited grade — mirrors ``brand_brain.share.evidence_grade`` over the public
+    ``evidence_kinds_summary`` (the list API has no ``evidence_grade`` field; §6)."""
+    for grade in GRADES:
+        if int(summary.get(grade) or 0) > 0:
+            return grade
+    return GRADES[-1]
+
+
+def _translate_batch(results: list[Mapping[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "item_id": str(r["item_id"]),
+            "status": t(f"content.batch_{r['status']}"),
+            "error": _error_text(r["error"]) if r.get("error") else "",
+        }
+        for r in results
+    ]
+
+
+def _tab(status: str) -> str | None:
+    return status if status in CONTENT_TABS else None
+
+
+def _not_found_page(request: Request) -> Response:
+    return _render(request, "error.html", {"message": _error_text("not_found")}, status=404)
+
+
+async def _gated_action(
+    request: Request, csrf: str | None, spec: tuple[str, str, Any] | None
+) -> tuple[_Gate, str | None, Any]:
+    """Session + CSRF first — an anonymous probe never learns whether an action exists
+    (303/HX-Redirect as for every ``/app`` route); only then an unknown action is a 404."""
+    if spec is not None:
+        return await _action(request, csrf, *spec)
+    gate = await _gate_user(request, get_settings(), csrf)
+    if gate.response is None:
+        gate = _Gate(None, _not_found_page(request))
+    return gate, None, None
+
+
+async def _content_ctx(api: ApiClient, brand_id: UUID, status: str | None) -> dict[str, Any]:
+    frame = await _brand_frame(api, brand_id)
+    params: dict[str, Any] = {"limit": CONTENT_LIMIT}
+    if status:
+        params["status"] = status
+    page = await api.get(f"/brands/{brand_id}/content/items", **params)
+    return {**frame, "items": page["items"], "status": status or "", "tabs": CONTENT_TABS}
+
+
+async def _content_page(
+    request: Request,
+    settings: Settings,
+    user: AppUser,
+    brand_id: UUID,
+    status: str | None,
+    *,
+    flash: str | None = None,
+    batch: list[dict[str, str]] | None = None,
+) -> Response:
+    try:
+        user, data = await _call(
+            request, settings, user, lambda api: _content_ctx(api, brand_id, status)
+        )
+    except ApiError as exc:
+        return _api_failure(request, settings, user, exc)
+    ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash, "batch": batch}
+    name = "partials/content_list.html" if _is_partial(request) else "content.html"
+    return _with_session(settings, user, _render(request, name, ctx))
+
+
+@router.get("/b/{brand_id}/content", response_class=HTMLResponse)
+async def content(request: Request, brand_id: UUID, status: str = "") -> Response:
+    settings = get_settings()
+    gate = await _gate_user(request, settings)
+    if gate.response is not None:
+        return gate.response
+    return await _content_page(request, settings, gate.user, brand_id, _tab(status))
+
+
+@router.post("/b/{brand_id}/content/batch-approve", response_class=HTMLResponse)
+async def content_batch_approve(
+    request: Request,
+    brand_id: UUID,
+    item_ids: Annotated[list[str] | None, Form()] = None,
+    status: Annotated[str, Form()] = "",
+    note: Annotated[str, Form()] = "",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """«Approve selected» ⇒ one ``approvals/batch`` call; every line comes back translated
+    (``approved`` / ``skipped: <reason>``) — D-055: a human ticked every box."""
+    body: dict[str, Any] = {"item_ids": (item_ids or [])[:BATCH_MAX]}
+    if note:
+        body["note"] = note
+    path = f"/brands/{brand_id}/content/approvals/batch"
+    gate, flash, result = await _action(request, csrf, "POST", path, body)
+    if gate.response is not None:
+        return gate.response
+    batch = _translate_batch(result["results"]) if isinstance(result, dict) else None
+    return await _content_page(
+        request, get_settings(), gate.user, brand_id, _tab(status), flash=flash, batch=batch
+    )
+
+
+@router.post("/b/{brand_id}/content/{item_id}/{action}", response_class=HTMLResponse)
+async def content_item_action(  # noqa: PLR0913 - one form field per lifecycle input
+    request: Request,
+    brand_id: UUID,
+    item_id: UUID,
+    action: str,
+    status: Annotated[str, Form()] = "",
+    note: Annotated[str, Form()] = "",
+    scheduled_for: Annotated[str, Form()] = "",
+    target_page_id: Annotated[str, Form()] = "",
+    brief: Annotated[str, Form()] = "",
+    tone: Annotated[str, Form()] = "professional",
+    language: Annotated[str, Form()] = "ar",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """One form per lifecycle action; the buttons mirror the API state machine (D-055 — the
+    UI never publishes, ``retry`` re-queues a failed job, ``approve`` stays OWNER-only
+    upstream). Unknown actions are a 404 page and never reach the API."""
+    base = f"/brands/{brand_id}/content/items/{item_id}"
+    spec: tuple[str, str, Any] | None = None
+    if action in ITEM_ACTIONS:
+        spec = ("POST", f"{base}/{action}", {"note": note} if note else {})
+    elif action == "reject":
+        spec = ("POST", f"{base}/reject", {"note": note})
+    elif action == "schedule":
+        body: dict[str, Any] = {"scheduled_for": scheduled_for}
+        if target_page_id:
+            body["target_page_id"] = target_page_id
+        spec = ("POST", f"{base}/schedule", body)
+    elif action == "retry":
+        spec = ("POST", f"{base}/publish/retry", None)
+    elif action == "generate":
+        spec = ("POST", f"{base}/generate", {"brief": brief, "tone": tone, "language": language})
+    gate, flash, _ = await _gated_action(request, csrf, spec)
+    if gate.response is not None:
+        return gate.response
+    return await _content_page(
+        request,
+        get_settings(),
+        gate.user,
+        brand_id,
+        _tab(status),
+        flash=flash or t("content.done"),
+    )
+
+
+# --------------------------------------------------------------- diagnosis ---
+async def _diagnosis_ctx(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
+    frame = await _brand_frame(api, brand_id)
+    page = await api.get(f"/brands/{brand_id}/brain/recommendations", limit=CONTENT_LIMIT)
+    cost = None
+    if frame["brand"].get("role") == "owner":  # GET /brain/cost is OWNER-only upstream
+        cost = await api.get(f"/brands/{brand_id}/brain/cost")
+    items = [
+        {**r, "grade": _grade_of(r.get("evidence_kinds_summary") or {})} for r in page["items"]
+    ]
+    today = datetime.now(UTC).date().isoformat()
+    today_cost = next((d for d in (cost or {}).get("items", []) if d["day"] == today), None)
+    return {**frame, "recommendations": items, "cost": cost, "today_cost": today_cost}
+
+
+async def _diagnosis_page(
+    request: Request,
+    settings: Settings,
+    user: AppUser,
+    brand_id: UUID,
+    *,
+    flash: str | None = None,
+    share: Mapping[str, Any] | None = None,
+) -> Response:
+    try:
+        user, data = await _call(
+            request, settings, user, lambda api: _diagnosis_ctx(api, brand_id)
+        )
+    except ApiError as exc:
+        return _api_failure(request, settings, user, exc)
+    ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash, "share": share}
+    name = "partials/recommendations.html" if _is_partial(request) else "diagnosis.html"
+    return _with_session(settings, user, _render(request, name, ctx))
+
+
+@router.get("/b/{brand_id}/diagnosis", response_class=HTMLResponse)
+async def diagnosis(request: Request, brand_id: UUID) -> Response:
+    settings = get_settings()
+    gate = await _gate_user(request, settings)
+    if gate.response is not None:
+        return gate.response
+    return await _diagnosis_page(request, settings, gate.user, brand_id)
+
+
+@router.post("/b/{brand_id}/diagnosis/diagnose", response_class=HTMLResponse)
+async def diagnose(
+    request: Request, brand_id: UUID, csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None
+) -> Response:
+    path = f"/brands/{brand_id}/brain/diagnose"
+    gate, flash, result = await _action(request, csrf, "POST", path, None)
+    if gate.response is not None:
+        return gate.response
+    if flash is None and isinstance(result, dict):
+        flash = t("diagnosis.done", n=len(result.get("recommendations", [])))
+    return await _diagnosis_page(request, get_settings(), gate.user, brand_id, flash=flash)
+
+
+@router.post("/b/{brand_id}/diagnosis/{rec_id}/{action}", response_class=HTMLResponse)
+async def recommendation_action(
+    request: Request,
+    brand_id: UUID,
+    rec_id: UUID,
+    action: str,
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """``accept``/``dismiss`` ⇒ recommendations API; ``share``/``unshare`` ⇒ the public link
+    (C-2): the URL is rendered **once** and never stored by the UI; 409 ⇒ translated flash."""
+    brain = f"/brands/{brand_id}/brain"
+    spec: tuple[str, str, Any] | None = None
+    if action in ("accept", "dismiss"):
+        spec = ("POST", f"{brain}/recommendations/{rec_id}/{action}", None)
+    elif action in ("share", "unshare"):
+        method = "POST" if action == "share" else "DELETE"
+        spec = (method, f"{brain}/diagnoses/{rec_id}/share", None)
+    gate, flash, result = await _gated_action(request, csrf, spec)
+    if gate.response is not None:
+        return gate.response
+    share = None
+    if flash is None:
+        if action == "share" and isinstance(result, dict):
+            share = {"rec_id": str(rec_id), "url": result["url"]}
+        flash = t(f"diagnosis.{action}_done")
+    return await _diagnosis_page(
+        request, get_settings(), gate.user, brand_id, flash=flash, share=share
+    )
+
+
+# ---------------------------------------------------------------- settings ---
+async def _optional(api: ApiClient, path: str) -> Any:
+    """``None`` instead of an error page for sections a brand may legitimately lack (no
+    WhatsApp number yet ⇒ 404; VIEWER ⇒ 403) — anything else still raises."""
+    try:
+        return await api.get(path)
+    except ApiError as exc:
+        if exc.status in (403, 404):
+            return None
+        raise
+
+
+async def _settings_ctx(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
+    frame = await _brand_frame(api, brand_id)
+    owner = frame["brand"].get("role") == "owner"
+    connections = await api.get(f"/brands/{brand_id}/social/meta/connections")
+    wa = await _optional(api, f"/brands/{brand_id}/whatsapp/account")
+    grants = await api.get(f"/brands/{brand_id}/grants") if owner else []
+    return {
+        **frame,
+        "is_owner": owner,
+        "connections": connections,
+        "wa": wa,
+        "grants": [g for g in grants if not g.get("revoked_at")],
+        "consents": CONSENTS,
+        "grant_roles": GRANT_ROLES,
+    }
+
+
+async def _settings_page(
+    request: Request, settings: Settings, user: AppUser, brand_id: UUID, flash: str | None = None
+) -> Response:
+    try:
+        user, data = await _call(request, settings, user, lambda api: _settings_ctx(api, brand_id))
+    except ApiError as exc:
+        return _api_failure(request, settings, user, exc)
+    ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash}
+    return _with_session(settings, user, _render(request, "settings.html", ctx))
+
+
+@router.get("/b/{brand_id}/settings", response_class=HTMLResponse)
+async def brand_settings(request: Request, brand_id: UUID) -> Response:
+    settings = get_settings()
+    gate = await _gate_user(request, settings)
+    if gate.response is not None:
+        return gate.response
+    return await _settings_page(request, settings, gate.user, brand_id)
+
+
+async def _settings_action(
+    request: Request, brand_id: UUID, csrf: str | None, method: str, path: str, body: Any, ok: str
+) -> Response:
+    gate, flash, _ = await _action(request, csrf, method, path, body)
+    if gate.response is not None:
+        return gate.response
+    return await _settings_page(request, get_settings(), gate.user, brand_id, flash or t(ok))
+
+
+@router.post("/b/{brand_id}/settings/connections/start")
+async def connection_start(
+    request: Request, brand_id: UUID, csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None
+) -> Response:
+    """The Facebook Login URL is answered as a 303 (the form targets a new window) — the
+    UI never stores the OAuth ``state``."""
+    path = f"/brands/{brand_id}/social/meta/connections/start"
+    gate, flash, result = await _action(request, csrf, "POST", path, None)
+    if gate.response is not None:
+        return gate.response
+    if flash is None and isinstance(result, dict) and result.get("authorization_url"):
+        response = RedirectResponse(result["authorization_url"], status_code=303)
+        return _with_session(get_settings(), gate.user, response)
+    return await _settings_page(request, get_settings(), gate.user, brand_id, flash)
+
+
+@router.post("/b/{brand_id}/settings/connections/{connection_id}/resync")
+async def connection_resync(
+    request: Request,
+    brand_id: UUID,
+    connection_id: UUID,
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    path = f"/brands/{brand_id}/social/meta/connections/{connection_id}/resync"
+    return await _settings_action(request, brand_id, csrf, "POST", path, None, "settings.resynced")
+
+
+@router.post("/b/{brand_id}/settings/consent", response_class=HTMLResponse)
+async def set_consent(
+    request: Request,
+    brand_id: UUID,
+    learning_consent: Annotated[str, Form()] = "",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    path = f"/brands/{brand_id}/learning-consent"  # the API is PATCH (no PUT) — §6
+    body = {"learning_consent": learning_consent}
+    return await _settings_action(request, brand_id, csrf, "PATCH", path, body, "settings.saved")
+
+
+@router.post("/b/{brand_id}/settings/grants", response_class=HTMLResponse)
+async def add_grant(
+    request: Request,
+    brand_id: UUID,
+    grantee_tenant_id: Annotated[str, Form()] = "",
+    role: Annotated[str, Form()] = "",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """Grants are keyed by *tenant id* in the API (there is no e-mail lookup — §6)."""
+    body = {"grantee_tenant_id": grantee_tenant_id, "role": role}
+    path = f"/brands/{brand_id}/grants"
+    return await _settings_action(request, brand_id, csrf, "POST", path, body, "settings.granted")
+
+
+@router.post("/b/{brand_id}/settings/grants/{grant_id}/revoke", response_class=HTMLResponse)
+async def revoke_grant(
+    request: Request,
+    brand_id: UUID,
+    grant_id: UUID,
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    path = f"/brands/{brand_id}/grants/{grant_id}"
+    return await _settings_action(
+        request, brand_id, csrf, "DELETE", path, None, "settings.revoked"
+    )
 
 
 # ------------------------------------------------------------------ static ---

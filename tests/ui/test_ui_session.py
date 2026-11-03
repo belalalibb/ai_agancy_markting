@@ -35,19 +35,28 @@ IDS = [f"{m} {p}" for m, p in APP_OPERATIONS]
 
 
 def _concrete(template: str) -> str:
-    for name in ("brand_id", "alert_id", "item_id", "conversation_id"):
+    for name in (
+        "brand_id",
+        "alert_id",
+        "item_id",
+        "conversation_id",
+        "rec_id",
+        "grant_id",
+        "connection_id",
+    ):
         template = template.replace("{" + name + "}", SAMPLE)
-    return template
+    return template.replace("{action}", "submit")
 
 
 def test_ui_routes_are_hidden_from_openapi_and_counted(ui_app: FastAPI) -> None:
     """The ``/app`` surface is HTML, not API: it must not appear in the OpenAPI contract
-    (``tests/test_auth_guard.py`` stays at 84 protected ops) — 11 routes, 8 session-guarded
-    (GET/POST login + POST logout are exempt)."""
+    (``tests/test_auth_guard.py`` stays at 84 protected ops) — 23 routes, 20 session-guarded
+    (GET/POST login + POST logout are exempt). SPRINT-12.1-B C added 12: content (GET + 2
+    POST), diagnosis (GET + 2 POST), settings (GET + 5 POST)."""
     spec_paths = ui_app.openapi()["paths"]
     assert not any(path.startswith("/app") for path in spec_paths)
-    assert len(ui_router.routes) == 11
-    assert len(APP_OPERATIONS) == 8
+    assert len(ui_router.routes) == 23
+    assert len(APP_OPERATIONS) == 20
 
 
 @pytest.mark.parametrize(("method", "template"), APP_OPERATIONS, ids=IDS)

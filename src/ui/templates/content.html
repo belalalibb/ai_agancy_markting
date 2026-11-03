@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set partial_flash = true %}
+{% block title %}{{ t("content.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("content.title") }}</h1>
+<nav data-tabs>
+  <ul>
+    <li><a href="/app/b/{{ brand.id }}/content"{% if not status %} aria-current="page"{% endif %}>{{ t("content.tab_all") }}</a></li>
+    {% for s in tabs %}
+    <li><a href="/app/b/{{ brand.id }}/content?status={{ s }}"{% if status == s %} aria-current="page"{% endif %}>{{ t("status." ~ s) }}</a></li>
+    {% endfor %}
+  </ul>
+</nav>
+<section id="content">
+  {% include "partials/content_list.html" %}
+</section>
+{% endblock %}

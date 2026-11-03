@@ -5,7 +5,9 @@ any API behaviour, migration, or test outside `tests/ui/` and `tests/isolation/`
 
 ## What it owns
 
-* `src/ui/router.py` — `/app/*` routes (login, brand pick, today, inbox) — `include_in_schema=False`.
+* `src/ui/router.py` — `/app/*` routes (login, brand pick, today, inbox, content, diagnosis,
+  settings — SPRINT-12.1-B C) — `include_in_schema=False`. Every screen reads/writes only through
+  `ApiClient`; roles, entitlements, consent and the content state machine are enforced upstream.
 * `src/ui/session.py` — three `Path=/app` cookies: `app_session` (copy of the auth refresh value),
   `app_access` (the short-lived access JWT, decoded locally — `/auth/refresh` is called only on
   expiry, SPRINT-12.1-B C-0) and `app_csrf` (per-login nonce) + the CSRF stamp
