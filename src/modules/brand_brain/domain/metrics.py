@@ -39,6 +39,9 @@ METRICS: Final[dict[str, tuple[str, EvidenceKind]]] = {
     "content_approval_rate_30d": ("ratio", "measured"),
     # Voice
     "tone_match_score": ("ratio", "inferred"),
+    # Lead loop (SPRINT-12 B-2, D-079) — from ``lead_attributions`` / ``wa_conversations``
+    "measured_leads_per_post": ("leads/post", "measured"),
+    "lead_close_rate": ("ratio", "measured"),
     # Competitor public page (B-2)
     "public_page_summary": ("text", "estimated"),
     "page_category": ("label", "estimated"),
@@ -61,3 +64,14 @@ def is_known_metric(name: str) -> bool:
 
 def source_allowed(evidence_kind: str, source_kind: str) -> bool:
     return source_kind in ALLOWED_SOURCES.get(evidence_kind, frozenset())
+
+
+def lead_close_rate(won: int, lost: int) -> float | None:
+    """D-079: ``won / (won + lost)``; ``None`` when nothing was decided yet."""
+    decided = won + lost
+    return round(won / decided, 3) if decided else None
+
+
+def measured_leads_per_post(measured_leads: int, published_posts: int) -> float | None:
+    """D-079: ``measured`` attributions ÷ succeeded publish jobs; ``None`` without posts."""
+    return round(measured_leads / published_posts, 3) if published_posts else None

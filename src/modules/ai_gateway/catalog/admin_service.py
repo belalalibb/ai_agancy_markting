@@ -14,13 +14,13 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
-from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
 import httpx
 from pydantic import SecretStr
 
+from src.core.netguard import Resolver
 from src.core.security import TokenEncryptionService
 from src.modules.ai_gateway.catalog.domain import (
     CatalogSnapshot,
@@ -41,11 +41,13 @@ from src.modules.ai_gateway.catalog.schemas import (
     RoutingPut,
 )
 from src.modules.ai_gateway.catalog.service import (
+    CatalogEncryptionUnavailableError,
     CatalogInvalidPricingError,
     CatalogNotFoundError,
+    CatalogPriceTable,
     CredentialResolver,
     build_provider_client,
-    validate_provider_host,
+    ensure_provider_host_resolves_public,
 )
 from src.modules.ai_gateway.contract import AIError
 from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
@@ -91,29 +93,34 @@ class CatalogAdminService:
         encryption: TokenEncryptionService | None,
         allow_local_hosts: Sequence[str],
         invalidate: Callable[[], None],
+        resolver: Resolver | None = None,
     ) -> None:
         self._repo = repo
         self._encryption = encryption
         self._allow_local = list(allow_local_hosts)
         self._invalidate = invalidate
+        self._resolver = resolver
 
     # ------------------------------------------------------------ helpers --
     def _cipher(self, key: SecretStr) -> str:
-        if self._encryption is None:
-            raise CatalogNotFoundError("token encryption is not configured")  # pragma: no cover
+        if self._encryption is None:  # SPRINT-12 A-6c (H6c): 503, not 404
+            raise CatalogEncryptionUnavailableError()
         # The only unwrap outside ``CredentialResolver``: the credential is encrypted on
         # receipt and the plaintext is dropped with this frame (G4).
         return self._encryption.encrypt_token(key.get_secret_value())  # credential ⇒ cipher
 
-    def _check_host(self, base_url: str) -> None:
-        validate_provider_host(base_url, self._allow_local)
+    async def _check_host(self, base_url: str) -> None:
+        """SPRINT-12 A-4 (H4): literal **and** DNS answers must be global (``getaddrinfo``)."""
+        await ensure_provider_host_resolves_public(
+            base_url, self._allow_local, resolver=self._resolver
+        )
 
     # ---------------------------------------------------------- providers --
     async def list_providers(self) -> list[Provider]:
         return await self._repo.list_providers()
 
     async def create_provider(self, payload: ProviderCreate, *, actor_user_id: UUID) -> Provider:
-        self._check_host(payload.base_url)
+        await self._check_host(payload.base_url)
         provider = Provider(
             slug=payload.slug,
             kind=payload.kind,
@@ -138,7 +145,7 @@ class CatalogAdminService:
         if payload.sent("enabled") and payload.enabled is not None:
             update["enabled"] = payload.enabled
         if payload.sent("base_url") and payload.base_url is not None:
-            self._check_host(payload.base_url)
+            await self._check_host(payload.base_url)
             update["base_url"] = payload.base_url
         if payload.sent("timeout_seconds") and payload.timeout_seconds is not None:
             update["timeout_seconds"] = payload.timeout_seconds
@@ -219,10 +226,16 @@ class CatalogAdminService:
     async def replace_routing(
         self, purpose: str, payload: RoutingPut, *, actor_user_id: UUID
     ) -> list[Route]:
-        known = {m.id for m in await self._repo.list_models()}
+        known = {m.id: m for m in await self._repo.list_models()}
         missing = [str(m) for m in payload.models if m not in known]
         if missing:
             raise CatalogNotFoundError(f"unknown model id(s): {', '.join(missing)}")
+        wanted = "audio" if purpose == "audio_transcription" else "text"
+        wrong = [str(m) for m in payload.models if known[m].capability != wanted]
+        if wrong:  # SPRINT-12 A-6d (H6d): a model whose capability cannot serve the purpose
+            raise CatalogInvalidPricingError(
+                f"purpose {purpose!r} needs {wanted!r} models; mismatched: {', '.join(wrong)}"
+            )
         routes = [
             Route(purpose=purpose, model_id=model_id, priority=index)  # type: ignore[arg-type]
             for index, model_id in enumerate(payload.models)
@@ -256,8 +269,11 @@ class CatalogAdminService:
             resolved,
             credentials=CredentialResolver(self._encryption),
             http_client=http_client,
+            allow_local=self._allow_local,
+            resolver=self._resolver,
         )
-        guarded = guard_factory(inner, model.model_name, snapshot)
+        # A-5: the guard prices by the resolved key; A-6a: the facade applies max_tokens_cap.
+        guarded = guard_factory(inner, inner.model, snapshot)
         req = CompletionRequest(
             purpose="admin_probe",
             system=PROBE_SYSTEM,
@@ -282,14 +298,10 @@ class CatalogAdminService:
                 preview="",
                 error_category=exc.category,
             )
-        unit = model.pricing.token_unit
-        cost: Decimal | None = None
-        if unit is not None and result.usage.prompt_tokens is not None:
-            cost = (
-                Decimal(result.usage.prompt_tokens) * unit[0]
-                + Decimal(result.usage.completion_tokens or 0) * unit[1]
-            ) / 1000
-            cost = cost.quantize(Decimal("0.000001"))
+        # A-5 (H5): one pricing source — the same ``CatalogPriceTable`` the guard used.
+        cost = CatalogPriceTable(snapshot).estimate(
+            inner.model, result.usage.prompt_tokens, result.usage.completion_tokens
+        )
         return ProbeOut(
             ok=True,
             latency_ms=result.latency_ms,

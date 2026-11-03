@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -54,7 +55,7 @@ from src.modules.ai_gateway.dependencies import (
     build_catalog_gateway,
 )
 from src.modules.ai_gateway.facades import FakeProvider
-from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest
+from src.modules.ai_gateway.gateway import AIGateway, CompletionRequest, CompletionResult
 from src.modules.ai_gateway.pricing import PriceSource, PriceTable
 
 from tests.fakes import FakeCostLogWriter
@@ -170,14 +171,19 @@ def _resolver(
 
         original = svc.build_provider_client
 
+        from src.modules.ai_gateway.catalog.service import _ResolvedFacade
+
         def scripted(resolved, **_: Any):  # noqa: ANN001, ANN202
-            return clients.get(resolved.model.model_name) or original(
+            client = clients.get(resolved.model.model_name)
+            if client is not None:
+                return _ResolvedFacade(client, resolved=resolved)
+            return original(
                 resolved, credentials=CredentialResolver(None, env={}), http_client=None
             )
 
         async def _attempt(candidate, req):  # noqa: ANN001, ANN202
             inner = scripted(candidate)
-            guarded = resolver._guard_factory(inner, candidate.model.model_name)
+            guarded = resolver._guard_factory(inner, inner.model)
             resolver.attempts.append(candidate.model.model_name)
             return await guarded.complete(req)
 
@@ -262,6 +268,164 @@ def test_private_or_malformed_hosts_are_refused(url: str) -> None:
     assert info.value.status == 422
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://ollama:11434/v1",  # bare word
+        "http://127.0.0.1.nip.io:11434/v1",
+        "http://169.254.169.254.nip.io/v1",
+        "http://10.0.0.5.sslip.io/v1",
+        "http://metadata.google.internal/v1",
+        "http://printer.local/v1",
+        "http://0177.0.0.1/v1",  # octal 127.0.0.1
+        "http://2130706433/v1",  # decimal 127.0.0.1
+        "http://0x7f000001/v1",  # hex 127.0.0.1
+        "http://127.1/v1",  # short form
+        "http://0251.0376.0251.0376/v1",  # octal 169.254.169.254
+    ],
+)
+def test_h4_dns_tricks_and_non_canonical_literals_are_refused(url: str) -> None:
+    """SPRINT-12 A-4 (H4): the six that gave 201 in the review ⇒ refused before any lookup."""
+    with pytest.raises(ProviderHostNotAllowedError):
+        validate_provider_host(url, [])
+
+
+async def test_h4_dns_name_is_resolved_and_private_answers_are_refused() -> None:
+    """SPRINT-12 A-4 (H4): create / patch time ``getaddrinfo`` — any private answer ⇒ 422;
+    all-public ⇒ accepted; unresolvable ⇒ refused; allow-listed / literal hosts skip DNS."""
+    from src.modules.ai_gateway.catalog.service import ensure_provider_host_resolves_public
+
+    async def public(host: str, port: int):  # noqa: ANN202
+        return [
+            (2, 1, 6, "", ("104.18.6.192", port)),
+            (10, 1, 6, "", ("2606:4700::1", port, 0, 0)),
+        ]
+
+    async def mixed(host: str, port: int):  # noqa: ANN202
+        return [(2, 1, 6, "", ("104.18.6.192", port)), (2, 1, 6, "", ("10.0.0.5", port))]
+
+    async def failing(host: str, port: int):  # noqa: ANN202
+        raise OSError("no such host")
+
+    assert (
+        await ensure_provider_host_resolves_public(
+            "https://api.openai.com/v1", [], resolver=public
+        )
+        == "api.openai.com:443"
+    )
+    with pytest.raises(ProviderHostNotAllowedError):
+        await ensure_provider_host_resolves_public("https://evil.example/v1", [], resolver=mixed)
+    with pytest.raises(ProviderHostNotAllowedError):
+        await ensure_provider_host_resolves_public("https://nx.example/v1", [], resolver=failing)
+    # literal / allow-listed ⇒ no lookup at all
+    assert (
+        await ensure_provider_host_resolves_public("http://8.8.8.8/v1", [], resolver=failing)
+        == "8.8.8.8:80"
+    )
+    assert (
+        await ensure_provider_host_resolves_public(
+            "http://localhost:11434/v1", ["localhost:11434"], resolver=failing
+        )
+        == "localhost:11434"
+    )
+
+
+async def test_h4_pinned_transport_refuses_rebinding_before_every_request() -> None:
+    """SPRINT-12 A-4 (H4, connect time): the transport re-resolves right before sending —
+    a public-then-private flip is caught; literals, forbidden names and allow-list too."""
+    from src.core.netguard import PinnedAddressTransport, PrivateAddressError
+    from src.modules.ai_gateway.catalog.service import pinned_http_client
+
+    answers = [[("104.18.6.192",)], [("10.0.0.5",)]]
+
+    async def flipping(host: str, port: int):  # noqa: ANN202
+        return [(2, 1, 6, "", (a[0], port)) for a in answers.pop(0)]
+
+    sent: list[str] = []
+
+    class Inner(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            sent.append(str(request.url))
+            return httpx.Response(200, json={"ok": True})
+
+    transport = PinnedAddressTransport(Inner(), resolver=flipping)
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert (await client.get("https://llm.example/v1/x")).status_code == 200
+        with pytest.raises(PrivateAddressError):
+            await client.get("https://llm.example/v1/x")  # second answer is private
+        with pytest.raises(PrivateAddressError):
+            await client.get("http://127.0.0.1:11434/v1")  # literal
+        with pytest.raises(PrivateAddressError):
+            await client.get("http://0x7f000001/v1")  # non-canonical literal
+        with pytest.raises(PrivateAddressError):
+            await client.get("http://metadata.google.internal/v1")  # forbidden name
+        assert (await client.get("http://8.8.8.8/v1")).status_code == 200  # public literal
+    assert sent == ["https://llm.example/v1/x", "http://8.8.8.8/v1"]
+    allowed = PinnedAddressTransport(Inner(), allow_hosts=frozenset({"localhost:11434"}))
+    async with httpx.AsyncClient(transport=allowed) as client:
+        assert (await client.get("http://localhost:11434/v1")).status_code == 200
+    # pinned_http_client reuses the pooled client's transport and builds one when absent
+    pooled = httpx.AsyncClient(transport=Inner())
+    wrapped = pinned_http_client(pooled, [], resolver=flipping)
+    assert isinstance(wrapped._transport, PinnedAddressTransport)  # noqa: SLF001
+    assert wrapped._transport._inner is pooled._transport  # noqa: SLF001
+    fresh = pinned_http_client(None, ["x:1"])
+    assert isinstance(fresh._transport._inner, httpx.AsyncHTTPTransport)  # noqa: SLF001
+    await wrapped.aclose()
+    await fresh.aclose()
+    await pooled.aclose()
+
+
+def test_h4_normalize_ip_literal_and_forbidden_names() -> None:
+    from src.core.netguard import is_forbidden_hostname, normalize_ip_literal
+
+    assert normalize_ip_literal("0177.0.0.1") == "127.0.0.1"
+    assert normalize_ip_literal("2130706433") == "127.0.0.1"
+    assert normalize_ip_literal("0x7f000001") == "127.0.0.1"
+    assert normalize_ip_literal("127.1") == "127.0.0.1"
+    assert normalize_ip_literal("127.0.1") == "127.0.0.1"
+    assert normalize_ip_literal("[::1]") == "::1"
+    assert normalize_ip_literal("8.8.8.8") == "8.8.8.8"
+    assert normalize_ip_literal("api.openai.com") is None
+    assert normalize_ip_literal("256.1.1.1") is None
+    assert normalize_ip_literal("1.2.3.4.5") is None
+    assert normalize_ip_literal("1..2") is None
+    assert normalize_ip_literal("4294967296") is None
+    assert normalize_ip_literal("0xZZ") is None
+    assert normalize_ip_literal("") is None
+    assert is_forbidden_hostname("ollama") is True
+    assert is_forbidden_hostname("LOCALHOST.") is True
+    assert is_forbidden_hostname("nip.io") is True
+    assert is_forbidden_hostname("a.b.sslip.io") is True
+    assert is_forbidden_hostname("api.openai.com") is False
+
+
+async def test_h6a_resolved_facade_applies_max_tokens_cap() -> None:
+    """SPRINT-12 A-6a (H6a): the provider receives ``min(req.max_tokens, cap)``."""
+    from src.modules.ai_gateway.catalog.domain import ResolvedModel
+    from src.modules.ai_gateway.catalog.service import _ResolvedFacade
+
+    p = _provider()
+    seen: list[int] = []
+
+    class Spy:
+        name = "spy"
+        model = "m"
+
+        async def complete(self, req: CompletionRequest) -> CompletionResult:
+            seen.append(req.max_tokens)
+            return await FakeProvider(model="m").complete(req)
+
+    capped = ResolvedModel(
+        provider=p, model=_model(p, "m").model_copy(update={"max_tokens_cap": 5}), priority=0
+    )
+    await _ResolvedFacade(Spy(), resolved=capped).complete(_req(max_tokens=2000))
+    await _ResolvedFacade(Spy(), resolved=capped).complete(_req(max_tokens=3))
+    uncapped = ResolvedModel(provider=p, model=_model(p, "m"), priority=0)
+    await _ResolvedFacade(Spy(), resolved=uncapped).complete(_req(max_tokens=2000))
+    assert seen == [5, 3, 2000]
+
+
 def test_allow_listed_local_host_and_public_hosts_pass() -> None:
     assert (
         validate_provider_host("http://localhost:11434/v1", ["localhost:11434"])
@@ -310,24 +474,42 @@ async def test_resolve_orders_by_priority_and_skips_disabled_links() -> None:
         await ProviderCatalog(StaticReader(orphan)).model_by_id(m1.id)
 
 
-def test_catalog_price_table_prefers_priced_entry_and_prices_audio() -> None:
+def test_catalog_price_table_keys_by_provider_and_ignores_disabled() -> None:
+    """SPRINT-12 A-5 (H5): two providers' ``dup`` never share a price; a disabled provider's
+    priced model and a disabled model are not in the table at all (fail-closed)."""
+    from src.modules.ai_gateway.catalog.service import price_key
+
     p = _provider()
+    other = _provider("other")
+    off = _provider("off", enabled=False)
     unpriced = _model(p, "dup", None)
-    priced = _model(_provider("other"), "dup", Decimal("0.5"))
+    priced = _model(other, "dup", Decimal("0.5"))
+    shadow = _model(off, "dup", ZERO)  # disabled provider, priced 0 — must be ignored
+    disabled = _model(p, "gone", Decimal("1"), enabled=False)
     audio = Model(
         provider_id=p.id,
         model_name="whisper",
         capability="audio",
         pricing=ModelPricing.audio(Decimal("0.006"), 60),
     )
-    table = CatalogPriceTable(CatalogSnapshot(models=(unpriced, priced, audio)))
-    assert table.models == frozenset({"dup", "whisper"})
-    assert table.estimate_unit("dup") == (Decimal("0.5"), Decimal("0.5"))
-    assert table.estimate("dup", 1000, 1000) == Decimal("1.000000")
-    assert table.estimate("dup", None, 1) is None
+    table = CatalogPriceTable(
+        CatalogSnapshot(
+            providers=(p, other, off), models=(unpriced, priced, shadow, disabled, audio)
+        )
+    )
+    k_unpriced, k_priced = price_key(p.id, "dup"), price_key(other.id, "dup")
+    k_audio = price_key(p.id, "whisper")
+    assert table.models == frozenset({k_unpriced, k_priced, k_audio})
+    assert table.estimate_unit(k_unpriced) is None  # the namesake's price never leaks
+    assert table.estimate_unit(k_priced) == (Decimal("0.5"), Decimal("0.5"))
+    assert table.estimate(k_priced, 1000, 1000) == Decimal("1.000000")
+    assert table.estimate(k_priced, None, 1) is None
     assert table.estimate("missing", 1, 1) is None
-    assert table.estimate_audio("whisper", 30) == Decimal("0.003000")
-    assert table.estimate_audio("whisper", 61) is None
+    assert table.estimate(price_key(off.id, "dup"), 1, 1) is None
+    assert table.estimate_audio(k_audio, 30) == Decimal("0.003000")
+    assert table.estimate_audio(k_audio, 61) is None
+    assert table.estimate_audio(k_priced, 10) is None
+    assert len(price_key(p.id, "x" * 80)) == 64
     assert table.estimate_audio("whisper", -1) is None
     assert table.estimate_audio("dup", 10) is None
     assert table.estimate_audio("missing", 10) is None
@@ -371,8 +553,9 @@ def test_build_provider_client_kinds() -> None:
         credentials=CredentialResolver(None, env={}),
         http_client=None,
     )
-    assert isinstance(fake, FakeProvider)
-    assert fake.model == "fake-9"
+    # SPRINT-12 A-5: the facade reports the resolved price key; the provider keeps its name
+    assert isinstance(fake.inner, FakeProvider)
+    assert fake.model == f"{fake_p.id}/fake-9" and fake.model_name == "fake-9"
     from src.modules.ai_gateway.catalog.domain import ResolvedModel
     from src.modules.ai_gateway.facades import HttpOpenAICompatibleProvider
 
@@ -381,7 +564,7 @@ def test_build_provider_client_kinds() -> None:
     client = build_provider_client(
         resolved, credentials=CredentialResolver(None, env={"K": KEY}), http_client=None
     )
-    assert isinstance(client, HttpOpenAICompatibleProvider)
+    assert isinstance(client.inner, HttpOpenAICompatibleProvider)
     with pytest.raises(CredentialUnavailableError):
         build_provider_client(
             ResolvedModel(
@@ -399,7 +582,7 @@ def test_build_provider_client_kinds() -> None:
         http_client=None,
         user_key=SecretStr("sk-user"),
     )
-    assert isinstance(user, HttpOpenAICompatibleProvider)
+    assert isinstance(user.inner, HttpOpenAICompatibleProvider)
 
 
 # ----------------------------------------------------------------- resolver --
@@ -415,16 +598,17 @@ async def test_fallback_503_then_200_writes_two_cost_rows_priced_per_model() -> 
     result = await resolver.complete(_req())
     assert result.model == "sec"
     assert resolver.attempts == ["prim", "sec"]
+    k_prim, k_sec = f"{p.id}/prim", f"{p.id}/sec"  # SPRINT-12 A-5: resolved price keys
     outcomes = [(e.model, e.outcome) for e in writer.entries]
-    assert outcomes == [("prim", CostOutcome.ERROR), ("sec", CostOutcome.OK)]
+    assert outcomes == [(k_prim, CostOutcome.ERROR), (k_sec, CostOutcome.OK)]
     err, ok = writer.entries
     assert err.error_category == "provider_unavailable"
     sec_price = CatalogPriceTable(_snapshot((p, primary), (p, secondary)))
     expected = sec_price.estimate(
-        "sec", result.usage.prompt_tokens, result.usage.completion_tokens
+        k_sec, result.usage.prompt_tokens, result.usage.completion_tokens
     )
     assert ok.estimated_cost_usd == expected  # priced with model "sec" ($2/1k), not "prim"
-    assert err.model == "prim" and err.estimated_cost_usd is not None
+    assert err.model == k_prim and err.estimated_cost_usd is not None
 
 
 @pytest.mark.parametrize("category", sorted(FALLBACK_CATEGORIES, key=lambda c: c.value))
@@ -539,10 +723,10 @@ async def test_admin_probe_without_brand_skips_brand_checks_and_logs_null_brand(
     # literal, so the probe router passes the target model explicitly (Part C). Here we only
     # prove the BudgetGuard contract for brand_id=None.
     guard = _guard_factory(writer, CatalogPriceTable(_snapshot((p, _model(p, "probe-m")))))(
-        FakeProvider(model="probe-m"), "probe-m"
+        FakeProvider(model=f"{p.id}/probe-m"), f"{p.id}/probe-m"
     )
     result = await guard.complete(_req(purpose="admin_probe", brand_id=None))
-    assert result.model == "probe-m"
+    assert result.model == f"{p.id}/probe-m"
     assert writer.entries[0].brand_id is None
     assert writer.entries[0].purpose == "admin_probe"
     del resolver

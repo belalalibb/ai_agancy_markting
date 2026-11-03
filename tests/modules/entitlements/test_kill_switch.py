@@ -41,16 +41,18 @@ def _generate(client: TestClient, headers: dict[str, str]):  # noqa: ANN202
     )
 
 
-def test_suspended_brand_is_429_plan_inactive_when_enforced(
+def test_suspended_brand_is_402_plan_inactive_when_enforced(
     app: FastAPI, client: TestClient, auth_headers: Headers
 ) -> None:
+    """SPRINT-12 A-1 (H1): a suspended plan is **402 ``entitlement_plan_inactive``** on the
+    AI path (was 429 ``plan_inactive`` — 429 is reserved for time-bound limits)."""
     _suspend(app)
     res = _generate(client, auth_headers(OWNER_ID))
-    assert res.status_code == 429, res.text
+    assert res.status_code == 402, res.text
     detail = res.json()["detail"]
-    assert detail["error"] == "generation_budget_exceeded"
-    assert detail["limit_kind"] == "plan_inactive"
-    assert "Retry-After" in res.headers
+    assert detail["error"] == "entitlement_plan_inactive"
+    assert detail["plan"] == "starter"  # the suspended plan (see _suspend)
+    assert "Retry-After" not in res.headers
 
 
 def test_kill_switch_lets_suspended_brand_generate_and_warns_at_boot(

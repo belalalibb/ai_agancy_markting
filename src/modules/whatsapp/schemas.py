@@ -25,8 +25,11 @@ from src.modules.whatsapp.domain.models import (
     DeliveryStatus,
     Direction,
     DraftStatus,
+    LeadStage,
     Message,
     MessageKind,
+    NumberCap,
+    ObjectionCode,
     RejectionReason,
     ReplyDraft,
     WhatsAppAccount,
@@ -108,6 +111,8 @@ class ConversationPublic(BaseModel):
     window_expires_at: datetime | None
     pending_draft: bool
     status: ConversationStatus
+    lead_stage: LeadStage = LeadStage.NEW  # SPRINT-12 B-2 (D-079)
+    lead_stage_at: datetime | None = None
 
     @classmethod
     def from_domain(
@@ -131,6 +136,8 @@ class ConversationPublic(BaseModel):
             window_expires_at=conv.window_expires_at,
             pending_draft=pending_draft,
             status=conv.status,
+            lead_stage=conv.lead_stage,
+            lead_stage_at=conv.lead_stage_at,
         )
 
 
@@ -276,3 +283,49 @@ class ApproveResultPublic(BaseModel):
     draft: ReplyDraftPublic
     message: MessagePublic | None
     delivery_status: DeliveryStatus | None
+
+
+# ------------------------------------------------------ SPRINT-12 B-2 lead loop (D-079) ---
+class LeadStageRequest(BaseModel):
+    """``PATCH …/lead-stage``: the stage plus, when ``lost``, an objection **code** (D-069)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lead_stage: LeadStage
+    objection_code: ObjectionCode | None = None
+
+
+class LeadStagePublic(BaseModel):
+    conversation_id: UUID
+    lead_stage: LeadStage
+    lead_stage_at: datetime | None
+    lead_stage_set_by_user_id: UUID | None
+    objection_code: ObjectionCode | None = None
+
+
+# ------------------------------------------------------ SPRINT-12 B-4 number caps (D-082) ---
+class NumberCapPatch(BaseModel):
+    """``PATCH /admin/entitlements/wa-caps/{account_id}`` — at least one field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    daily_reply_cap: int | None = Field(default=None, gt=0, le=100_000)
+    kill_switch: bool | None = None
+
+
+class NumberCapPublic(BaseModel):
+    account_id: UUID
+    daily_reply_cap: int
+    kill_switch: bool
+    used_today: int
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, cap: NumberCap, *, used_today: int) -> NumberCapPublic:
+        return cls(
+            account_id=cap.account_id,
+            daily_reply_cap=cap.daily_reply_cap,
+            kill_switch=cap.kill_switch,
+            used_today=used_today,
+            updated_at=cap.updated_at,
+        )

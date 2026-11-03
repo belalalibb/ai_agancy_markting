@@ -23,9 +23,20 @@ class CounterQuotaExceededError(Exception):
         self.used = used
 
 
+class CounterPlanInactiveError(Exception):
+    """SPRINT-12 A-1 (H1): the brand's plan is suspended / expired ⇒ the router answers
+    **402 ``entitlement_plan_inactive``** ``{plan, active_until}`` — never 429 (reserved for
+    time-bound limits: the client distinguishes *pay* from *wait*)."""
+
+    def __init__(self, *, plan: str | None = None, active_until: str | None = None) -> None:
+        super().__init__("plan inactive")
+        self.plan = plan
+        self.active_until = active_until
+
+
 class CounterGuard(Protocol):
     """``await guard.ensure_can_approve_post(brand_id)`` ⇒ returns or raises
-    :class:`CounterQuotaExceededError`."""
+    :class:`CounterQuotaExceededError` / :class:`CounterPlanInactiveError`."""
 
     async def ensure_can_approve_post(self, brand_id: UUID) -> None: ...
 
@@ -35,4 +46,9 @@ def get_counter_guard() -> CounterGuard | None:
     return None
 
 
-__all__ = ["CounterGuard", "CounterQuotaExceededError", "get_counter_guard"]
+__all__ = [
+    "CounterGuard",
+    "CounterPlanInactiveError",
+    "CounterQuotaExceededError",
+    "get_counter_guard",
+]

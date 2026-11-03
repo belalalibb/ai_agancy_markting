@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM tables for ``whatsapp`` (PostgreSQL dialect, migration 0009)."""
+"""SQLAlchemy ORM tables for ``whatsapp`` (PostgreSQL dialect, migrations 0009 + 0016)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
@@ -67,6 +68,10 @@ class ConversationRow(Base):
         ),
         CheckConstraint("unread_count >= 0", name="ck_wa_conversations_unread_count"),
         CheckConstraint("status IN ('open', 'archived')", name="ck_wa_conversations_status"),
+        CheckConstraint(
+            "lead_stage IN ('new', 'qualified', 'quoted', 'won', 'lost', 'not_lead')",
+            name="ck_wa_conversations_lead_stage",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -87,6 +92,74 @@ class ConversationRow(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts()
+    # SPRINT-12 B-2 (D-079): owner-set lead stage (0016).
+    lead_stage: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="new", server_default="new"
+    )
+    lead_stage_set_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    lead_stage_at: Mapped[datetime | None] = _ts(nullable=True)
+
+
+class LeadAttributionRow(Base):
+    """SPRINT-12 B-2 (D-079, migration 0016): a conversation attributed to a publish source.
+    ``signals`` holds codes only — never customer text (D-069)."""
+
+    __tablename__ = "lead_attributions"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "source_kind",
+            "source_ref",
+            name="uq_lead_attributions_conversation_source",
+        ),
+        CheckConstraint(
+            "grade IN ('measured', 'inferred', 'owner_input')", name="ck_lead_attributions_grade"
+        ),
+        Index("ix_lead_attributions_brand_created", "brand_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("brands.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("wa_conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    grade: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    signals: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class NumberCapRow(Base):
+    """SPRINT-12 B-4 (D-082, migration 0016): per-number daily reply cap + kill switch."""
+
+    __tablename__ = "wa_number_caps"
+    __table_args__ = (
+        CheckConstraint("daily_reply_cap > 0", name="ck_wa_number_caps_daily_reply_cap"),
+    )
+
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("whatsapp_accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    daily_reply_cap: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=300, server_default="300"
+    )
+    kill_switch: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
 
 
 class MessageRow(Base):

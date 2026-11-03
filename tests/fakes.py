@@ -946,6 +946,9 @@ class FakeWhatsAppRepository:
         self.messages: dict[UUID, object] = {}
         self.drafts: dict[UUID, object] = {}
         self.signals: dict[UUID, object] = {}
+        self.attributions: dict[UUID, object] = {}  # SPRINT-12 B-2
+        self.attribution_keys: set[tuple[UUID, str, str]] = set()
+        self.number_caps: dict[UUID, object] = {}  # SPRINT-12 B-4
 
     # ------------------------------------------------------------- accounts ----
     async def create_account(self, account):  # noqa: ANN001, ANN201
@@ -1102,6 +1105,47 @@ class FakeWhatsAppRepository:
     async def insert_outbound(self, message):  # noqa: ANN001, ANN201
         self.messages[message.id] = message
         return message
+
+    # --- SPRINT-12 B-2 / B-4 ---
+    async def set_lead_stage(self, conversation_id: UUID, *, stage, actor_user_id, now):  # noqa: ANN001, ANN201
+        conv = self.conversations.get(conversation_id)
+        if conv is None:
+            return None
+        conv = conv.model_copy(
+            update={
+                "lead_stage": stage,
+                "lead_stage_set_by_user_id": actor_user_id,
+                "lead_stage_at": now,
+                "updated_at": now,
+            }
+        )
+        self.conversations[conversation_id] = conv
+        return conv
+
+    async def add_lead_attribution(self, attribution) -> bool:  # noqa: ANN001
+        key = (attribution.conversation_id, attribution.source_kind, attribution.source_ref)
+        if key in self.attribution_keys:
+            return False
+        self.attribution_keys.add(key)
+        self.attributions[attribution.id] = attribution
+        return True
+
+    async def get_number_cap(self, account_id: UUID):  # noqa: ANN201
+        return self.number_caps.get(account_id)
+
+    async def upsert_number_cap(self, cap):  # noqa: ANN001, ANN201
+        self.number_caps[cap.account_id] = cap
+        return cap
+
+    async def count_outbound_since(self, account_id: UUID, *, since) -> int:  # noqa: ANN001
+        conv_ids = {c.id for c in self.conversations.values() if c.account_id == account_id}
+        return sum(
+            1
+            for m in self.messages.values()
+            if m.conversation_id in conv_ids
+            and m.direction.value == "outbound"
+            and m.created_at >= since
+        )
 
     async def get_message(self, brand_id: UUID, message_id: UUID):  # noqa: ANN201
         m = self.messages.get(message_id)
@@ -1334,6 +1378,32 @@ class _FakeRecommendationMixin:
         self.learning_signals.append(signal)
         return signal
 
+    # SPRINT-12 C-1: share hash kept beside the row (the PG columns are not on the model).
+    shares: dict[UUID, tuple[str, Any]]
+
+    async def set_recommendation_share(  # noqa: ANN201
+        self,
+        brand_id: UUID,
+        recommendation_id: UUID,
+        *,
+        token_hash: str | None,
+        shared_at,  # noqa: ANN001
+    ):
+        rec = self.recommendations.get(recommendation_id)
+        if rec is None or rec.brand_id != brand_id:
+            return False
+        if token_hash is None:
+            self.shares.pop(recommendation_id, None)
+        else:
+            self.shares[recommendation_id] = (token_hash, shared_at)
+        return True
+
+    async def get_recommendation_by_share_hash(self, token_hash: str):  # noqa: ANN201
+        for rec_id, (stored, _at) in self.shares.items():
+            if stored == token_hash:
+                return self.recommendations.get(rec_id)
+        return None
+
 
 class FakeBrandBrainRepository(_FakeRecommendationMixin):
     """In-memory :class:`BrandBrainRepository` (SPRINT-10 B-1). Mirrors the PG constraints
@@ -1359,6 +1429,7 @@ class FakeBrandBrainRepository(_FakeRecommendationMixin):
         self.recommendations: dict[UUID, Any] = {}
         self.learning_signals: list[Any] = []
         self.locked_recommendations: list[UUID] = []
+        self.shares: dict[UUID, tuple[str, Any]] = {}  # SPRINT-12 C-1
 
     # profile
     async def get_profile(self, brand_id: UUID):  # noqa: ANN201

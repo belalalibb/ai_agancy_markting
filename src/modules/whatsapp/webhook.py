@@ -69,10 +69,16 @@ from src.modules.whatsapp.domain.models import (
 from src.modules.whatsapp.domain.repository import WhatsAppRepository
 from src.modules.whatsapp.entitlements_port import (
     CounterGuard,
+    CounterPlanInactiveError,
     CounterQuotaExceededError,
     get_counter_guard,
 )
 from src.modules.whatsapp.infrastructure.postgres_repository import PostgresWhatsAppRepository
+from src.modules.whatsapp.lead_loop import (
+    LeadLoopService,
+    PublishedPostLookup,
+    get_published_post_lookup,
+)
 from src.modules.whatsapp.learning import record_expired
 from src.modules.whatsapp.service import hash_verify_token
 
@@ -146,6 +152,10 @@ class WebhookOutcome:
     # SPRINT-11.1 A-2 (E2): conversations stored while the brand is over its monthly
     # ``monthly_wa_conversations`` ceiling — never a 429 to Meta, flagged here instead.
     quota_exceeded: list[UUID] = field(default_factory=list)
+    # SPRINT-12 A-1 (H1): conversations stored while the brand's plan is suspended / expired —
+    # a signed webhook never answers 5xx (Meta would retry and the message would be lost).
+    plan_inactive: list[UUID] = field(default_factory=list)
+    attributed: list[UUID] = field(default_factory=list)  # SPRINT-12 B-2
 
 
 def _ts(value: Any) -> datetime:  # noqa: ANN401 - raw JSON
@@ -220,10 +230,12 @@ class WebhookProcessor:
         *,
         consent: BrandConsentReader | None = None,
         quota: CounterGuard | None = None,
+        lead_loop: LeadLoopService | None = None,
     ) -> None:
         self._repo = repo
         self._consent = consent  # SPRINT-11 C-6 (D-080)
         self._quota = quota  # SPRINT-11.1 A-2 (E2): ``None`` ⇒ no plan check
+        self._lead_loop = lead_loop  # SPRINT-12 B-2 (D-079): ``None`` ⇒ no attribution
 
     async def handle_webhook_payload(
         self, payload: Any, *, accounts: dict[str, WhatsAppAccount]
@@ -311,6 +323,10 @@ class WebhookProcessor:
         outcome.inbound += 1
         counters.increment("wa_inbound")
         now = datetime.now(tz=UTC)
+        referral = referral_fields(raw)
+        if referral is not None and self._lead_loop is not None:  # SPRINT-12 B-2 (D-079)
+            if await self._lead_loop.attribute_from_referral(conversation, referral, now=now):
+                outcome.attributed.append(conversation.id)
         is_new = conversation.created_at == at and conversation.unread_count == 1
         if is_new and self._quota is not None:
             # First message of a brand-new conversation: the upsert *inserted* it with
@@ -328,6 +344,12 @@ class WebhookProcessor:
                     conversation.id,
                     exc.used,
                     exc.limit,
+                )
+            except CounterPlanInactiveError:
+                outcome.plan_inactive.append(conversation.id)
+                counters.increment("wa_plan_inactive")
+                logger.info(
+                    "wa plan inactive: brand=%s conv=%s", account.brand_id, conversation.id
                 )
         expired = await self._repo.expire_pending_drafts(conversation.id, now=now)
         await record_expired(self._repo, expired, now=now, consent=self._consent)  # D-069/D-080
@@ -416,6 +438,7 @@ def _consent(
 
 Consent = Annotated[BrandConsentReader, Depends(_consent)]
 Quota = Annotated[CounterGuard | None, Depends(get_counter_guard)]  # SPRINT-11.1 A-2
+Posts = Annotated[PublishedPostLookup | None, Depends(get_published_post_lookup)]  # SPRINT-12
 
 WEBHOOK_PATH = "/webhooks/whatsapp"
 
@@ -447,7 +470,13 @@ async def verify_webhook(
     status_code=status.HTTP_200_OK,
 )
 async def receive_webhook(
-    request: Request, repo: Repo, encryption: Encryption, consent: Consent, quota: Quota
+    request: Request,
+    repo: Repo,
+    encryption: Encryption,
+    consent: Consent,
+    quota: Quota,
+    posts: Posts,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, int | list[str]]:
     raw_body = await read_body_capped(request)  # A-5 (1): 1 MiB cap, streamed
     header = request.headers.get(SIGNATURE_HEADER)
@@ -486,9 +515,10 @@ async def receive_webhook(
         counters.increment("wa_webhook_rejected")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"error": "webhook_unverified"})
 
-    outcome = await WebhookProcessor(repo, consent=consent, quota=quota).handle_webhook_payload(
-        payload, accounts=accounts
-    )
+    lead_loop = LeadLoopService(repo, posts=posts, enabled=settings.feature_lead_loop)
+    outcome = await WebhookProcessor(
+        repo, consent=consent, quota=quota, lead_loop=lead_loop
+    ).handle_webhook_payload(payload, accounts=accounts)
     if outcome.unparsed:
         counters.increment("wa_webhook_unparsed", outcome.unparsed)
     return {
@@ -499,4 +529,6 @@ async def receive_webhook(
         "unparsed": outcome.unparsed,
         "expired_drafts": [str(d) for d in outcome.expired_drafts],  # B-3
         "quota_exceeded": [str(c) for c in outcome.quota_exceeded],  # SPRINT-11.1 A-2
+        "plan_inactive": [str(c) for c in outcome.plan_inactive],  # SPRINT-12 A-1 (H1)
+        "attributed": [str(c) for c in outcome.attributed],  # SPRINT-12 B-2 (D-079)
     }

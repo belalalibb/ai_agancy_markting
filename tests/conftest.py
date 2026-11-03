@@ -268,11 +268,16 @@ def app(
         get_grant_repository,
         get_tenant_repository,
     )
+    from src.modules.whatsapp.lead_loop import get_published_post_lookup
 
     seed_world(store)
     application = create_app(settings)
     application.dependency_overrides[get_repository] = lambda: fake_repo
     application.dependency_overrides[get_status_marker] = lambda: status_marker
+    # SPRINT-12 B-2 (D-079): ``main.py`` binds the PG-backed published-post lookup; the
+    # fake-wired app must never open a session — ``None`` ⇒ no attribution (tests that
+    # exercise attribution override this with ``FakePostLookup``).
+    application.dependency_overrides[get_published_post_lookup] = lambda: None
 
     def _content_repo_unit_of_work():  # noqa: ANN202
         # A-3: the PG session releases row locks on commit/rollback; the fake releases its

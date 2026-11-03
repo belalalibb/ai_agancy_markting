@@ -115,6 +115,8 @@ def test_b1_u2_inbound_text_creates_conversation_and_message_then_duplicate_is_n
             "unparsed": 0,
             "expired_drafts": [],
             "quota_exceeded": [],  # SPRINT-11.1 A-2
+            "plan_inactive": [],  # SPRINT-12 A-1 (H1)
+            "attributed": [],  # SPRINT-12 B (D-079)
         }
         again = _post(client, payload)  # Meta redelivery of the same wamid
         assert again.status_code == 200
@@ -126,6 +128,8 @@ def test_b1_u2_inbound_text_creates_conversation_and_message_then_duplicate_is_n
             "unparsed": 0,
             "expired_drafts": [],
             "quota_exceeded": [],  # SPRINT-11.1 A-2
+            "plan_inactive": [],  # SPRINT-12 A-1 (H1)
+            "attributed": [],  # SPRINT-12 B (D-079)
         }
 
     assert len(wa_repo.messages) == 1

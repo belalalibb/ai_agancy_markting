@@ -212,7 +212,16 @@ class PgEntitlementLimitsReader:
             resets = 1
             if entitlement.active_until is not None and entitlement.active_until > now:
                 resets = int((entitlement.active_until - now).total_seconds())  # pragma: no cover
-            raise EntitlementLimitError("plan_inactive", resets_in_seconds=max(resets, 3600))
+            raise EntitlementLimitError(
+                "plan_inactive",
+                resets_in_seconds=max(resets, 3600),
+                plan=entitlement.plan.value,
+                active_until=(
+                    entitlement.active_until.isoformat()
+                    if entitlement.active_until is not None
+                    else None
+                ),
+            )
         return entitlement, stored is not None
 
     async def check(self, brand_id: UUID, purpose: str) -> bool:
@@ -290,3 +299,42 @@ async def current_usage(
             entitlement.brand_id, "monthly_wa_conversations", since=now - MONTH_WINDOW
         ),
     }
+
+
+# ------------------------------------------------------- SPRINT-12 B-3 (Pulse check 6) --
+class PlanCounterUsageRow:
+    """``used / limit`` of one monthly counter of one brand — structurally equal to
+    ``pulse.domain.CounterUsage`` (duck-typed: entitlements never imports pulse)."""
+
+    __slots__ = ("brand_id", "counter", "limit", "used")
+
+    def __init__(self, brand_id: UUID, counter: str, used: int, limit: int) -> None:
+        self.brand_id = brand_id
+        self.counter = counter
+        self.used = used
+        self.limit = limit
+
+
+PULSE_COUNTERS: tuple[str, ...] = ("monthly_posts", "monthly_wa_conversations")
+
+
+async def plan_counter_usage(
+    brand_ids: list[UUID],
+    *,
+    repo: EntitlementRepository,
+    counters: CounterUsageReader,
+    now: datetime,
+) -> list[PlanCounterUsageRow]:
+    """Monthly counter consumption of the given brands (implicit ``trial`` when no row)."""
+    rows: list[PlanCounterUsageRow] = []
+    since = now - MONTH_WINDOW
+    for brand_id in brand_ids:
+        entitlement = await repo.get(brand_id) or BrandEntitlement.trial(brand_id)
+        for counter in PULSE_COUNTERS:
+            used = await counters.monthly_used(brand_id, counter, since=since)  # type: ignore[arg-type]
+            rows.append(
+                PlanCounterUsageRow(
+                    brand_id, counter, used, int(getattr(entitlement.limits, counter))
+                )
+            )
+    return rows

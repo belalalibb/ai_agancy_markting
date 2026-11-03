@@ -3,6 +3,8 @@
 
 * ``BrandBudgetExceededError`` / ``EntitlementLimitError`` ⇒ **429**
   ``generation_budget_exceeded`` (the existing name) + ``limit_kind`` + ``Retry-After``;
+* ``EntitlementLimitError(plan_inactive)`` ⇒ **402** ``entitlement_plan_inactive``
+  ``{plan, active_until}`` — SPRINT-12 A-1 (H1): *pay*, not *wait*, so no ``Retry-After``;
 * ``PlatformBudgetExhaustedError`` ⇒ **503** ``platform_budget_exhausted`` + ``Retry-After``;
 * ``UnpricedModelError`` ⇒ **503** ``ai_model_unpriced``;
 * ``CostLogUnavailableError`` ⇒ **503** ``cost_log_unavailable``.
@@ -20,6 +22,20 @@ from src.modules.ai_gateway.budget_guard import (
 )
 
 
+def plan_inactive_http(*, plan: str | None, active_until: str | None) -> HTTPException:
+    """SPRINT-12 A-1 (H1): the one 402 ``entitlement_plan_inactive`` body shared by the AI
+    path (``BudgetGuard``) and the counter ports (``content`` / ``whatsapp``)."""
+    return HTTPException(
+        status.HTTP_402_PAYMENT_REQUIRED,
+        detail={
+            "error": "entitlement_plan_inactive",
+            "message": "the brand's plan is suspended or expired — renew it to continue",
+            "plan": plan,
+            "active_until": active_until,
+        },
+    )
+
+
 def budget_error_to_http(exc: BudgetGuardError) -> HTTPException:
     detail: dict[str, object] = {"error": exc.error, "message": exc.message}
     headers: dict[str, str] | None = None
@@ -32,6 +48,8 @@ def budget_error_to_http(exc: BudgetGuardError) -> HTTPException:
             resets_in_seconds=exc.resets_in_seconds,
         )
         headers = {"Retry-After": str(exc.resets_in_seconds)}
+    elif isinstance(exc, EntitlementLimitError) and exc.is_plan_inactive:
+        return plan_inactive_http(plan=exc.plan, active_until=exc.active_until)
     elif isinstance(exc, EntitlementLimitError):
         code = status.HTTP_429_TOO_MANY_REQUESTS
         detail.update(limit_kind=exc.limit_kind, resets_in_seconds=exc.resets_in_seconds)
@@ -49,4 +67,4 @@ def budget_error_to_http(exc: BudgetGuardError) -> HTTPException:
     return HTTPException(code, detail=detail, headers=headers)
 
 
-__all__ = ["budget_error_to_http"]
+__all__ = ["budget_error_to_http", "plan_inactive_http"]

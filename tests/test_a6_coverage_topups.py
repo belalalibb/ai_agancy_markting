@@ -68,7 +68,8 @@ def test_entitlements_dependency_factories_build_pg_adapters(settings) -> None: 
 
 async def test_plan_counter_guard_re_raises_non_counter_limit_errors() -> None:
     """A-2 adapter: only the *matching* counter is translated into the consumer's 402 class;
-    ``plan_inactive`` keeps its 429 contract and propagates unchanged."""
+    ``plan_inactive`` propagates raw when no ``inactive`` class is bound (SPRINT-12 A-1 binds
+    one from ``src/main.py``; see ``test_plan_counter_guard_translates_plan_inactive``)."""
     from src.modules.ai_gateway.budget_guard import EntitlementLimitError
     from src.modules.entitlements.dependencies import PlanCounterGuard, counter_guard_dependency
 
@@ -111,6 +112,35 @@ async def test_plan_counter_guard_re_raises_non_counter_limit_errors() -> None:
     assert ex.value.info == ("monthly_posts", 0, 0)
     dependency = counter_guard_dependency(ExceededError)
     assert isinstance(dependency(ok), PlanCounterGuard)  # type: ignore[arg-type]
+
+
+async def test_plan_counter_guard_translates_plan_inactive() -> None:
+    """SPRINT-12 A-1 (H1): with the consumer's ``inactive`` class bound, ``plan_inactive`` is
+    raised as that class carrying ``plan`` / ``active_until`` (⇒ 402 / webhook flag)."""
+    from src.modules.ai_gateway.budget_guard import EntitlementLimitError
+    from src.modules.entitlements.dependencies import PlanCounterGuard, counter_guard_dependency
+
+    class ExceededError(Exception):
+        def __init__(self, counter, *, limit, used) -> None:  # noqa: ANN001
+            super().__init__(counter)
+
+    class InactiveError(Exception):
+        def __init__(self, *, plan=None, active_until=None) -> None:  # noqa: ANN001
+            super().__init__("inactive")
+            self.plan = plan
+            self.active_until = active_until
+
+    class Limits:
+        async def check_counter(self, brand_id, counter, *, reserve):  # noqa: ANN001, ANN202
+            raise EntitlementLimitError("plan_inactive", plan="starter", active_until="2027-01-01")
+
+    guard = PlanCounterGuard(Limits(), exceeded=ExceededError, inactive=InactiveError)  # type: ignore[arg-type]
+    with pytest.raises(InactiveError) as info:
+        await guard.ensure_within_conversation_quota(uuid4())
+    assert (info.value.plan, info.value.active_until) == ("starter", "2027-01-01")
+    built = counter_guard_dependency(ExceededError, InactiveError)(Limits())  # type: ignore[arg-type]
+    with pytest.raises(InactiveError):
+        await built.ensure_can_approve_post(uuid4())
 
 
 # ------------------------------------------------------------------- helpers ----

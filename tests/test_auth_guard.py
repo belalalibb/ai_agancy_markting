@@ -27,6 +27,8 @@ PUBLIC = {
     ("POST", "/api/v1/webhooks/whatsapp"),
     ("GET", "/health"),
     ("GET", "/health/ready"),
+    # SPRINT-12 C-1: the watermarked public diagnosis card — token in the path, 60/min/IP.
+    ("GET", "/api/v1/d/{token}"),
 }
 SAMPLE_UUID = "00000000-0000-4000-8000-0000000000ff"
 
@@ -56,6 +58,9 @@ def _concrete(template: str) -> str:
         "competitor_id",  # SPRINT-10 B-1
         "provider_id",  # SPRINT-11.1 C-1
         "model_id",
+        "account_id",  # SPRINT-12 B (D-082)
+        "alert_id",  # SPRINT-12 B-3 (Pulse)
+        "diag_id",  # SPRINT-12 C-1 (public diagnosis link)
     ):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
     return template.replace("{purpose}", "content_generation")  # SPRINT-11.1 C-1
@@ -77,7 +82,11 @@ def test_protected_route_count_is_reported() -> None:
     # SPRINT-11 C-5: +4 entitlements (admin activate, admin read, brand entitlement,
     # learning-consent) ⇒ 66
     # SPRINT-11.1 C-1: +11 /admin/ai/* (providers ×4, models ×4, routing ×2, probe) ⇒ 77
-    assert PROTECTED_ROUTE_COUNT == 77, PROTECTED  # SPRINT-11.1 C-1: 66 + 11 /admin/ai/* routes
+    # SPRINT-12 B: +1 lead-stage (D-079) +2 pulse alerts (list, ack) +1 admin wa-caps (D-082) ⇒ 81
+    # SPRINT-12 C-1: +2 (POST/DELETE …/brain/diagnoses/{diag_id}/share) ⇒ 83; public 6 ⇒ 7.
+    # (The directive's 82 assumed batch approval — deferred to 12.1 by the size valve — and
+    # a PATCH-based share; the real routes are POST/DELETE share — documented in §6.)
+    assert PROTECTED_ROUTE_COUNT == 83, PROTECTED  # SPRINT-12 B: 77 + 4; C-1: + 2
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)
