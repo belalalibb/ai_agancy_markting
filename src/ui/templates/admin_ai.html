@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% set partial_flash = true %}
+{% block title %}{{ t("admin.ai_title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("admin.ai_title") }}</h1>
+<nav data-tabs>
+  <ul>
+    {% for name in tabs %}
+    <li><a href="/app/admin/ai?tab={{ name }}" hx-get="/app/admin/ai?tab={{ name }}" hx-target="#admin-tab" hx-push-url="true"{% if tab == name %} aria-current="page"{% endif %}>{{ t("admin.tab_" ~ name) }}</a></li>
+    {% endfor %}
+  </ul>
+</nav>
+<section id="admin-tab">
+  {% include "partials/admin_ai_tab.html" %}
+</section>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
+{% if today_cost %}<p data-cost-today><small>{{ t("diagnosis.cost_today") }}: {{ today_cost.calls }} / {{ today_cost.estimated_cost_usd or 0 }} USD</small></p>{% endif %}
+{% if share %}
+<article data-share="{{ share.rec_id }}">
+  <label>{{ t("diagnosis.share_url") }}
+    <input type="text" readonly id="share-url" value="{{ share.url }}">
+  </label>
+  <button type="button" class="outline" onclick="navigator.clipboard.writeText(document.getElementById('share-url').value)">{{ t("diagnosis.copy") }}</button>
+</article>
+{% endif %}
+{% if recommendations %}
+<ul data-recommendations>
+  {% for r in recommendations %}
+  {% set act = "/app/b/" ~ brand.id ~ "/diagnosis/" ~ r.id ~ "/" %}
+  <li data-recommendation="{{ r.id }}" data-grade="{{ r.grade }}" data-status="{{ r.status }}">
+    <mark data-grade-badge>{{ t("grade." ~ r.grade) }}</mark>
+    <small>{{ t("diagnosis.evidence") }}: {{ r.evidence_ids | length }}</small> ·
+    <small>{{ t("rec_status." ~ r.status) }}</small> · <small>{{ t("kind." ~ r.kind) }}</small>
+    <strong>{{ r.title }}</strong>
+    <p>{{ r.rationale }}</p>
+    <div class="grid" data-actions>
+      {% if r.status == "proposed" %}
+      <form method="post" action="{{ act }}accept" hx-post="{{ act }}accept" hx-target="#recommendations"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">{{ t("diagnosis.accept") }}</button></form>
+      <form method="post" action="{{ act }}dismiss" hx-post="{{ act }}dismiss" hx-target="#recommendations"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary">{{ t("diagnosis.dismiss") }}</button></form>
+      {% endif %}
+      {% if r.status != "dismissed" %}
+      <form method="post" action="{{ act }}share" hx-post="{{ act }}share" hx-target="#recommendations" data-form="share"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="outline">{{ t("diagnosis.share") }}</button></form>
+      <form method="post" action="{{ act }}unshare" hx-post="{{ act }}unshare" hx-target="#recommendations" data-form="unshare"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary outline">{{ t("diagnosis.unshare") }}</button></form>
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}<p data-empty>{{ t("diagnosis.empty") }}</p>{% endif %}

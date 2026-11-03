@@ -24,8 +24,10 @@ from src.modules.whatsapp.domain.models import (
 
 from tests.conftest import AGENCY_ID, BRAND_ID, STRANGER_ID, TEST_PASSWORD, grant
 from tests.fakes import (
+    FakeBrandBrainRepository,
     FakeBrandConsentReader,
     FakeIndependentWrites,
+    FakeInternalMetricsReader,
     FakeStore,
     FakeWhatsAppRepository,
 )
@@ -33,9 +35,13 @@ from tests.modules.pulse.test_pulse import FakePulseRepository
 from tests.modules.whatsapp.conftest import CUSTOMER_WA_ID, PHONE_NUMBER_ID, make_account
 
 OWNER_LOGIN = {"email": "nile-owner@example.com", "password": TEST_PASSWORD}
+VIEWER_LOGIN = {"email": "stranger@example.com", "password": TEST_PASSWORD}  # VIEWER grant
 LOGIN = "/app/login"
 TODAY = f"/app/b/{BRAND_ID}/today"
 INBOX = f"/app/b/{BRAND_ID}/inbox"
+CONTENT = f"/app/b/{BRAND_ID}/content"
+DIAGNOSIS = f"/app/b/{BRAND_ID}/diagnosis"
+SETTINGS = f"/app/b/{BRAND_ID}/settings"
 GRAPH_MESSAGES = f"/{PHONE_NUMBER_ID}/messages"
 
 
@@ -50,15 +56,32 @@ def wa_repo() -> FakeWhatsAppRepository:
 
 
 @pytest.fixture
+def brain_repo() -> FakeBrandBrainRepository:
+    return FakeBrandBrainRepository()
+
+
+@pytest.fixture
 def ui_app(
     app: FastAPI,
     store: FakeStore,
     pulse_repo: FakePulseRepository,
     wa_repo: FakeWhatsAppRepository,
+    brain_repo: FakeBrandBrainRepository,
 ) -> FastAPI:
-    """``app`` + the Pulse and WhatsApp fakes the Today/Inbox screens read through the API."""
+    """``app`` + the Pulse, WhatsApp and Brand Brain fakes the L1 screens read through the
+    API (Part C: diagnosis ⇒ ``brain_repo``; no AI gateway ⇒ 503 ``ai_provider_not_configured``
+    which the screens translate)."""
+    from src.modules.brand_brain import router as brain_router
     from src.modules.whatsapp import router as wa_router
     from src.modules.whatsapp import webhook
+
+    app.dependency_overrides[brain_router.get_brain_repository] = lambda: brain_repo
+    app.dependency_overrides[brain_router.get_internal_metrics_reader] = lambda: (
+        FakeInternalMetricsReader()
+    )
+    app.dependency_overrides[brain_router.get_graph_page_source] = lambda: None
+    app.dependency_overrides[brain_router.get_public_page_source] = lambda: None
+    app.state.cost_writer.repo = brain_repo
 
     grant(store, BRAND_ID, AGENCY_ID, GrantRole.MANAGER)
     grant(store, BRAND_ID, STRANGER_ID, GrantRole.VIEWER)
@@ -88,13 +111,14 @@ async def wa_account(
     return await wa_repo.create_account(make_account(encryption))
 
 
-def login(client: TestClient) -> str:
+def login(client: TestClient, credentials: dict[str, str] = OWNER_LOGIN) -> str:
     """POST the login form; returns the ``app_session`` cookie value (asserts 303 ⇒ /app/)."""
-    response = client.post(LOGIN, data=OWNER_LOGIN)
+    response = client.post(LOGIN, data=credentials)
     assert response.status_code == 303, response.text
     assert response.headers["location"] == "/app/"
     value = client.cookies.get("app_session")
     assert value, response.headers.get("set-cookie")
+    assert client.cookies.get("app_access") and client.cookies.get("app_csrf")
     return value
 
 

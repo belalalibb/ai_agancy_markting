@@ -6,6 +6,7 @@
   <title>{% block title %}{{ t("app.title") }}{% endblock %} · {{ app_name }}</title>
   <link rel="stylesheet" href="/app/static/vendor/pico.min.css">
   <script src="/app/static/vendor/htmx.min.js" defer></script>
+  {% if umami_website_id %}<script defer src="{{ umami_script_url }}" data-website-id="{{ umami_website_id }}"></script>{% endif %}
 </head>
 <body>
 <header class="container">
@@ -15,10 +16,14 @@
       {% if brand %}
       <li><a href="/app/b/{{ brand.id }}/today">{{ t("nav.today") }}</a></li>
       <li><a href="/app/b/{{ brand.id }}/inbox">{{ t("nav.inbox") }}</a></li>
+      <li><a href="/app/b/{{ brand.id }}/content">{{ t("nav.content") }}</a></li>
+      <li><a href="/app/b/{{ brand.id }}/diagnosis">{{ t("nav.diagnosis") }}</a></li>
+      <li><a href="/app/b/{{ brand.id }}/settings">{{ t("nav.settings") }}</a></li>
       {% endif %}
     </ul>
     <ul>
       {% if brand %}<li><span data-brand="{{ brand.id }}">{{ brand.name }}</span></li>{% endif %}
+      {% if is_admin %}<li><a href="/app/admin/ai" data-nav="admin">{{ t("nav.admin") }}</a> · <a href="/app/admin/entitlements">{{ t("nav.admin_entitlements") }}</a></li>{% endif %}
       {% if user %}
       <li>
         <form method="post" action="/app/logout">
@@ -32,13 +37,14 @@
   {% if plan %}
   <p data-plan="{{ plan.plan }}" class="plan-bar">
     {{ t("plan.label") }}: {{ t("plan." ~ plan.plan) }} ·
-    {{ t("plan.posts") }}: {{ plan.usage.get("monthly_posts", 0) }} / {{ plan.limits.monthly_posts }}
+    {{ t("plan.posts") }}: {{ plan.usage.get("monthly_posts", 0) }} / {{ plan.limits.monthly_posts }} ·
+    {{ t("plan.conversations") }}: {{ plan.usage.get("monthly_wa_conversations", 0) }} / {{ plan.limits.monthly_wa_conversations }}
     {% if not plan.is_active %} · <mark>{{ t("plan.inactive") }}</mark>{% endif %}
   </p>
   {% endif %}
 </header>
 <main class="container">
-  {% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
+  <div id="flash">{% if flash and not partial_flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}</div>
   {% block content %}{% endblock %}
 </main>
 </body>

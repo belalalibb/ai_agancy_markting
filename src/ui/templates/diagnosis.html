@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% set partial_flash = true %}
+{% block title %}{{ t("diagnosis.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("diagnosis.title") }}</h1>
+<form method="post" action="/app/b/{{ brand.id }}/diagnosis/diagnose" hx-post="/app/b/{{ brand.id }}/diagnosis/diagnose" hx-target="#recommendations" data-form="diagnose">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">{{ t("diagnosis.diagnose") }}</button>
+</form>
+<section id="recommendations">
+  {% include "partials/recommendations.html" %}
+</section>
+{% endblock %}

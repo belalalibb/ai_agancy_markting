@@ -1,0 +1,52 @@
+{% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
+{% if batch %}
+<ul data-batch-results>
+  {% for line in batch %}<li data-batch-item="{{ line.item_id }}">{{ line.status }}{% if line.error %}: {{ line.error }}{% endif %}</li>{% endfor %}
+</ul>
+{% endif %}
+{% set base = "/app/b/" ~ brand.id ~ "/content" %}
+<form id="batch" method="post" action="{{ base }}/batch-approve" hx-post="{{ base }}/batch-approve" hx-target="#content" data-form="batch">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="status" value="{{ status }}">
+  <button type="submit" class="outline">{{ t("content.batch_approve") }}</button>
+</form>
+{% if items %}
+<ul data-items>
+  {% for item in items %}
+  <li data-item="{{ item.id }}" data-status="{{ item.status }}">
+    {% if item.status == "pending_approval" %}<input type="checkbox" name="item_ids" value="{{ item.id }}" form="batch" aria-label="{{ t('content.select') }}">{% endif %}
+    <strong>{{ t("status." ~ item.status) }}</strong> · <small>{{ item.channel }}</small>
+    {% if item.scheduled_for %}<small>{{ t("content.schedule_at") }} {{ item.scheduled_for }}</small>{% endif %}
+    <p>{{ (item.current_body or "")[:200] }}</p>
+    {% set act = base ~ "/" ~ item.id ~ "/" %}
+    <div class="grid" data-actions>
+      {% if item.status == "draft" %}
+      <form method="post" action="{{ act }}submit" hx-post="{{ act }}submit" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit">{{ t("content.submit") }}</button></form>
+      <form method="post" action="{{ act }}generate" hx-post="{{ act }}generate" hx-target="#content" data-form="generate"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}">
+        <input type="text" name="brief" minlength="10" maxlength="2000" required placeholder="{{ t('content.brief') }}">
+        <select name="tone">{% for tone in ("professional", "friendly", "promotional") %}<option value="{{ tone }}">{{ t("tone." ~ tone) }}</option>{% endfor %}</select>
+        <select name="language"><option value="ar">{{ t("lang.ar") }}</option><option value="en">{{ t("lang.en") }}</option></select>
+        <button type="submit" class="secondary">{{ t("content.generate") }}</button></form>
+      {% elif item.status == "pending_approval" %}
+      <form method="post" action="{{ act }}approve" hx-post="{{ act }}approve" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit">{{ t("content.approve") }}</button></form>
+      <form method="post" action="{{ act }}reject" hx-post="{{ act }}reject" hx-target="#content" data-form="reject"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><input type="text" name="note" minlength="3" required placeholder="{{ t('content.reject_note') }}"><button type="submit" class="secondary">{{ t("content.reject") }}</button></form>
+      <form method="post" action="{{ act }}withdraw" hx-post="{{ act }}withdraw" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit" class="outline">{{ t("content.withdraw") }}</button></form>
+      {% elif item.status == "approved" %}
+      <form method="post" action="{{ act }}schedule" hx-post="{{ act }}schedule" hx-target="#content" data-form="schedule"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}">
+        <input type="datetime-local" name="scheduled_for" required>
+        <input type="text" name="target_page_id" maxlength="64" placeholder="{{ t('content.target_page') }}">
+        <button type="submit">{{ t("content.schedule") }}</button></form>
+      {% elif item.status == "scheduled" %}
+      <form method="post" action="{{ act }}unschedule" hx-post="{{ act }}unschedule" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit" class="outline">{{ t("content.unschedule") }}</button></form>
+      {% elif item.status == "publish_failed" %}
+      <form method="post" action="{{ act }}retry" hx-post="{{ act }}retry" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit">{{ t("content.retry") }}</button></form>
+      <form method="post" action="{{ act }}unschedule" hx-post="{{ act }}unschedule" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit" class="outline">{{ t("content.unschedule") }}</button></form>
+      {% endif %}
+      {% if item.status != "archived" %}
+      <form method="post" action="{{ act }}archive" hx-post="{{ act }}archive" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit" class="secondary outline">{{ t("content.archive") }}</button></form>
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}<p data-empty>{{ t("content.empty") }}</p>{% endif %}

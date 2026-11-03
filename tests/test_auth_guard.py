@@ -63,8 +63,10 @@ def _concrete(template: str) -> str:
         "account_id",  # SPRINT-12 B (D-082)
         "alert_id",  # SPRINT-12 B-3 (Pulse)
         "diag_id",  # SPRINT-12 C-1 (public diagnosis link)
+        "rec_id",  # SPRINT-12.1-B C (UI)
     ):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
+    template = template.replace("{action}", "submit").replace("{tab}", "providers")  # 12.1-B
     return template.replace("{purpose}", "content_generation")  # SPRINT-11.1 C-1
 
 
@@ -88,7 +90,9 @@ def test_protected_route_count_is_reported() -> None:
     # SPRINT-12 C-1: +2 (POST/DELETE …/brain/diagnoses/{diag_id}/share) ⇒ 83; public 6 ⇒ 7.
     # (The directive's 82 assumed batch approval — deferred to 12.1 by the size valve — and
     # a PATCH-based share; the real routes are POST/DELETE share — documented in §6.)
-    assert PROTECTED_ROUTE_COUNT == 84, PROTECTED  # SPRINT-12 B: 77 + 4; C-1: + 2; 12.1 A-2: + 1
+    assert PROTECTED_ROUTE_COUNT == 85, (
+        PROTECTED
+    )  # 12 B: 77+4; C-1: +2; 12.1 A-2: +1; 12.1-B D-4: +1
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)
@@ -135,7 +139,7 @@ def test_app_routes_redirect_without_session(client: TestClient) -> None:
         for m in sorted(getattr(r, "methods", None) or ())
         if m != "HEAD" and r.path not in {"/app/login", "/app/logout"}
     ]
-    assert len(guarded) == 8, guarded
+    assert len(guarded) == 24, guarded
     for method, template in guarded:
         path = _concrete(template)
         for cookies in ({}, {"app_session": "expired.or.garbage"}):

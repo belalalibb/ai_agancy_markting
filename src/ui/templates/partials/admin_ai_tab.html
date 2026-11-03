@@ -1,0 +1,108 @@
+{% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
+{% set base = "/app/admin/ai/" ~ tab ~ "/" %}
+{% macro hidden(value) %}<input type="hidden" name="csrf" value="{{ csrf }}">{% if value %}<input type="hidden" name="id" value="{{ value }}">{% endif %}{% endmacro %}
+{% macro model_label(m) %}{{ provider_slugs.get(m.provider_id | string, "") }} / {{ m.model_name }}{% endmacro %}
+{% if tab == "providers" %}
+<table data-table="providers">
+  <thead><tr><th>slug</th><th>kind</th><th>base_url</th><th>{{ t("admin.credential") }}</th><th>{{ t("admin.timeout") }}</th><th>{{ t("admin.enabled") }}</th><th>{{ t("admin.models") }}</th><th></th></tr></thead>
+  <tbody>
+    {% for p in providers %}
+    <tr data-provider="{{ p.id }}">
+      <td>{{ p.slug }}</td><td>{{ p.kind }}</td><td>{{ p.base_url }}</td>
+      <td data-has-credential="{{ p.has_credential | lower }}">{{ t("admin.yes") if p.has_credential else t("admin.no") }}{% if p.credential_ref %} · {{ p.credential_ref }}{% endif %}</td>
+      <td>{{ p.timeout_seconds }}</td>
+      <td>{{ t("admin.yes") if p.enabled else t("admin.no") }}</td>
+      <td>{{ model_counts.get(p.id | string, 0) }}</td>
+      <td class="grid">
+        <form method="post" action="{{ base }}update" hx-post="{{ base }}update" hx-target="#admin-tab">{{ hidden(p.id) }}<input type="hidden" name="enabled" value="{{ 'false' if p.enabled else 'true' }}"><button type="submit" class="outline">{{ t("admin.disable") if p.enabled else t("admin.enable") }}</button></form>
+        <form method="post" action="{{ base }}delete" hx-post="{{ base }}delete" hx-target="#admin-tab" hx-confirm="{{ t('admin.confirm_delete') }}" onsubmit="return confirm(this.getAttribute('hx-confirm'))">{{ hidden(p.id) }}<button type="submit" class="secondary outline">{{ t("admin.delete") }}</button></form>
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="8" data-empty>{{ t("admin.empty") }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+<form method="post" action="{{ base }}create" hx-post="{{ base }}create" hx-target="#admin-tab" data-form="provider-create" autocomplete="off">
+  {{ hidden(none) }}
+  <div class="grid">
+    <input type="text" name="slug" required pattern="[a-z0-9_-]+" maxlength="32" placeholder="slug">
+    <select name="kind">{% for k in kinds %}<option value="{{ k }}">{{ k }}</option>{% endfor %}</select>
+    <input type="url" name="base_url" required placeholder="base_url">
+  </div>
+  <div class="grid">
+    <input type="password" name="credential" autocomplete="new-password" placeholder="{{ t('admin.credential') }}">
+    <input type="text" name="credential_ref" maxlength="64" placeholder="credential_ref">
+    <input type="number" name="timeout_seconds" min="1" max="9999" step="0.1" value="30">
+    <button type="submit">{{ t("admin.add") }}</button>
+  </div>
+</form>
+{% elif tab == "models" %}
+<table data-table="models">
+  <thead><tr><th>{{ t("admin.provider") }}</th><th>model_name</th><th>capability</th><th>{{ t("admin.pricing") }}</th><th>max_tokens_cap</th><th>{{ t("admin.enabled") }}</th><th></th></tr></thead>
+  <tbody>
+    {% for m in models %}
+    <tr data-model="{{ m.id }}">
+      <td>{{ provider_slugs.get(m.provider_id | string, m.provider_id) }}</td><td>{{ m.model_name }}</td><td>{{ m.capability }}</td>
+      <td><small>{{ m.pricing.prompt_per_1k if m.pricing.prompt_per_1k is not none else "—" }} / {{ m.pricing.completion_per_1k if m.pricing.completion_per_1k is not none else "—" }}{% if m.pricing.cost_per_minute_usd is not none %} · {{ m.pricing.cost_per_minute_usd }}/min{% endif %}</small></td>
+      <td>{{ m.max_tokens_cap or "—" }}</td>
+      <td>{{ t("admin.yes") if m.enabled else t("admin.no") }}</td>
+      <td class="grid">
+        <form method="post" action="{{ base }}update" hx-post="{{ base }}update" hx-target="#admin-tab">{{ hidden(m.id) }}<input type="hidden" name="enabled" value="{{ 'false' if m.enabled else 'true' }}"><button type="submit" class="outline">{{ t("admin.disable") if m.enabled else t("admin.enable") }}</button></form>
+        <form method="post" action="{{ base }}delete" hx-post="{{ base }}delete" hx-target="#admin-tab" hx-confirm="{{ t('admin.confirm_delete') }}" onsubmit="return confirm(this.getAttribute('hx-confirm'))">{{ hidden(m.id) }}<button type="submit" class="secondary outline">{{ t("admin.delete") }}</button></form>
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="7" data-empty>{{ t("admin.empty") }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+<form method="post" action="{{ base }}create" hx-post="{{ base }}create" hx-target="#admin-tab" data-form="model-create">
+  {{ hidden(none) }}
+  <div class="grid">
+    <select name="provider_id" required>{% for p in providers %}<option value="{{ p.id }}">{{ p.slug }}</option>{% endfor %}</select>
+    <input type="text" name="model_name" required maxlength="64" placeholder="model_name">
+    <select name="capability">{% for c in capabilities %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
+  </div>
+  <div class="grid">
+    <input type="number" name="prompt_per_1k" min="0" step="0.000001" placeholder="prompt_per_1k">
+    <input type="number" name="completion_per_1k" min="0" step="0.000001" placeholder="completion_per_1k">
+    <input type="number" name="max_tokens_cap" min="1" placeholder="max_tokens_cap">
+    <button type="submit">{{ t("admin.add") }}</button>
+  </div>
+</form>
+{% elif tab == "routing" %}
+{% for purpose in purposes %}
+<article data-purpose="{{ purpose }}">
+  {% set chain = chains[purpose] %}
+  {% set live = chain | selectattr("enabled") | list %}
+  <header><strong>{{ purpose }}</strong>
+    <small data-live-model>{{ t("admin.live_now") }}: {% if live %}{% for m in models if m.id == live[0].model_id %}{{ model_label(m) }}{% endfor %}{% else %}—{% endif %}</small>
+  </header>
+  <form method="post" action="{{ base }}put" hx-post="{{ base }}put" hx-target="#admin-tab" data-form="routing-{{ purpose }}">
+    {{ hidden(none) }}<input type="hidden" name="purpose" value="{{ purpose }}">
+    <ol data-chain>
+      {% for r in chain %}<li>{{ r.priority }} · {% for m in models if m.id == r.model_id %}{{ m.model_name }}{% endfor %}</li>{% else %}<li data-empty>{{ t("admin.no_chain") }}</li>{% endfor %}
+    </ol>
+    {% set chosen = chain | map(attribute="model_id") | list %}
+    <select name="models" multiple size="4">
+      {% for m in models %}<option value="{{ m.id }}"{% if m.id in chosen %} selected{% endif %}>{{ model_label(m) }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="outline">{{ t("admin.save_chain") }}</button>
+  </form>
+</article>
+{% endfor %}
+{% elif tab == "probe" %}
+<form method="post" action="{{ base }}run" hx-post="{{ base }}run" hx-target="#admin-tab" data-form="probe">
+  {{ hidden(none) }}
+  <div class="grid">
+    <select name="model_id" required>{% for m in models %}<option value="{{ m.id }}">{{ model_label(m) }}</option>{% endfor %}</select>
+    <input type="number" name="max_tokens" min="1" max="64" value="16">
+  </div>
+  <textarea name="prompt" rows="2" maxlength="500" required placeholder="{{ t('admin.prompt') }}"></textarea>
+  <button type="submit">{{ t("admin.run_probe") }}</button>
+</form>
+{% if probe %}
+<article data-probe-result data-ok="{{ probe.ok | lower }}">
+  <p><strong>{{ t("admin.probe_ok") if probe.ok else t("admin.probe_failed") }}</strong> · {{ probe.latency_ms }} ms · {{ probe.prompt_tokens if probe.prompt_tokens is not none else "—" }} / {{ probe.completion_tokens if probe.completion_tokens is not none else "—" }} · {{ probe.estimated_cost_usd if probe.estimated_cost_usd is not none else "—" }} USD</p>
+  {% if probe.category_text %}<p data-error-category="{{ probe.error_category }}">{{ probe.category_text }}</p>{% endif %}
+  {% if probe.preview %}<pre data-preview>{{ probe.preview }}</pre>{% endif %}
+</article>
+{% endif %}
+{% endif %}
