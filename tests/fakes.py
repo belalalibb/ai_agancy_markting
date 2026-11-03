@@ -948,6 +948,7 @@ class FakeWhatsAppRepository:
         self.accounts: dict[UUID, object] = {}
         self.conversations: dict[UUID, object] = {}
         self.messages: dict[UUID, object] = {}
+        self.pricing: dict[str, tuple[bool | None, str | None]] = {}  # SPRINT-13 B-1
         self.drafts: dict[UUID, object] = {}
         self.signals: dict[UUID, object] = {}
         self.attributions: dict[UUID, object] = {}  # SPRINT-12 B-2
@@ -1214,6 +1215,7 @@ class FakeWhatsAppRepository:
         *,
         brand_id: UUID,
         error_code,  # noqa: ANN001
+        pricing=None,  # noqa: ANN001 - SPRINT-13 B-1 (billable, category)
     ) -> bool:
         from src.modules.whatsapp.domain.models import delivery_transition_allowed
 
@@ -1225,6 +1227,8 @@ class FakeWhatsAppRepository:
                 if error_code is not None:
                     update["error_code"] = error_code
                 self.messages[mid] = m.model_copy(update=update)
+                if pricing is not None:  # SPRINT-13 B-1: recorded for the webhook tests
+                    self.pricing[wamid] = pricing
                 return True
         return False
 

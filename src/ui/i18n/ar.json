@@ -333,5 +333,15 @@
   "error.publish_job_not_found": "مهمة النشر غير موجودة.",
   "error.flag_unknown": "مفتاح غير معروف.",
   "alert.wa_monthly_service_80pct": "رسائل الخدمة الشهرية لواتساب تجاوزت ٨٠٪ من السقف",
-  "admin.channel": "القناة"
+  "admin.channel": "القناة",
+  "settings.wa_quality": "جودة الرقم",
+  "settings.wa_messaging_limit": "حد الرسائل من ميتا",
+  "settings.wa_daily_cap": "ردود اليوم / الحد اليومي",
+  "settings.wa_unknown": "غير معروف بعد",
+  "settings.wa_stopped_reason": "سبب التوقف",
+  "settings.wa_stopped_kill": "أوقفت الإدارة هذا الرقم مؤقتًا (مفتاح الإيقاف).",
+  "settings.wa_stopped_cap": "وصل الرقم إلى حده اليومي؛ يُستأنف الإرسال غدًا.",
+  "wa_quality.GREEN": "جيدة",
+  "wa_quality.YELLOW": "متوسطة",
+  "wa_quality.RED": "منخفضة"
 }

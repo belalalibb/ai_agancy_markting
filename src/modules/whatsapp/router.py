@@ -397,13 +397,23 @@ async def rotate_account_credentials(
     summary="The brand's WhatsApp account — OWNER/MANAGER",
 )
 async def get_account(
-    brand_id: UUID, actor: CurrentUser, resolver: Resolver, service: Accounts
+    brand_id: UUID, actor: CurrentUser, resolver: Resolver, service: Accounts, repo: Repo
 ) -> WhatsAppAccountPublic:
+    """SPRINT-13 B-2 (D-082): the read also carries the number's caps + today's reply count
+    (read-only; VIEWER stays 403 as before)."""
     await _authorise(resolver, actor.tenant_id, brand_id, CONNECTION_WRITE_ROLES)
     try:
-        return WhatsAppAccountPublic.from_domain(await service.get_account(brand_id))
+        account = await service.get_account(brand_id)
     except WhatsAppError as exc:
         raise to_http(exc) from exc
+    now = datetime.now(tz=UTC)
+    cap = await repo.get_number_cap(account.id)
+    used = await repo.count_outbound_since(
+        account.id, since=now.replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    return WhatsAppAccountPublic.from_domain(
+        account, cap=cap, default_cap=DEFAULT_DAILY_REPLY_CAP, replies_today=used
+    )
 
 
 @router.delete(

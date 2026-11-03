@@ -31,6 +31,7 @@ MAX_REPLY_TEMPLATES = 10
 GoalKind = Literal["awareness", "leads", "sales", "retention"]
 CompetitorKind = Literal["direct", "indirect"]
 RevisionSource = Literal["human", "ai_suggested"]
+Sector = Literal["restaurants", "clinics"]  # SPRINT-13 B-3 = playbooks.SECTORS
 
 
 class _Strict(BaseModel):
@@ -75,6 +76,7 @@ class BrandProfile(BaseModel):
     audience: Audience = Field(default_factory=Audience)
     tone: Tone = Field(default_factory=Tone)
     goals: list[Goal] = Field(default_factory=list, max_length=MAX_GOALS)
+    sector: Sector | None = None  # SPRINT-13 B-3 (migration 0017): drives the playbook card
     version: int = Field(default=1, ge=1)
     updated_by_user_id: UUID | None = None
     updated_at: datetime

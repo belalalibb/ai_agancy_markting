@@ -362,3 +362,50 @@ def test_b1_webhook_bad_timestamp_falls_back_to_now(
         assert _post(client, payload).status_code == 200
     (message,) = wa_repo.messages.values()
     assert message.platform_timestamp >= before
+
+
+# ------------------------------------------------- SPRINT-13 B-1 pricing ---------
+async def test_status_webhook_fills_billable_and_pricing_category(
+    wa_app: FastAPI, wa_repo: FakeWhatsAppRepository, wa_account
+) -> None:
+    """``statuses[].pricing = {billable, category}`` ⇒ ``(billable, category)`` reaches the
+    repository; a status without the block passes ``None`` (columns stay NULL)."""
+    from src.modules.whatsapp.webhook import _pricing
+
+    assert _pricing({"billable": True, "category": "service", "pricing_model": "CBP"}) == (
+        True,
+        "service",
+    )
+    assert _pricing({"billable": "yes", "category": ""}) == (None, None)
+    assert _pricing(None) is None and _pricing([1]) is None
+    conv = await wa_repo.upsert_conversation_inbound(
+        brand_id=BRAND_ID,
+        account_id=wa_account.id,
+        wa_id="201234567890",
+        profile_name=None,
+        at=datetime.now(tz=UTC),
+        window_expires_at=datetime.now(tz=UTC) + timedelta(hours=24),
+    )
+    await wa_repo.insert_outbound(
+        Message(
+            conversation_id=conv.id,
+            brand_id=BRAND_ID,
+            direction=Direction.OUTBOUND,
+            wamid="wamid.OUT0001",
+            kind=MessageKind.TEXT,
+            body="hi",
+            delivery_status=DeliveryStatus.SENT,
+            created_at=datetime.now(tz=UTC),
+        )
+    )
+    with TestClient(wa_app) as client:
+        res = _post(client, load_payload("status_delivered"))
+        assert res.status_code == 200 and res.json()["status_updates"] == 1
+        assert wa_repo.pricing == {"wamid.OUT0001": (True, "service")}
+        bare = load_payload("status_delivered")
+        status = bare["entry"][0]["changes"][0]["value"]["statuses"][0]
+        status.pop("pricing")
+        status["status"] = "read"  # forward transition without a pricing block
+        res = _post(client, bare)
+        assert res.status_code == 200 and res.json()["status_updates"] == 1
+        assert wa_repo.pricing == {"wamid.OUT0001": (True, "service")}  # unchanged

@@ -128,6 +128,18 @@ _DAILY_CAP = text(
     "WHERE a.status = 'active' AND (c.kill_switch IS NULL OR c.kill_switch = false)"
 )
 
+# SPRINT-13 B-1 (D-082/Q16): billable outbound service messages per number in the calendar
+# month. ``billable IS NULL`` counts (conservative: the webhook ``pricing`` block may be absent).
+_MONTHLY_SERVICE = text(
+    "SELECT a.id, a.brand_id, count(m.id) AS used "
+    "FROM whatsapp_accounts a JOIN wa_conversations v ON v.account_id = a.id "
+    "JOIN wa_messages m ON m.conversation_id = v.id "
+    "WHERE a.status = 'active' AND m.direction = 'outbound' AND m.created_at >= :month_start "
+    "AND (m.billable IS TRUE OR m.billable IS NULL) "
+    "AND (m.pricing_category IS NULL OR m.pricing_category = 'service') "
+    "GROUP BY a.id, a.brand_id HAVING count(m.id) >= :threshold"
+)
+
 
 class PgPulseRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -311,6 +323,28 @@ class PgPulseRepository:
                 )
             )
         return out
+
+    async def monthly_service_near(
+        self, now: datetime, *, threshold: int, cap: int
+    ) -> list[Finding]:
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        rows = await self._session.execute(
+            _MONTHLY_SERVICE, {"month_start": month_start, "threshold": threshold}
+        )
+        return [
+            Finding(
+                brand_id=brand_id,
+                kind="wa_monthly_service_80pct",
+                severity="warning",
+                payload={
+                    "ref": f"{account_id}:{month_start.strftime('%Y-%m')}",
+                    "account_id": str(account_id),
+                    "count": int(used),
+                    "cap": cap,
+                },
+            )
+            for account_id, brand_id, used in rows.all()
+        ]
 
 
 __all__ = ["PgPulseRepository", "PulseAlertRow"]

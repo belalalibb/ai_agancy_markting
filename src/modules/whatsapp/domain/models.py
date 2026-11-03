@@ -150,6 +150,9 @@ class WhatsAppAccount(BaseModel):
     encrypted_app_secret: str = Field(repr=False, exclude=True)
     verify_token_hash: str = Field(repr=False, exclude=True)
     status: AccountStatus = AccountStatus.ACTIVE
+    # SPRINT-13 B-2 (migration 0017): Meta quality signals, read-only for the brand.
+    quality_rating: str | None = Field(default=None, max_length=16)
+    messaging_limit: str | None = Field(default=None, max_length=32)
     created_by_user_id: UUID
     created_at: datetime
     updated_at: datetime

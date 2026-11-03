@@ -28,6 +28,7 @@ from src.modules.brand_brain.domain.models import (
     Goal,
     Product,
     Recommendation,
+    Sector,
     Tone,
 )
 
@@ -52,6 +53,8 @@ class ProfileUpdate(_Strict):
     audience: Audience = Field(default_factory=Audience)
     tone: ToneInput = Field(default_factory=ToneInput)
     goals: list[Goal] = Field(default_factory=list, max_length=MAX_GOALS)
+    # SPRINT-13 B-3: omitted ⇒ the stored sector is preserved; ``null`` clears it.
+    sector: Sector | None = None
 
 
 class TonePublic(_Strict):
@@ -68,6 +71,7 @@ class ProfilePublic(_Strict):
     audience: Audience
     tone: TonePublic
     goals: list[Goal]
+    sector: Sector | None = None  # SPRINT-13 B-3
     version: int
     updated_by_user_id: UUID | None
     updated_at: datetime
@@ -87,6 +91,7 @@ class ProfilePublic(_Strict):
                 reply_templates=list(tone.reply_templates) if private else None,
             ),
             goals=list(profile.goals),
+            sector=profile.sector,
             version=profile.version,
             updated_by_user_id=profile.updated_by_user_id,
             updated_at=profile.updated_at,

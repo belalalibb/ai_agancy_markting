@@ -51,6 +51,9 @@ class WhatsAppAccountRow(Base):
     encrypted_app_secret: Mapped[str] = mapped_column(Text, nullable=False)
     verify_token_hash: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    # SPRINT-13 B-2 (migration 0017): Meta quality signals (read-only for OWNER/MANAGER).
+    quality_rating: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    messaging_limit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts()
@@ -212,6 +215,9 @@ class MessageRow(Base):
     template_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     delivery_status: Mapped[str] = mapped_column(String(16), nullable=False)
     error_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # SPRINT-13 B-1 (migration 0017): filled from the webhook ``statuses[].pricing`` block.
+    billable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    pricing_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     sent_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     reply_draft_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

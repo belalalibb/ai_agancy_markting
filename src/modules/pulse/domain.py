@@ -17,6 +17,7 @@ AlertKind = Literal[
     "plan_counter_80pct",  # (6) ≥ 80% of any plan counter consumed
     "wa_quality_degraded",  # (7) quality_rating / messaging_limit degraded
     "wa_daily_cap_80pct",  # (8) ≥ 80% of the number's daily reply cap
+    "wa_monthly_service_80pct",  # (9) ≥ 800 billable service messages / number / month (D-082)
 ]
 ALERT_KINDS: tuple[str, ...] = AlertKind.__args__  # type: ignore[attr-defined]
 Severity = Literal["info", "warning", "critical"]
@@ -99,7 +100,7 @@ class PulseRepository(Protocol):
         self, brand_id: UUID, alert_id: UUID, *, actor_user_id: UUID, now: datetime
     ) -> Alert | None: ...
 
-    # --- the eight checks (read-only SQL over other modules' tables) ---
+    # --- the nine checks (read-only SQL over other modules' tables) ---
     async def window_closing(self, now: datetime, *, within_seconds: int) -> list[Finding]: ...
 
     async def slow_replies(self, now: datetime, *, threshold_seconds: int) -> list[Finding]: ...
@@ -113,6 +114,10 @@ class PulseRepository(Protocol):
     async def quality_degraded(self, now: datetime) -> list[Finding]: ...
 
     async def daily_cap_near(self, now: datetime, *, ratio: float) -> list[Finding]: ...
+
+    async def monthly_service_near(
+        self, now: datetime, *, threshold: int, cap: int
+    ) -> list[Finding]: ...
 
 
 __all__ = [

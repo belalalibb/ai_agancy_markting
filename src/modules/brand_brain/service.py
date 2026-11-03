@@ -531,6 +531,8 @@ def _apply(
             "audience": payload.audience,
             "tone": tone,
             "goals": list(payload.goals),
+            # SPRINT-13 B-3: only an explicit ``sector`` key changes the stored value.
+            "sector": payload.sector if "sector" in payload.model_fields_set else base.sector,
             "updated_by_user_id": actor,
             "updated_at": now,
         }

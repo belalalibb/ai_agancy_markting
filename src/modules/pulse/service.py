@@ -27,6 +27,8 @@ PUBLISH_FAILED_HOURS = 24  # (4)
 TOKEN_EXPIRING_DAYS = 7  # (5)
 COUNTER_RATIO = 0.8  # (6)
 DAILY_CAP_RATIO = 0.8  # (8)
+MONTHLY_SERVICE_CAP = 1000  # (9) free service conversations per number per month (D-082/Q16)
+MONTHLY_SERVICE_THRESHOLD = 800  # (9) = 80 % of the cap
 
 
 def counter_findings(rows: list[CounterUsage], *, ratio: float = COUNTER_RATIO) -> list[Finding]:
@@ -69,6 +71,9 @@ class Pulse:
             found += counter_findings(await self._counters.usage(now))
         found += await self._repo.quality_degraded(now)
         found += await self._repo.daily_cap_near(now, ratio=DAILY_CAP_RATIO)
+        found += await self._repo.monthly_service_near(
+            now, threshold=MONTHLY_SERVICE_THRESHOLD, cap=MONTHLY_SERVICE_CAP
+        )
         return found
 
     async def run(self, now: datetime | None = None) -> list[Alert]:

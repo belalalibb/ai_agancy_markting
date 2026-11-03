@@ -498,7 +498,10 @@ async def _today_ctx(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
         f"/brands/{brand_id}/content/items", status="pending_approval", limit=TODAY_LIMIT
     )
     playbooks = await api.get("/playbooks")
-    sector = (frame["brand"].get("sector") or "").strip()  # no brand sector field yet ⇒ ""
+    # SPRINT-13 B-3: the stored ``brand_profiles.sector`` drives the card (``?sector=`` on the
+    # page stays an override when nothing is stored).
+    profile = await _optional(api, f"/brands/{brand_id}/brain/profile")
+    sector = ((profile or {}).get("sector") or "").strip()
     chosen = next((p for p in playbooks if p["sector"] == sector), None)
     return {
         **frame,
@@ -525,7 +528,7 @@ async def _today_page(
         user, data = await _call(request, settings, user, lambda api: _today_ctx(api, brand_id))
     except ApiError as exc:
         return _api_failure(request, settings, user, exc)
-    if data["playbook"] is None and sector:  # D-4: no ``brand_profiles.sector`` yet ⇒ select
+    if data["playbook"] is None and sector:  # D-4 / B-3: ``?sector=`` override when unset
         data["playbook"] = next((p for p in data["playbooks"] if p["sector"] == sector), None)
     ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash}
     name = "partials/today_cards.html" if _is_partial(request) else "today.html"

@@ -24,6 +24,14 @@
     <header><strong>{{ t("settings.whatsapp") }}</strong></header>
     {% if wa %}
     <p data-wa-phone>{{ t("settings.phone") }}: {{ wa.display_phone }} · <small>{{ t("wa_status." ~ wa.status) }}</small></p>
+    {# SPRINT-13 B-2 (D-082): read-only quality + caps; the owner sees why sending stopped. #}
+    <ul data-wa-economics>
+      <li data-wa-quality>{{ t("settings.wa_quality") }}: {{ t("wa_quality." ~ wa.quality_rating) if wa.quality_rating in ("GREEN", "YELLOW", "RED") else t("settings.wa_unknown") }}</li>
+      <li data-wa-limit>{{ t("settings.wa_messaging_limit") }}: {{ wa.messaging_limit or t("settings.wa_unknown") }}</li>
+      <li data-wa-cap>{{ t("settings.wa_daily_cap") }}: {{ wa.replies_today if wa.replies_today is not none else "—" }} / {{ wa.daily_reply_cap if wa.daily_reply_cap is not none else "—" }}</li>
+    </ul>
+    {% if wa.kill_switch %}<p data-wa-stopped="kill_switch"><mark>{{ t("settings.wa_stopped_reason") }}: {{ t("settings.wa_stopped_kill") }}</mark></p>
+    {% elif wa.daily_reply_cap is not none and wa.replies_today is not none and wa.replies_today >= wa.daily_reply_cap %}<p data-wa-stopped="daily_cap"><mark>{{ t("settings.wa_stopped_reason") }}: {{ t("settings.wa_stopped_cap") }}</mark></p>{% endif %}
     {% else %}<p data-empty>{{ t("settings.no_whatsapp") }}</p>{% endif %}
   </article>
 </div>

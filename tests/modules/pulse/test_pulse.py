@@ -96,6 +96,11 @@ class FakePulseRepository:
     async def daily_cap_near(self, now: datetime, *, ratio: float) -> list[Finding]:
         return self._check("daily_cap_near", "wa_daily_cap_80pct")
 
+    async def monthly_service_near(
+        self, now: datetime, *, threshold: int, cap: int
+    ) -> list[Finding]:
+        return self._check("monthly_service_near", "wa_monthly_service_80pct")
+
 
 class FakeCounters:
     def __init__(self, rows: list[CounterUsage]) -> None:
@@ -110,7 +115,7 @@ def _finding(kind: str, ref: str, brand_id: UUID = BRAND_ID, severity: str = "wa
 
 
 # ------------------------------------------------------------------------ service ---
-async def test_pulse_runs_all_eight_checks_and_is_idempotent_until_ack() -> None:
+async def test_pulse_runs_all_nine_checks_and_is_idempotent_until_ack() -> None:
     counters.reset()
     repo = FakePulseRepository()
     repo.findings = [
@@ -140,6 +145,7 @@ async def test_pulse_runs_all_eight_checks_and_is_idempotent_until_ack() -> None
         "token_expiring",
         "quality_degraded",
         "daily_cap_near",
+        "monthly_service_near",  # SPRINT-13 B-1 (9)
     ]
     assert counters["pulse_alerts_created"] == 4
     # second run: everything is still open ⇒ nothing new
@@ -173,7 +179,7 @@ def test_counter_findings_thresholds() -> None:
         "used": 8,
         "limit": 10,
     }
-    assert len(ALERT_KINDS) == 8 and "plan_counter_80pct" in ALERT_KINDS
+    assert len(ALERT_KINDS) == 9 and "plan_counter_80pct" in ALERT_KINDS  # SPRINT-13: +(9)
     alert = out[1].to_alert(NOW)
     assert alert.is_open and alert.ref == "monthly_posts" and alert.created_at == NOW
 
@@ -615,3 +621,26 @@ async def test_pg_plan_counter_usage_reader_scans_active_brands_only() -> None:
     # no active brand ⇒ no further query, empty usage
     empty = PgPlanCounterUsageReader(StubSession([StubResult(rows=[])]))  # type: ignore[arg-type]
     assert await empty.usage(NOW) == []
+
+
+# ------------------------------------------------- SPRINT-13 B-1 check (9) ------
+async def test_pg_pulse_repository_monthly_service_check_9_maps_rows() -> None:
+    """Check (9): one ``warning`` per account at ≥ 800 billable service messages in the
+    calendar month; ``ref`` = ``<account_id>:<YYYY-MM>`` so a new month re-arms it."""
+    acct = uuid4()
+    session = StubSession([StubResult(rows=[(acct, BRAND_ID, 800)])])
+    repo = PgPulseRepository(session)  # type: ignore[arg-type]
+    (m,) = await repo.monthly_service_near(NOW, threshold=800, cap=1000)
+    assert m.kind == "wa_monthly_service_80pct" and m.severity == "warning"
+    assert m.payload == {
+        "ref": f"{acct}:2026-03",
+        "account_id": str(acct),
+        "count": 800,
+        "cap": 1000,
+    }
+    params = session.executed[0][1]
+    assert params == {"month_start": NOW.replace(day=1, hour=0, minute=0), "threshold": 800}
+    sql = str(session.executed[0][0])
+    assert "billable IS TRUE OR m.billable IS NULL" in sql
+    assert "HAVING count(m.id) >= :threshold" in sql
+    assert "wa_messages" in sql and "pricing_category" in sql

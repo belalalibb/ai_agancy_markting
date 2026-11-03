@@ -377,13 +377,30 @@ class WebhookProcessor:
             code = errors[0].get("code")
             error_code = code if isinstance(code, int) else None
         if await self._repo.update_status_by_wamid(
-            wamid, new, brand_id=account.brand_id, error_code=error_code
+            wamid,
+            new,
+            brand_id=account.brand_id,
+            error_code=error_code,
+            pricing=_pricing(raw.get("pricing")),
         ):
             outcome.status_updates += 1
             counters.increment("wa_status_updates")
         else:
             outcome.ignored_status_updates += 1
             counters.increment("wa_status_ignored")
+
+
+def _pricing(raw: object) -> tuple[bool | None, str | None] | None:
+    """SPRINT-13 B-1: ``statuses[].pricing = {billable, category, pricing_model}`` ⇒
+    ``(billable, category)``; absent or malformed ⇒ ``None`` (columns stay NULL)."""
+    if not isinstance(raw, dict):
+        return None
+    billable = raw.get("billable")
+    category = raw.get("category")
+    return (
+        billable if isinstance(billable, bool) else None,
+        category if isinstance(category, str) and category else None,
+    )
 
 
 # ----------------------------------------------------------------------- routes ---
