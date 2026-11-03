@@ -133,9 +133,10 @@ def _conversation(
     inbound_ago: timedelta = timedelta(hours=1),
     brand_id: UUID = BRAND_ID,
     wa_id: str = CUSTOMER,
+    now: datetime | None = None,
 ) -> UUID:
     conv_id = uuid4()
-    at = datetime.now(tz=UTC) - inbound_ago
+    at = (now or datetime.now(tz=UTC)) - inbound_ago
     _run(
         "INSERT INTO wa_conversations (id, brand_id, account_id, wa_id, last_inbound_at, "
         "window_expires_at, unread_count, status, created_at, updated_at) VALUES "
@@ -159,8 +160,14 @@ def _conversation(
 
 
 def _outbound(
-    conv_id: UUID, count: int, *, brand_id: UUID = BRAND_ID, ago: timedelta = timedelta(minutes=1)
+    conv_id: UUID,
+    count: int,
+    *,
+    brand_id: UUID = BRAND_ID,
+    ago: timedelta = timedelta(minutes=1),
+    now: datetime | None = None,
 ) -> None:
+    at = (now or datetime.now(tz=UTC)) - ago
     for _ in range(count):
         _run(
             "INSERT INTO wa_messages (id, conversation_id, brand_id, direction, wamid, kind, "
@@ -172,7 +179,7 @@ def _outbound(
                 "b": brand_id,
                 "w": f"wamid.O.{uuid4()}",
                 "u": OWNER_USER_ID,
-                "at": datetime.now(tz=UTC) - ago,
+                "at": at,
             },
         )
 
@@ -229,6 +236,7 @@ def _publish_job(
     external_post_id: str | None,
     updated_ago: timedelta = timedelta(hours=1),
     brand_id: UUID = BRAND_ID,
+    now: datetime | None = None,
 ) -> UUID:
     item_id, rev_id, job_id = uuid4(), uuid4(), uuid4()
     _run(
@@ -257,7 +265,7 @@ def _publish_job(
             "u": OWNER_USER_ID,
             "ext": external_post_id,
             "err": "permanent" if status == "failed" else None,
-            "upd": datetime.now(tz=UTC) - updated_ago,
+            "upd": (now or datetime.now(tz=UTC)) - updated_ago,
         },
     )
     return job_id
@@ -354,18 +362,31 @@ def test_b3_pulse_eight_checks_create_alerts_once_and_rearm_after_ack(
 ) -> None:
     _seed_world()
     account_id = _wa_account(encryption)
+    # One deterministic clock for every row *and* for ``Pulse.run``: check (8) counts outbound
+    # messages since 00:00 of ``now``'s day, so rows stamped "10 minutes ago" at 00:03 UTC
+    # would fall on the previous day (CI flaked exactly that way). Noon keeps every "N hours
+    # ago" sample inside the same UTC day; every Pulse query binds this clock, never ``now()``.
+    now = datetime.now(tz=UTC).replace(hour=12, minute=0, second=0, microsecond=0)
     # (1) open conversation, unanswered, window closes in 2h
-    closing = _conversation(account_id, inbound_ago=timedelta(hours=22))
+    closing = _conversation(account_id, inbound_ago=timedelta(hours=22), now=now)
     # (2) slow replies: inbound 10h ago, reply 5h ago ⇒ 5h latency > 2h
-    slow = _conversation(account_id, inbound_ago=timedelta(hours=10), wa_id="201000000002")
-    _outbound(slow, 1, ago=timedelta(hours=5))
+    slow = _conversation(
+        account_id, inbound_ago=timedelta(hours=10), wa_id="201000000002", now=now
+    )
+    _outbound(slow, 1, ago=timedelta(hours=5), now=now)
     # (3) BRAND2 has jobs but nothing succeeded in 7 days; (4) a failed job for BRAND
     _publish_job(
-        status="failed", external_post_id=None, updated_ago=timedelta(hours=2), brand_id=BRAND2_ID
+        status="failed",
+        external_post_id=None,
+        updated_ago=timedelta(hours=2),
+        brand_id=BRAND2_ID,
+        now=now,
     )
-    failed = _publish_job(status="failed", external_post_id=None, updated_ago=timedelta(hours=2))
+    failed = _publish_job(
+        status="failed", external_post_id=None, updated_ago=timedelta(hours=2), now=now
+    )
     _publish_job(
-        status="succeeded", external_post_id="999_1", updated_ago=timedelta(hours=1)
+        status="succeeded", external_post_id="999_1", updated_ago=timedelta(hours=1), now=now
     )  # BRAND ok
     # (5) a Meta token expiring in 3 days
     conn_id = uuid4()
@@ -378,11 +399,11 @@ def test_b3_pulse_eight_checks_create_alerts_once_and_rearm_after_ack(
     )
     # (8) 250 of 300 outbound today on the number (≥ 80 %)
     _outbound(
-        closing, 248, ago=timedelta(minutes=10)
+        closing, 248, ago=timedelta(minutes=10), now=now
     )  # + 1 above on ``slow`` = 249 … add one more
-    _outbound(slow, 1, ago=timedelta(minutes=2))
+    _outbound(slow, 1, ago=timedelta(minutes=2), now=now)
 
-    created = asyncio.run(_pulse_run())
+    created = asyncio.run(_pulse_run(now))
     kinds = sorted(a.kind for a in created)
     assert kinds == [
         "meta_token_expiring",
@@ -413,7 +434,7 @@ def test_b3_pulse_eight_checks_create_alerts_once_and_rearm_after_ack(
     assert all(CUSTOMER not in v and "Nour" not in v for v in values)  # wa_id / profile name
 
     # second run ⇒ nothing new (idempotent on open (brand, kind, ref))
-    assert asyncio.run(_pulse_run()) == []
+    assert asyncio.run(_pulse_run(now)) == []
     assert _run("SELECT count(*) FROM pulse_alerts", scalar=True) == 7
 
     # routes: list open, ack the window alert (MANAGER), then the check re-arms
@@ -441,7 +462,7 @@ def test_b3_pulse_eight_checks_create_alerts_once_and_rearm_after_ack(
             headers=integration_headers(integration_settings, OWNER_ID),
         )
         assert res.json()["open_count"] == 4
-    again = asyncio.run(_pulse_run())
+    again = asyncio.run(_pulse_run(now))
     assert [a.kind for a in again] == ["wa_window_closing"]
     assert _run("SELECT count(*) FROM pulse_alerts", scalar=True) == 8
 
