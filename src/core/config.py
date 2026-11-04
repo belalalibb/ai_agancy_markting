@@ -167,6 +167,19 @@ class Settings(BaseSettings):
     # scheduler cycle and skips until the interval has elapsed).
     pulse_interval_seconds: int = Field(default=900, ge=60, le=86_400)
 
+    # --- Data lifecycle (SPRINT-13 C-3, D-081) ----------------------------------------
+    # ``retention_sweep`` runs every ``retention_interval_seconds``; conversations / messages
+    # / drafts older than ``retention_months`` (``retention_months_agency`` for the agency
+    # plan) and ``brand_exports`` older than ``retention_export_hours`` are deleted.
+    # ``RETENTION_DRY_RUN=true`` (default) only counts and writes the ``admin_actions`` row —
+    # the owner flips it in production. ``ai_cost_log`` / ``entitlement_events`` /
+    # ``approval_events`` / ``admin_actions`` are never touched (7 years).
+    retention_dry_run: bool = True
+    retention_interval_seconds: int = Field(default=86_400, ge=60, le=604_800)
+    retention_months: int = Field(default=12, ge=1, le=120)
+    retention_months_agency: int = Field(default=24, ge=1, le=120)
+    retention_export_hours: int = Field(default=24, ge=1, le=720)
+
     # --- Scheduler / publishing (SPRINT-07 B3) ------------------------------------------
     # Off by default (tests, dev). The worker loop is started in ``lifespan`` only when on.
     scheduler_enabled: bool = False

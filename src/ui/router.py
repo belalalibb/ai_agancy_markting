@@ -1094,6 +1094,64 @@ async def revoke_grant(
     )
 
 
+@router.post("/b/{brand_id}/settings/export")
+async def export_brand(
+    request: Request, brand_id: UUID, csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None
+) -> Response:
+    """SPRINT-13 C-1 (D-081): request the export, then stream the ZIP back through the
+    ApiClient (D-068) — the browser never talks to ``/api`` directly."""
+    path = f"/brands/{brand_id}/export"
+    gate, flash, created = await _action(request, csrf, "POST", path, None)
+    if gate.response is not None:
+        return gate.response
+    if flash is not None or not isinstance(created, dict):
+        return await _settings_page(request, get_settings(), gate.user, brand_id, flash)
+
+    async def _download(api: ApiClient) -> Any:
+        return await api.request("GET", f"{path}/{created['export_id']}")
+
+    try:
+        user, raw = await _call(request, get_settings(), gate.user, _download)
+    except ApiError as exc:
+        return _api_failure(request, get_settings(), gate.user, exc)
+    if raw.status_code != 200:
+        return await _settings_page(
+            request, get_settings(), user, brand_id, _error_text("generic")
+        )
+    response = Response(
+        raw.content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": raw.headers.get("content-disposition", "attachment"),
+            "X-Export-SHA256": raw.headers.get("x-export-sha256", ""),
+        },
+    )
+    return _with_session(get_settings(), user, response)
+
+
+@router.post("/b/{brand_id}/settings/delete", response_class=HTMLResponse)
+async def delete_brand(
+    request: Request,
+    brand_id: UUID,
+    confirm: Annotated[str, Form()] = "",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """SPRINT-13 C-2 (D-081): ``DELETE /brands/{id}`` with the typed confirmation; on 204
+    the brand is gone ⇒ ``HX-Redirect: /app`` (htmx) or a 303 to ``/app``."""
+    path = f"/brands/{brand_id}"
+    gate, flash, _ = await _action(request, csrf, "DELETE", path, {"confirm": confirm})
+    if gate.response is not None:
+        return gate.response
+    if flash is not None:
+        return await _settings_page(request, get_settings(), gate.user, brand_id, flash)
+    target = f"{APP_PREFIX}/"
+    if _is_partial(request):
+        response: Response = Response(status_code=200, headers={"HX-Redirect": target})
+    else:
+        response = RedirectResponse(target, status_code=303)
+    return _with_session(get_settings(), gate.user, response)
+
+
 # ------------------------------------------------------------------- admin ---
 ADMIN_TABS = ("providers", "models", "routing", "probe", "audit", "dead_letter")  # SPRINT-13
 FLAG_KEYS = ("platform_readonly", "feature_pulse", "feature_lead_loop")  # = ops.domain.FLAG_KEYS

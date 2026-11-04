@@ -39,6 +39,8 @@ from src.modules.content.domain.models import Channel
 from src.modules.entitlements.dependencies import counter_guard_dependency
 from src.modules.entitlements.router import admin_router as entitlements_admin_router
 from src.modules.entitlements.router import router as entitlements_router
+from src.modules.lifecycle.router import router as lifecycle_router
+from src.modules.lifecycle.scheduler_step import retention_step
 from src.modules.ops.guards import (
     feature_flag,
     platform_readonly_guard,
@@ -137,6 +139,7 @@ def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | N
                 for step in (
                     settle_stale_cost_reservations_step(settings),
                     pulse_scheduler_step(settings),
+                    retention_step(settings),  # SPRINT-13 C-3 (D-081), dry-run default
                 )
                 if step is not None
             ),
@@ -237,6 +240,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(diagnosis_share_router, dependencies=suspended)
     api_v1.include_router(diagnosis_public_router)
     api_v1.include_router(ops_admin_router)  # SPRINT-13 A: /admin/{actions,brands,flags,…}
+    # SPRINT-13 C (D-081): export / delete — OWNER + fresh session; brand-suspended writes
+    # still 403 (``suspended``), platform_readonly still 503 (router-level guards above).
+    api_v1.include_router(lifecycle_router, dependencies=suspended)
     # SPRINT-11 C-5 (D-073/D-076): removable — see src/modules/entitlements/REMOVABILITY.md
     api_v1.include_router(entitlements_router)
     api_v1.include_router(entitlements_admin_router)

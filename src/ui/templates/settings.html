@@ -81,4 +81,20 @@
   </form>
 </article>
 {% endif %}
+{% if is_owner %}
+<article data-card="danger">
+  <header><strong>{{ t("settings.danger_title") }}</strong></header>
+  <p>{{ t("settings.danger_export_hint") }}</p>
+  <form method="post" action="{{ base }}/export" data-form="export">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="secondary">{{ t("settings.danger_export") }}</button>
+  </form>
+  <p>{{ t("settings.danger_delete_hint", slug=brand.slug) }}</p>
+  <form method="post" action="{{ base }}/delete" data-form="delete" hx-post="{{ base }}/delete" hx-target="this" hx-swap="none">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="text" name="confirm" required autocomplete="off" placeholder="{{ brand.slug }}">
+    <button type="submit" class="contrast">{{ t("settings.danger_delete") }}</button>
+  </form>
+</article>
+{% endif %}
 {% endblock %}

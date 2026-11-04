@@ -65,6 +65,7 @@ def _concrete(template: str) -> str:
         "diag_id",  # SPRINT-12 C-1 (public diagnosis link)
         "rec_id",  # SPRINT-12.1-B C (UI)
         "job_id",  # SPRINT-13 A-3 (dead-letter requeue)
+        "export_id",  # SPRINT-13 C-1 (brand export)
     ):
         template = template.replace("{" + name + "}", SAMPLE_UUID)
     template = template.replace("{action}", "submit").replace("{tab}", "providers")  # 12.1-B
@@ -94,7 +95,7 @@ def test_protected_route_count_is_reported() -> None:
     # a PATCH-based share; the real routes are POST/DELETE share — documented in §6.)
     # SPRINT-13 A: +8 ops admin (actions, suspend, unsuspend, flags GET/PUT, dead-letter,
     # requeue, alerts) ⇒ 93. (The directive's 95 includes C-1 export ×2 + C-2 delete — Part C.)
-    assert PROTECTED_ROUTE_COUNT == 93, PROTECTED
+    assert PROTECTED_ROUTE_COUNT == 96, PROTECTED  # 85 + 8 ops admin + 3 lifecycle (S13)
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)
@@ -141,7 +142,7 @@ def test_app_routes_redirect_without_session(client: TestClient) -> None:
         for m in sorted(getattr(r, "methods", None) or ())
         if m != "HEAD" and r.path not in {"/app/login", "/app/logout"}
     ]
-    assert len(guarded) == 24, guarded
+    assert len(guarded) == 26, guarded  # SPRINT-13 C: settings export + delete
     for method, template in guarded:
         path = _concrete(template)
         for cookies in ({}, {"app_session": "expired.or.garbage"}):

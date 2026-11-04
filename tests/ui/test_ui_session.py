@@ -50,13 +50,13 @@ def _concrete(template: str) -> str:
 
 def test_ui_routes_are_hidden_from_openapi_and_counted(ui_app: FastAPI) -> None:
     """The ``/app`` surface is HTML, not API: it must not appear in the OpenAPI contract
-    (``tests/test_auth_guard.py`` stays at 84 protected ops) — 27 routes, 24 session-guarded
+    (``tests/test_auth_guard.py`` stays at 84 protected ops) — 29 routes, 26 session-guarded
     (GET/POST login + POST logout are exempt). SPRINT-12.1-B C added 12: content (GET + 2
     POST), diagnosis (GET + 2 POST), settings (GET + 5 POST)."""
     spec_paths = ui_app.openapi()["paths"]
     assert not any(path.startswith("/app") for path in spec_paths)
-    assert len(ui_router.routes) == 27
-    assert len(APP_OPERATIONS) == 24
+    assert len(ui_router.routes) == 29  # SPRINT-13 C: +2 (settings export / delete)
+    assert len(APP_OPERATIONS) == 26
 
 
 @pytest.mark.parametrize(("method", "template"), APP_OPERATIONS, ids=IDS)

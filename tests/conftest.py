@@ -274,7 +274,7 @@ def app(
     )
     from src.modules.whatsapp.lead_loop import get_published_post_lookup
 
-    from tests.fakes import FakeOpsRepository
+    from tests.fakes import FakeLifecycleRepository, FakeOpsRepository
 
     seed_world(store)
     application = create_app(settings)
@@ -290,6 +290,15 @@ def app(
     application.dependency_overrides[get_admin_audit] = lambda: AdminAudit(
         OpsService(application.state.ops_repo)
     )
+    # SPRINT-13 C (D-081): lifecycle routes over the same in-memory world; no outbound client
+    # in the unit app ⇒ ``unsubscribe=skipped`` unless a test overrides ``get_unsubscriber``.
+    from src.modules.lifecycle.router import get_lifecycle_repository, get_unsubscriber
+
+    application.state.lifecycle_repo = FakeLifecycleRepository(store)
+    application.dependency_overrides[get_lifecycle_repository] = lambda: (
+        application.state.lifecycle_repo
+    )
+    application.dependency_overrides[get_unsubscriber] = lambda: None
     application.dependency_overrides[get_repository] = lambda: fake_repo
     application.dependency_overrides[get_status_marker] = lambda: status_marker
     # SPRINT-12 B-2 (D-079): ``main.py`` binds the PG-backed published-post lookup; the

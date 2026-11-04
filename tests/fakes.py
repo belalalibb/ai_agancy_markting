@@ -1948,3 +1948,71 @@ class FakeOpsRepository:
 
     async def admin_alerts(self, *, kind: str, limit: int) -> list[dict[str, Any]]:
         return [a for a in self.alerts if a["kind"] == kind][:limit]
+
+
+class FakeLifecycleRepository:
+    """In-memory ``PgLifecycleRepository`` twin (SPRINT-13 Part C, D-081). ``entities`` holds
+    the rows each export entity returns; ``pages`` the (page_id, encrypted_token) pairs the
+    delete must unsubscribe; ``sweep_counts`` what a sweep reports."""
+
+    def __init__(self, store: FakeStore | None = None) -> None:
+        self.store = store
+        self.entities: dict[str, list[dict[str, Any]]] = {}
+        self.exports: dict[UUID, tuple[Any, bytes | None]] = {}
+        self.pages: list[tuple[str, str]] = []
+        self.deleted: list[UUID] = []
+        self.sweeps: list[dict[str, Any]] = []
+        self.sweep_counts: dict[str, int] = {"wa_messages": 0, "brand_exports": 0}
+
+    async def read_entity(self, entity: str, brand_id: UUID, *, limit: int) -> list[dict]:
+        rows = self.entities.get(entity)
+        if rows is None and self.store is not None and entity == "brand":
+            brand = self.store.brands.get(brand_id)
+            rows = [] if brand is None else [{"id": str(brand.id), "name": brand.name}]
+        return list(rows or [])[: limit + 1]
+
+    async def add_export(self, export: Any, blob: bytes | None) -> Any:
+        self.exports[export.id] = (export, blob)
+        return export
+
+    async def get_export(
+        self, brand_id: UUID, export_id: UUID, *, not_before: datetime
+    ) -> tuple[Any, bytes | None] | None:
+        found = self.exports.get(export_id)
+        if found is None or found[0].brand_id != brand_id or found[0].created_at < not_before:
+            return None
+        return found
+
+    async def brand_names(self, brand_id: UUID) -> tuple[str, str] | None:
+        if self.store is None:
+            return None
+        brand = self.store.brands.get(brand_id)
+        return None if brand is None else (brand.slug, brand.name)
+
+    async def page_tokens(self, brand_id: UUID) -> list[tuple[str, str]]:
+        return list(self.pages)
+
+    async def delete_brand(self, brand_id: UUID) -> bool:
+        if self.store is None or brand_id not in self.store.brands:
+            return False
+        self.store.brands.pop(brand_id)
+        self.deleted.append(brand_id)
+        return True
+
+    async def sweep(
+        self,
+        *,
+        cutoff_default: datetime,
+        cutoff_agency: datetime,
+        export_cutoff: datetime,
+        dry_run: bool,
+    ) -> dict[str, int]:
+        self.sweeps.append(
+            {
+                "cutoff_default": cutoff_default,
+                "cutoff_agency": cutoff_agency,
+                "export_cutoff": export_cutoff,
+                "dry_run": dry_run,
+            }
+        )
+        return dict(self.sweep_counts)
