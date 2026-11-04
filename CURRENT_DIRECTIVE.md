@@ -1,6 +1,6 @@
 # 🎯 CURRENT DIRECTIVE — التوجيه التنفيذي النشط
 
-> **المصدر الوحيد للمهمة الحالية.** SPRINT-12.1-B رُوجع مستقلاً على PostgreSQL 17.11 UTF8 و**قُبل ودُمج** (PR #52 ⇒ `main @ 29205d6`؛ التقرير [`sprints/SPRINT-12.1-B_REVIEW.md`](./sprints/SPRINT-12.1-B_REVIEW.md): U1–U4 **معكوسة حياً** بمسبار مستقل، XSS/السرّ/الأدمن 404 مُثبتة). **الحظر التشغيلي على `/app` مرفوع** بشرط `--workers 1` (N1). **بوابة TTFV/App Review مفتوحة للمالك** (§7). هذا التوجيه = **SPRINT-13 — تشغيل اليوم الثاني (Day-2 Ops)** وفق `sprints/POST_M7_STRATEGIC_PLAN.md` §4-ب/§4-ج وD-081/D-082.
+> **المصدر الوحيد للمهمة الحالية.** SPRINT-13 (PR #55 @ `1738e56`) رُوجع مستقلاً على PostgreSQL 17.11 ([`sprints/SPRINT-13_REVIEW.md`](./sprints/SPRINT-13_REVIEW.md)): البوابات خضراء (ruff 0/0 · 0017 ذهاباً وإياباً · تكامل 153/0) **لكن الفرضيات الخمس S13-1..S13-5 ثبتت حيّاً** وأربعة معايير Must-Have مكسورة ⇒ **القرار: لا دمج؛ تصحيح على الفرع نفسه أولاً (SPRINT-13.1-FIX)**، ثم SPRINT-14 (الانضمام الذاتي بالعربية).
 
 ---
 
@@ -8,149 +8,105 @@
 
 | البند | القيمة |
 |---|---|
-| **معرف المهمة** | `SPRINT-13-DAY2-OPS` |
-| **النوع** | **A** صلابة التشغيل (أدوات الإدارة + مفاتيح الإيقاف من DB + dead-letter مرئي + تنبيه التوكنات) ⇒ **B** اقتصاد واتساب (D-082 الجزء 2: تنبيه 800/شهر + `quality_rating` للمالك) + قرارات 12.1-B (أ/ب) ⇒ **C** دورة حياة البيانات (D-081: تصدير/حذف/احتفاظ) + تمرين الاستعادة |
-| **الحالة** | `ISSUED` — جاهز فور دمج هذا التوجيه في `main` (المخطط يدمجه — D-063) |
-| **يبدأ من** | `main` @ **SHA دمج هذا التوجيه** (يسجَّل في `WORK_STATE.md` §6). أول أمر: `git checkout work/implementation && git fetch origin && git merge --ff-only origin/main` |
-| **الفرع المستهدف** | `work/implementation` ⇒ **PR واحد** بعنوان `SPRINT-13: Day-2 Ops — admin_actions + kill switches + dead-letter + WA economics (D-082/2) + data lifecycle (D-081)` |
-| **الكوميتات (بالترتيب، كلٌّ يُدفع فور اكتماله)** | **A** `feat(sprint-13): admin_actions audit + DB kill switches + dead-letter requeue + token-expiry alert` · **B** `feat(sprint-13): WA economics — monthly service-message alert, quality_rating for OWNER, brand sector` · **C** `feat(sprint-13): data lifecycle — export/delete brand, retention sweep (D-081), restore drill doc` · **docs** `docs(sprint-13): §6 report` |
-| **الهجرة** | **واحدة فقط: `0017_day2_ops`** تحمل كل أعمدة/جداول A+B+C (ذهاباً وإياباً على PG 17). لا هجرة ثانية. |
-| **الحجم المتوقع (G6)** | A ≈ 650 · B ≈ 400 · C ≈ 550 ⇒ **≈ 1,600 سطر `src/` (py فقط، JSON/HTML لا يُحسبان) ≤ 1,700**. صمّام §1-ج. **التقرير بالامتداد:** `git diff --numstat origin/main -- src \| awk` مجموعات `py/html/json` (درس 12.1-B #14). |
-| **المالك** | 🔑 تدوير التوكن (≥ 25 ظهوراً) · TTFV + فيديوهات App Review (§7) · `PLATFORM_ADMIN_USER_IDS` · `--workers 1`. |
+| **معرف المهمة** | **`SPRINT-13.1-FIX`** (الآن) ⇒ `SPRINT-14-SELF-SERVE` (بعد دمج #55) |
+| **الحالة** | `ISSUED` — المنفذ يبدأ فور دمج هذا التوجيه في `main` (D-063) |
+| **يبدأ من** | `work/implementation` @ `1738e56` **نفسه** (لا فرع جديد، لا rebase): `git checkout work/implementation && git fetch origin && git merge origin/main` (يجلب توجيه المخطط فقط — لا تعارض في `src/`) |
+| **الفرع المستهدف** | **PR #55 نفسه** — كوميت واحد `fix(sprint-13.1): requeue attempt continuity + D-070 + export allowlist/revisions + unsubscriber guard + DB-flag scheduler + admin brand view` + كوميت docs §6 |
+| **الهجرة** | **لا هجرة.** 0017 مقبولة كما هي |
+| **الحجم** | **≤ 500 سطر `src/*.py`** مُضاف (F-1..F-5 لا تُقطع؛ F-6/F-7 تُختزل عند الحاجة) |
+| **CI** | 6/6 قبل طلب المراجعة؛ المخطط يراجع **الفرق** `1738e56..HEAD` ويعيد مسبار S13-1..5 حرفياً |
+| **المالك** | 🔑 **تدوير التوكن (≥ 26 ظهوراً)** · `--workers 1` · TTFV/App Review بعد دمج #55 (§7) |
 
 ---
 
 ## 0. قواعد ثابتة (لا تتغير)
 
-1. **لا تلمس:** `src/modules/auth/*` (باستثناء البند A-4 المحدَّد أدناه بسطرٍ واحد)، `src/core/contract.py`, `src/core/public_fetch.py`, `pyproject.toml` (لا اعتمادية جديدة — D-054)، وأي هجرة قبل 0017.
-2. **لا `ErrorCategory` جديدة** (12 ثابتة). أخطاء الوحدات الجديدة = أكواد حرفية في `exceptions.py` الخاصة بالوحدة + ترجمة `ar.json`.
-3. **D-068 No-Bypass:** الواجهة `src/ui` تنادي الـAPI عبر `ApiClient` فقط؛ لا `sqlalchemy`/`.infrastructure`/`httpx` فيها.
-4. **D-069:** لا نص عميل في `pulse_alerts.payload` ولا في `admin_actions.before/after` (معرّفات وأعداد فقط).
-5. **D-055:** كل فعل إداري حدثٌ واحد؛ **D-070:** لا إعادة محاولة عمياء.
-6. **كل كوميت يُدفع فور اكتماله** (الساندبوكس يُعاد ضبطه كل 1–2 دور) ويمرّ CI 5/5 قبل التالي.
-7. **المنفذ لا يدمج** (D-063).
-
-### 1-ج. صمّام الحجم (G6) — مرتَّب الأولوية، **لا يُضحّى بالبنود 1–4 أبداً**
-| الأولوية | البند | عند الاقتراب من 1,700 |
-|---|---|---|
-| 1 | A-1 `admin_actions` + A-2 مفاتيح الإيقاف من DB | **لا يُقطع** (شرط App Review/ثقة) |
-| 2 | C-1 تصدير + C-2 حذف العلامة | **لا يُقطع** (Must Have §1-ز) |
-| 3 | A-3 dead-letter مرئي + إعادة طابور | **لا يُقطع** |
-| 4 | B-1 تنبيه 800/شهر + B-2 `quality_rating` للمالك | **لا يُقطع** (D-082) |
-| 5 | A-4 تنبيه التوكنات (تحسين الفحص 5) | يُختزل إلى تنبيه الأدمن فقط |
-| 6 | B-3 `brand_profiles.sector` + ربط الـPlaybook | يُؤجَّل إلى S14 (العمود يبقى في 0017) |
-| 7 | C-3 مهمة الاحتفاظ (retention sweep) | تُختزل إلى «dry-run يُعيد العدّ» بلا حذف |
-| 8 | C-4 `ops/RESTORE_DRILLS.md` + سكربت `scripts/backup_pg.sh` | **لا يُقطع** — وثيقة + سكربت فقط (≈ 80 سطراً) |
-
-تجاوز 1,700 بعد تطبيق 5⇒7 = توقّف وسجّل في §6 لقرار المخطط.
+1. **لا تلمس:** `src/modules/auth/*`, `src/core/contract.py`, `src/core/public_fetch.py`, `pyproject.toml`, `src/modules/brand_brain/internal_metrics.py`. لا تبعية جديدة (D-054).
+2. **لا `ErrorCategory` جديدة.** أكواد حرفية في `exceptions.py` للوحدة + `ar.json`.
+3. **D-068:** `src/ui` عبر `ApiClient` فقط. **D-069:** لا نص عميل في `admin_actions`/`pulse_alerts`. **D-055:** كل فعل حدث. **D-070:** لا إعادة عمياء — **تشمل المسار الإداري**.
+4. كل كوميت يُدفع فوراً؛ المنفذ لا يدمج (D-063). مسابير `_probe_*.py` لا تُرتكب.
 
 ---
 
-## 2. النطاق التفصيلي
+## 1. SPRINT-13.1-FIX — النطاق (مرتَّب الأولوية؛ كل بند يحمل اختبار PG يعكس مخرجات المسبار في المراجعة §2)
 
-### Part A — صلابة التشغيل
+| # | الكسر (المراجعة) | الإصلاح الملزم | اختبار القبول |
+|---|---|---|---|
+| **F-1** | S13-1: `IntegrityError uq_publish_attempts_job_no` بعد requeue ⇒ حلقة أبدية | `_REQUEUE_JOB` **لا يُصفّر `attempt_count`**؛ بدلاً منه `max_attempts = attempt_count + :grace` (`REQUEUE_GRACE_ATTEMPTS=3` افتراضياً) و`next_attempt_at=:now`؛ استجابة `requeue` تعرض `attempt_count` الحقيقي و`max_attempts` الجديد. **مرفوض:** حذف `publish_attempts` القديمة (سجل D-055) | `publish_attempts` = 1..6 بعد requeue + 3 دورات؛ المهمة تنتهي `failed` طبيعياً بلا استثناء |
+| **F-2** | S13-1 (ج) D-070 | `OpsService.requeue` يرفض `last_error_class == 'ambiguous_outcome'` ⇒ **409 `manual_verification_required`** (نفس `content/service.py:316`) | 409 حيّاً + لا صف `admin_actions` |
+| **F-3** | S13-1 (أ)+(ب) | قبل CAS: مهمة `queued/leased` للعنصر ⇒ **409 `publish_in_progress`**؛ `_ITEM_CAS` يفحص `rowcount==1` وإلا **409 `item_not_publish_failed`** مع rollback | retry-ثم-requeue ⇒ 409 لا 500؛ `archived` ⇒ 409 والمهمة تبقى `failed` |
+| **F-4** | S13-3 + S13-4 + §4-2 | **(أ)** `get_unsubscriber`: `if client is None or settings.token_encryption_key is None: return None`. **(ب)** `build_zip`: **قائمة سماح أعمدة لكل كيان** (`EXPORT_COLUMNS` في `domain.py`)؛ `FORBIDDEN_FRAGMENTS` على **أسماء الأعمدة فقط**؛ أي `RuntimeError` ⇒ `LifecycleError('export_failed')`. **(ج)** كيانان جديدان: **`content_revisions`** (`id,item_id,revision_no,body,media_refs,created_at`) و`brand_competitors`. **(د)** إعفاء `POST /brands/{id}/export` و`DELETE /brands/{id}` من `require_brand_not_suspended` (على المسار بدل `main.py:245`) | export بلا مفتاح ⇒ 202؛ رسالة `api_key` ⇒ 202 وتظهر نصاً؛ `revision_body_in_zip=True`؛ OWNER موقوف ⇒ 202/204؛ grep `gAAAA` ⇒ 0 |
+| **F-5** | S13-2 | **`GET /api/v1/admin/brands/{brand_id}`** (`require_ops_admin`؛ `id,name,slug,suspended_at,owner_tenant_id` فقط) + **`GET /api/v1/admin/brands/{brand_id}/whatsapp/summary`** (`display_phone,status,quality_rating,messaging_limit`) ⇒ `_admin_ent_ctx` يستهلكهما. `PROTECTED_ROUTE_COUNT` ⇒ **98** | أدمن غير عضو ⇒ 200 + البطاقات الثلاث؛ غير الأدمن ⇒ 404 |
+| **F-6** | S13-5 | `pulse_step` (و`lead_loop` إن كانت له خطوة) يقرأ `flag_active(repo, settings, "feature_pulse")` **داخل الخطوة كل دورة** عبر `independent_session`؛ `settings.feature_pulse=false` يبقى يمنع التركيب | علم DB=false ⇒ `pulse_step ⇒ 0` ولا صف `pulse_alerts` |
+| **F-7** | المراجعة §7 | `run_once`: `try/except Exception` حول `_process(job)` لكل مهمة + `counters.increment("publish_job_poisoned")` + `logger.exception(job_id)` | مهمة سامة لا تمنع التالية (وحدة بـfake يرمي) |
 
-**A-1 `admin_actions` (سجل تدقيق).** جدول `admin_actions(id, actor_user_id, action, target_kind, target_id, before JSONB, after JSONB, at)` — فهرس `(target_kind, target_id, at desc)`. يُكتب **صفاً واحداً** لكل: `/admin/ai/*` (create/update/delete/routing)، `/admin/entitlements/*` (activate/extend/wa-caps)، A-2 (kill/suspend)، A-3 (requeue)، C-2 (delete brand). الكتابة في **نفس المعاملة** مع الفعل (فشل الفعل ⇒ لا صف). `GET /api/v1/admin/actions?target_kind=&target_id=&limit=` (PlatformAdmin، ≤ 200، الأحدث أولاً). الواجهة: تبويب «السجل» في `/app/admin/ai?tab=audit` يعرض آخر 50 (قراءة فقط).
+**أكواد حرفية جديدة:** `item_not_publish_failed`، `export_failed` (+ إعادة استخدام `manual_verification_required`، `publish_in_progress`). ترجمة `ar.json` لكلٍّ.
 
-**A-2 مفاتيح الإيقاف من DB (لا env).** أعمدة: `brands.suspended_at TIMESTAMPTZ NULL` · جدول `platform_flags(key TEXT PK, value BOOLEAN, updated_at)` بمفتاحَي `platform_readonly` و`feature_pulse`/`feature_lead_loop` (تُقرأ أولاً من DB وإن غابت فمن `Settings` — **لا كسر للسلوك الحالي**). السلوك: `suspended_at IS NOT NULL` ⇒ كل كتابة على العلامة **403 `brand_suspended`** (قراءة تبقى)؛ `platform_readonly=true` ⇒ كل `POST/PUT/PATCH/DELETE` تحت `/api/v1` **503 `platform_readonly`** + `Retry-After: 300` **باستثناء** `/auth/*` و`/admin/*` (حتى يُرفع المفتاح). مسارات: `POST /api/v1/admin/brands/{id}/suspend` + `/unsuspend`، `PUT /api/v1/admin/flags/{key}` (PlatformAdmin). كاش 30 ثانية داخل العملية. الواجهة: زرّان في `/app/admin/entitlements` (بحث العلامة ⇒ suspend/unsuspend بـ`hx-confirm`) + مفاتيح في تبويب `audit`.
-
-**A-3 dead-letter مرئي + إعادة طابور.** `GET /api/v1/admin/publishing/dead-letter?limit=` يعيد مهام `publish_jobs.status='failed'` مع `error_class`/`attempt_count`/`item_id`/`brand_id` (PlatformAdmin). `POST /api/v1/admin/publishing/jobs/{job_id}/requeue` ⇒ `queued` + `attempt_count=0` + `next_attempt_at=now` + عنصر `publish_failed → scheduled` (CAS) + حدث D-055 `requeued_by_admin` + صف `admin_actions`. **409 `job_not_failed`** إن لم تكن `failed`. الواجهة: تبويب `/app/admin/ai?tab=dead_letter` (قائمة + زر إعادة). **لا تغيير في منطق الحجز/الاستعادة الحالي** (`scheduler.py` B6-I3).
-
-**A-4 تنبيه التوكنات.** الفحص 5 `meta_token_expiring` موجود؛ يُضاف **(أ)** سبب `refresh_failed` في `payload` عند فشل تجديد التوكن الدوري (من `social_connect`) **(ب)** تنبيه الأدمن: صف `pulse_alerts` بـ`brand_id` = العلامة ونسخة ملخصة في `GET /api/v1/admin/alerts?kind=meta_token_expiring` (PlatformAdmin). **سطر واحد مسموح في `src/modules/auth`**: لا شيء — إن احتجت تغييراً هناك توقّف وسجّل.
-
-### Part B — اقتصاد واتساب + قرارات 12.1-B
-
-**B-1 تنبيه 800 رسالة خدمة/شهر/رقم (D-082/Q16).** فحص Pulse **(9) `wa_monthly_service_80pct`**: عدّ الرسائل الصادرة `pricing_category='service'`/`billable` للرقم في الشهر التقويمي الحالي ≥ 800 ⇒ تنبيه `warning` بـ`payload={ref:'<account_id>:<YYYY-MM>', count, cap:1000}`؛ idempotent شهرياً. ترجمة `alert.wa_monthly_service_80pct` + `severity` موجودة. **إن لم يوجد عمود `pricing_category`/`billable` على رسائل واتساب** ⇒ أضفه في 0017 (`messages.billable BOOLEAN NULL`, `pricing_category TEXT NULL`) ويُملأ من الـwebhook `pricing` عند توفره؛ الفحص يعدّ `billable IS TRUE OR billable IS NULL` (محافظ) ويُسجَّل ذلك في §6.
-
-**B-2 `quality_rating` والأسقف للمالك (قرار ب = نعم للقراءة).** `WhatsAppAccountPublic` += `quality_rating`, `messaging_limit`, `daily_reply_cap`, `kill_switch`, `replies_today` (قراءة فقط؛ التعديل يبقى أدمن wa-caps). بطاقة واتساب في `/app/b/{id}/settings` تعرضها مترجَمة + سبب التوقف عند `kill_switch` أو السقف (`settings.wa_stopped_reason`).
-
-**B-3 `brand_profiles.sector` (قرار أ = نعم).** عمود `sector TEXT NULL CHECK (sector IN ('restaurants','clinics'))` في 0017؛ `PATCH /api/v1/brands/{id}/brain/profile` يقبله؛ `BrandWithRoleOut`/`BrandProfileOut` يعيده؛ `GET /api/v1/playbooks?sector=` يصبح اختيارياً (يأخذ قطاع العلامة عند `brand_id`)؛ بطاقة «نصائح اليوم» تقرأه بدل `?sector=` غير المُخزَّن (يبقى `?sector=` كتجاوز).
-
-### Part C — دورة حياة البيانات (D-081) + تمرين الاستعادة
-
-**C-1 التصدير.** `POST /api/v1/brands/{id}/export` (OWNER، `CurrentUserFresh`) ⇒ **202** + `export_id`؛ `GET /api/v1/brands/{id}/export/{export_id}` ⇒ `pending|ready|failed` + عند `ready` **ملف ZIP** (JSON لكل كيان: brand/profile/evidence/recommendations/content_items+approval_events/conversations+messages/alerts + `manifest.json` بالأعداد وsha256). التنفيذ **متزامن داخل الطلب لحجم ≤ 5,000 صف لكل كيان** وإلا `413 export_too_large` (الخلفية الحقيقية ⇒ V1.1 — سجّل). التخزين: جدول `brand_exports(id, brand_id, status, requested_by, created_at, ready_at, sha256, byte_size, blob BYTEA)` مع **انتهاء 24 ساعة** (مهمة C-3 تحذف المنتهي). **لا سرّ/توكن في الملف**؛ `learning_consent` والنصوص المُعقَّمة المشتركة **لا تُصدَّر**.
-
-**C-2 الحذف.** `DELETE /api/v1/brands/{id}` موجود أم لا؟ — إن لم يوجد: `DELETE /api/v1/brands/{id}` (OWNER، `CurrentUserFresh`) بتأكيد مزدوج: الجسم `{"confirm": "<brand slug أو name حرفياً>"}` وإلا **422 `confirmation_mismatch`**. الخطوات بالترتيب داخل معاملة واحدة ما أمكن: إبطال اشتراك webhooks Meta (best-effort، فشله لا يوقف الحذف — يُسجَّل في `admin_actions.after.unsubscribe='failed'`)، إبطال/حذف توكنات `social_connect`، حذف تسلسلي (CASCADE موجود في الهجرات؛ `ai_cost_log.brand_id → NULL` D-081)، صف `admin_actions(action='brand_deleted')` **بـ`brand_hash = sha256(brand_id)`** في `after`، ثم **204**. الواجهة: قسم «منطقة الخطر» في `/app/b/{id}/settings` (حقل التأكيد + زر) ⇒ بعد النجاح `HX-Redirect` إلى `/app`.
-
-**C-3 الاحتفاظ (retention sweep).** مهمة دورية `retention_sweep` (كل 24 ساعة، تُقرأ المهلة من `Settings.retention_*`): محادثات/رسائل/مسودات أقدم من **12 شهراً** (24 لـ`agency`) ⇒ حذف؛ `brand_exports` أقدم من 24 ساعة ⇒ حذف؛ **لا تلمس** `ai_cost_log`/`entitlement_events`/`approval_events`/`admin_actions` (7 سنوات). الافتراضي **`RETENTION_DRY_RUN=true`** (يعدّ ويسجّل فقط) — المالك يقلبها في الإنتاج. صف `admin_actions(actor=NULL, action='retention_sweep')` بالأعداد.
-
-**C-4 نسخ احتياطي + تمرين استعادة.** `scripts/backup_pg.sh` (pg_dump `-Fc` ⇒ تشفير بـ`age` أو `openssl enc -aes-256-cbc -pbkdf2` من متغير بيئة — **لا اعتمادية بايثون**) + `scripts/restore_pg.sh` + `ops/RESTORE_DRILLS.md` بقالب: التاريخ، حجم الملف، زمن الاستعادة، عدد الصفوف قبل/بعد، التوقيع. **تمرين فعلي واحد** على PG 17 في CI (job جديد `restore-drill` يستعيد dump العينة ويتحقق من `alembic current == 0017`) — يُوثَّق زمنه في §6.
-
----
-
-## 3. معايير القبول (18)
-
-1. `ruff check . && ruff format --check .` = 0/0 على كل كوميت.
-2. هجرة **0017** ذهاباً وإياباً على PG 17 (`upgrade head` ⇒ `downgrade 0016` ⇒ `upgrade head`) بلا بقايا.
-3. وحدات بلا DB ≥ **95.00%** (دقة 2، نصفان `--cov-append` إن لزم) · 0 فشل.
-4. تكامل PG 17: الحالي 142 + الجديد ≥ **12** (admin_actions نفس المعاملة، suspend ⇒ 403، readonly ⇒ 503 مع استثناء auth/admin، requeue CAS، 800/شهر idempotent، export round-trip sha256، delete ⇒ 204 + `ai_cost_log.brand_id IS NULL` + صف admin_actions بـ`brand_hash`، retention dry-run لا يحذف، confirmation_mismatch 422).
-5. `PROTECTED_ROUTE_COUNT` = **85 + 10** (`GET admin/actions`, `POST/POST suspend/unsuspend`, `PUT admin/flags/{key}`, `GET dead-letter`, `POST requeue`, `GET admin/alerts`, `POST export`, `GET export/{id}`, `DELETE brands/{id}`) = **95** — أو الفعلي مع تبرير في §6. العامة **7** (+2 health) بلا تغيير.
-6. كل مسار `/admin/*` جديد: غير أدمن ⇒ **404** (API) و**404** صفحة (UI) — لا 403.
-7. `admin_actions`: فعل فاشل ⇒ **0 صف** (اختبار معاملة)؛ فعل ناجح ⇒ **صف واحد** بالضبط (D-055).
-8. `platform_readonly=true`: `POST /api/v1/brands/{id}/content/...` ⇒ 503 + `Retry-After`; `POST /api/v1/auth/login` ⇒ 200/401 عادي؛ `PUT /api/v1/admin/flags/platform_readonly` ⇒ 200 (يمكن الرفع).
-9. `brands.suspended_at`: كتابة ⇒ 403 `brand_suspended`؛ قراءة `GET /brands/{id}` ⇒ 200 مع `suspended: true`.
-10. B-1: 799 رسالة ⇒ لا تنبيه؛ 800 ⇒ تنبيه واحد؛ 801 في نفس الشهر ⇒ لا تنبيه ثانٍ؛ شهر جديد ⇒ تنبيه جديد.
-11. B-2: `WhatsAppAccountPublic` لا يحمل أي سرّ/hash (اختبار الحقول)؛ VIEWER لا يراه (403 كما الآن).
-12. C-1: الملف ZIP لا يحتوي `access_token|refresh_token|api_key|gAAAA` (grep على المحتوى)؛ `manifest.sha256` يطابق.
-13. C-2: بعد الحذف `GET /brands/{id}` ⇒ 404؛ `/app/b/{id}/today` ⇒ 404؛ `ai_cost_log` صفوف العلامة باقية بـ`brand_id NULL`.
-14. C-3: `RETENTION_DRY_RUN=true` ⇒ 0 حذف + صف `admin_actions` بالأعداد؛ `false` ⇒ حذف الصفوف الأقدم فقط (اختبار تكامل بتواريخ مُزوَّرة).
-15. C-4: job `restore-drill` أخضر في CI + زمن الاستعادة في §6 + `ops/RESTORE_DRILLS.md` به سطر التمرين الأول.
-16. `src/ui`: greps 12.1-B (httpx/sqlalchemy/infrastructure/CDN/`api_key`/`|safe`/عربية حرفية) = **0**؛ كل نص جديد في `ar.json`؛ `test_i18n_covers_all_enums` يغطي `alert.wa_monthly_service_80pct` وأكواد A/B/C الجديدة.
-17. لا `ErrorCategory` جديدة · لا اعتمادية جديدة · `src/modules/auth` = **0 فرق** · `contract.py`/`public_fetch.py` = 0.
-18. الحجم: py ≤ 1,700 أو صمّام §1-ج مُسجَّل؛ التقرير **بالامتداد**.
-
----
-
-## 4. أوامر التحقق (ينسخها المنفذ حرفياً إلى §6)
-
-```bash
+### 1-ب. أوامر التحقق (ينسخها المنفذ إلى §6)
+```
 ruff check . && ruff format --check .
-alembic upgrade head && alembic downgrade 0016 && alembic upgrade head
-TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ai_growth_os_test pytest tests/integration -q
-pytest tests -q --ignore=tests/integration --cov=src --cov-report=term --cov-precision=2 --cov-fail-under=95
-python -c "from tests.test_auth_guard import PROTECTED_ROUTE_COUNT, PUBLIC; print(PROTECTED_ROUTE_COUNT, len(PUBLIC))"
-git diff --numstat origin/main -- src | awk '{split($3,a,"."); e=a[length(a)]; i[e]+=$1} END {for (k in i) print k, i[k]}'
-git diff origin/main -- src/modules/auth src/core/contract.py src/core/public_fetch.py pyproject.toml | wc -l   # = 0
-grep -rn "import httpx\|from httpx\|sqlalchemy\|\.infrastructure" src/ui | wc -l   # = 0
-grep -rn "api_key\|get_secret_value\||safe" src/ui/templates | wc -l   # = 0
-unzip -p export.zip | grep -c "access_token\|refresh_token\|api_key\|gAAAA"   # = 0
+TEST_DATABASE_URL=… pytest tests/integration -q                       # ≥ 153 + الجديدة
+pytest tests -q -m "not integration" --cov=src --cov-fail-under=95
+# 98 محمياً / 9 عامة / /app 29 (test_auth_guard + test_ui_session)
+git diff 1738e56..HEAD --numstat -- 'src/*.py' | awk '{a+=$1} END{print a}'   # ≤ 500
 ```
 
 ---
 
-## 5. التزامات المنفذ
+## 2. SPRINT-14 — الانضمام الذاتي بالعربية (Zero-API onboarding) — **يُصدَر رسمياً بعد دمج #55؛ النطاق مُجمَّد هنا ليبدأ التحضير**
 
-1. **A يُدفع وحده أولاً** ويمرّ CI 5/5 قبل B؛ B قبل C.
-2. أي تغيير مطلوب في `src/modules/auth` ⇒ **توقّف وسجّل** (لا تنفّذ).
-3. الهجرة 0017 **واحدة** تُكتب في A وتحمل أعمدة B/C منذ البداية (لا تعديل لاحق للهجرة؛ إن لزم عمود نسيته ⇒ سجّل في §6 واطلب قرار المخطط).
-4. **لا مسبار/ملف `_probe_*`** يُرفع.
-5. أسماء الأكواد الحرفية ملزمة: `brand_suspended`, `platform_readonly`, `job_not_failed`, `export_too_large`, `confirmation_mismatch`, `requeued_by_admin`, `brand_deleted`, `retention_sweep`, `wa_monthly_service_80pct`.
-6. صمّام §1-ج ملزم بترتيبه؛ تجاوز بلا تسجيل = رفض.
-7. §6 يُملأ بالأرقام الحرفية (لا «✅» بلا رقم)، والحجم **بالامتداد**.
+**الهدف القابل للقياس:** مستخدم جديد يصل من `/app/login` إلى **أول مسودة معتمدة ومجدولة** دون أي نداء API يدوي، بالعربية، خلال ≤ 30 دقيقة (TTFV). كل شاشة تستهلك مسارات API **موجودة** — لا منطق أعمال جديد في `src/ui`.
+
+### 14-A (PR أول — ≤ 900 py+html) — التسجيل والعلامة والقناة
+| # | الشاشة/البند | يستهلك | ملاحظات |
+|---|---|---|---|
+| A-1 | `GET/POST /app/register` (بريد + كلمة مرور + اسم المستأجر) ⇒ دخول تلقائي ⇒ `/app/` | `POST /auth/register` ثم `POST /auth/login` | نفس حارس rate-limit؛ CSRF nonce؛ `email_taken` بالعربية |
+| A-2 | `brands.html` حالة فارغة ⇒ «أنشئ علامتك الأولى» (الاسم، slug تلقائي، **القطاع**) | `POST /brands` ثم `PUT /brands/{id}/brain/profile` (sector) | بعدها ⇒ `/app/b/{id}/settings#connect` |
+| A-3 | **إكمال ربط Meta:** اختيار الصفحات بعد OAuth (`/app/b/{id}/settings/connections/{cid}/pages` GET/POST) | `GET …/connections/{cid}` + `PUT …/pages/selection` | اليوم API فقط ⇒ القناة لا تكتمل من الواجهة |
+| A-4 | **نموذج WhatsApp Cloud API** في `settings.html` (`phone_number_id, waba_id, system_token, app_secret, verify_token`) + تدوير | `POST/PUT …/whatsapp/account`, `POST …/account/rotate` | حقول سرّية `type=password`؛ لا تُعاد في HTML |
+| A-5 | شريط تقدّم الانضمام في `/app/` (حساب ✓ · علامة · قناة · أول مسودة) | `GET /brands`, `GET …/connections`, `GET …/content/items` | يختفي عند الاكتمال |
+
+### 14-B (PR ثانٍ — ≤ 900 py+html) — Brand Brain والمحتوى
+| # | البند | يستهلك |
+|---|---|---|
+| B-1 | محرّر **Brand Profile** (`/app/b/{id}/brain`): القطاع، النبرة، الجمهور، العبارات الممنوعة، `If-Match` | `GET/PUT …/brain/profile` |
+| B-2 | المنافسون ≤ 3 (إضافة/حذف/تحديث) + «حدّث الأدلة» | `…/competitors`, `…/competitors/{id}/refresh`, `…/evidence/refresh` |
+| B-3 | زر **«خطة محتوى»** في `diagnosis.html` | `POST …/brain/content-plan` |
+| B-4 | **`+ مسودة جديدة`** في `content.html` (القناة، النص، `target_page_id` **قائمة من الصفحات المختارة**، تاريخ الجدولة) | `POST …/content/items`, `GET …/connections` |
+| B-5 | رسائل الموافقة الجماعية بالعربية لكل عنصر + `ar.json` ⊇ كل أكواد 13/13.1 | `POST …/content/approvals/batch` |
+| B-6 | **Playbooks عربية:** `restaurants.json`/`clinics.json` تُعرَّب كاملةً مع `lang: "ar"`؛ الإنجليزية تُحفظ `*_en.json` | — |
+
+### 14-C (بعد V1 — لا يُنفَّذ الآن)
+N1 تعدد العمال (`_RefreshGate`/`PLATFORM_FLAGS` ⇒ PG advisory/Redis) · M8 الرؤى · تقرير أسبوعي · احتفاظ المحتوى (§4).
 
 ---
+
+## 3. معايير قبول SPRINT-14 (مختصرة — تُفصَّل عند الإصدار)
+1. مسار كامل بالمتصفح (TestClient بالكوكيز): register ⇒ brand ⇒ pages ⇒ WA ⇒ profile ⇒ draft ⇒ approve ⇒ schedule — **0 نداء API مباشر**.
+2. لا `httpx`/`sqlalchemy` في `src/ui` (AST) · CSRF على كل POST · لا سرّ في HTML (`grep gAAAA|system_token`).
+3. `ar.json` يغطي 100% من أكواد الأخطاء (اختبار يجمعها من `exceptions.py` لكل وحدة).
+4. TTFV مُقاس من المالك على 3 علامات ≤ 30 دقيقة.
+
+---
+
+## 4. قرارات مُثبَّتة من المراجعة (ملزمة)
+- **لا `DELETE FROM content_items` في الاحتفاظ، أبداً** (`fk_approval_events_item_id` CASCADE يمحو سجل الموافقات؛ `fk_publish_jobs_revision_id` RESTRICT). المحتوى = إفراغ `content_revisions.body/media_refs` للعناصر `archived/published/rejected` الأقدم من القطع فقط — 14-C، dry-run أولاً.
+- OWNER لعلامة موقوفة **يصدّر ويحذف** (F-4 د) — D-081 حق لا يُعلَّق.
+- `openssl` افتراضي؛ `age` اختياري بـ`BACKUP_CIPHER`. `RETENTION_DRY_RUN=true` يبقى حتى أسبوع من صفوف `retention_sweep` تُراجَع يدوياً.
+- الحجم: S13 (+2,179) مقبول استثناءً (بنية A مشتركة)؛ 13.1 ≤ 500؛ 14 نصفان ≤ 900 لكلٍّ.
+- **القطاع الثالث:** `beauty_salons` (مواعيد + واتساب كالعيادات) يُضاف في 14-B بهجرة **0018** توسّع `ck_brand_profiles_sector` + `beauty_salons.json` عربي. المالك يعترض خلال نافذة 13.1 إن أراد بديلاً.
+
+---
+
+## 5. التزامات المنفذ
+- اختبار PG لكل بند F-1..F-7 **يعكس مخرجات المسبار حرفياً** (المراجعة §2).
+- `PROTECTED_ROUTE_COUNT == 98`؛ `/app` 29؛ لا تغيير في `PUBLIC`.
+- §6 بالأسماء من الكود + أرقام CI + الحجم المقاس بالأمر أعلاه.
 
 ## 6. تقرير المنفذ (يملؤه المنفذ)
+_(فارغ — يُملأ عند التسليم)_
 
-| البند | القيمة |
-|---|---|
-| SHA الكوميتات | |
-| نتائج `pytest` (العدد/التغطية) لكل كوميت — كامل **و** بلا DB | |
-| هجرة 0017 ذهاباً وإياباً (الجداول/الأعمدة/القيود) | |
-| `PROTECTED_ROUTE_COUNT` / العامة / `/app/*` | |
-| أسطر `src/` **بالامتداد** لكل Part + حالة صمّام §1-ج | |
-| نتائج greps §4 + grep على ZIP التصدير | |
-| زمن تمرين الاستعادة (C-4) + رابط job CI | |
-| انحرافات عن §2 (مع السبب) | |
-| ما يحتاج قرار المالك | |
-
----
-
-## 7. ما ينتظر المالك (بوابة TTFV / App Review — مفتوحة الآن)
-
-1. 🔑 **تدوير التوكن** (ظهر ≥ 25 مرة في محادثة المخطط وحدها) + حماية `main`.
-2. **تشغيل حي للواجهة:** `uvicorn --workers 1` (N1 في مراجعة 12.1-B) · `PLATFORM_ADMIN_USER_IDS=<uuid المالك>` · `UMAMI_WEBSITE_ID` اختياري.
-3. **3 علامات تجريبية** (مطعم/كافيه ×2 + عيادة ×1) بحسابات Meta/WABA حقيقية ⇒ قياس **TTFV ≤ 30 دقيقة** (من الدخول إلى أول توصية + أول ردّ مُوافَق) وتسجيل الزمن في `WORK_STATE.md` §6.
-4. **فيديوهات App Review** (الرحلة: دخول ⇒ اليوم ⇒ صندوق الوارد ⇒ ردّ ⇒ تشخيص ⇒ مشاركة رابط ⇒ الإعدادات/الموافقة). الواجهة جاهزة لذلك الآن.
-5. قرار (ج) من 12.1-B: منح الأعضاء بالبريد ⇒ **مؤجَّل V1.1** (`tenant_members`) ما لم يعترض المالك.
-6. اختيار أداة تشفير النسخ الاحتياطي (C-4): `age` (Apache-2.0/MIT) أو `openssl` — كلاهما بلا اعتمادية بايثون.
+## 7. ما ينتظر المالك
+- 🔑 **تدوير توكن GitHub فوراً (≥ 26 ظهوراً)** + حماية `main`.
+- TTFV على 3 علامات + فيديوهات App Review **بعد دمج #55** (A-2/C-1 يجب أن تعمل في الفيديو).
+- قرار القطاع الثالث (§4) خلال نافذة 13.1.
