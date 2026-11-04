@@ -138,3 +138,49 @@ run_once #5 (بعد انتهاء الإيجار) ⇒ IntegrityError نفسه · 
 ---
 
 *المخطط — 2026-11-04 — PG 17.11 — مسبار 9/9 نُفِّذ وحُذف؛ لا تغيير في `src/ tests/ alembic/` على فرع التخطيط.*
+
+---
+
+## 8. ملحق — التحقق الحي المستقل من SPRINT-13.1-FIX (`1738e56..b82d4ec`) — 2026-11-04
+
+**البيئة:** PostgreSQL 17.11 (PGDG) + pgvector · alembic `0017` · المجموعة التكاملية على `ai_rt` والمسبار المستقل على `ai_growth_os_test` (قاعدتان منفصلتان لأن كليهما يفرّغ الجداول).
+**المسبار:** `tests/integration/_probe_s13_1.py` (9 اختبارات مكتوبة مستقلاً عن `test_sprint13_1_pg.py`) — **نُفِّذ 9/9 ثم حُذف**؛ `git status` نظيف قبل أي commit.
+
+### 8.1 البوابات على `b82d4ec`
+
+| البوابة | النتيجة |
+|---|---|
+| `python -m ruff check .` | All checks passed |
+| تكامل PG17 (`tests/integration`) | **163 passed** (153 سابقاً + 10 جديدة في `test_sprint13_1_pg.py`) في 5:57 |
+| PROTECTED (`tests/test_auth_guard.py`) | 98 (85 + 10 ops + 3 lifecycle) — ثابت في الاختبار سطر 98 |
+| الملفات المحمية (`auth/*`, `contract.py`, `public_fetch.py`, `pyproject.toml`, `internal_metrics.py`, `alembic/versions/*`) | **0 سطر diff** |
+| حجم `src/*.py` | **+462 −78 ≤ 500** |
+| D-016 (`pulse` لا يستورد `ops`) | مؤكَّد بفحص نص `pulse/scheduler_step.py` داخل المسبار |
+
+### 8.2 أدلة المسبار الحي (مخرجات حرفية)
+
+| البند | المخرج الحي | الحكم |
+|---|---|---|
+| **F-1/F-2** دورة كاملة | `phase1 runs=['ok:1','ok:1','ok:1'] job=('failed',3,3) attempts=[1,2,3]` ⇒ `requeue 200 {attempt_count:3, max_attempts:6}` ⇒ `job=('queued',3,6)` ⇒ `phase2 runs=['ok:1','ok:1','ok:1','ok:0'] job=('failed',6,6) attempts=[1,2,3,4,5,6] calls=6` — **صفر IntegrityError** | ✅ S13-1 مغلق |
+| **F-1c** `ambiguous_outcome` | `409 {error:'manual_verification_required'} job=('failed',3,3,'ambiguous_outcome') actions=0` | ✅ D-070 |
+| **F-3** مهمة شقيقة `leased` على نفس العنصر | `409 {error:'publish_in_progress'} job=('failed',3,3)` | ✅ |
+| **F-3** عنصر `archived` | `409 {error:'item_not_publish_failed'} job=('failed',3,3) approval_events=0 admin_actions=0` — المهمة لم تتغير (CAS rowcount) | ✅ S13-5 مغلق |
+| **F-4** `token_encryption_key=None` + `http_client` حاضر | `export=202 dl=200 delete=204` · 12 ملفاً في ZIP (`brand, profile, content_items, content_revisions, brand_competitors, conversations, messages, evidence, recommendations, alerts, approval_events, manifest`) | ✅ S13-3 مغلق |
+| **F-4** محتوى ZIP | `revision_body=True competitor=True customer_text=True real_cipher_in_zip=False secret_shaped_keys=[]` — نص العميل «my api_key is gAAAA-ish text» موجود، شيفرة Fernet الحقيقية غائبة، لا مفتاح باسم token/secret/hash/api_key | ✅ S13-4 مغلق |
+| **F-4** OWNER لعلامة موقوفة | `export=202 delete=204` | ✅ D-081 |
+| **F-5** مدير منصة غير عضو | `login=303 page=200 cards=['suspension','entitlement','wa-caps'] account_id_present=True nonadmin=[404,404]` | ✅ S13-2 مغلق |
+| **F-6** `platform_flags.feature_pulse=false` | `flag_off ⇒ step=0 alerts=0 | flag_on ⇒ step=1 alerts=1 | pulse imports ops: False` | ✅ |
+| **F-7** مهمة سامة (publisher يرمي `RuntimeError`) | `runs=['ok:2'] bad=('leased',1,3) good=('succeeded',1,3) counters={publish_job_poisoned:1, publish_succeeded:1}` — السليمة نُشرت في نفس الدفعة | ✅ |
+
+### 8.3 ملاحظات هامشية غير مانعة (تُرحَّل إلى SPRINT-14)
+
+- `lifecycle/service.py:49` يضع `"gAAAA"` بأحرف كبيرة داخل `FORBIDDEN_FRAGMENTS` بينما السطر 80 يقارن بـ `f in k.lower()` ⇒ هذا الجزء **لا يمكن أن يطابق أبداً** (المقارنة على أسماء الأعمدة فقط؛ لا عمود يحمل بادئة Fernet). الأثر صفر أمنياً لأن allowlist `EXPORT_COLUMNS` هي الحارس الفعلي؛ يُنظَّف بإزالة الجزء أو تصغيره في أول سبرنت يلمس الملف.
+- اسم العدّاد المنفَّذ `publish_job_poisoned` (التوجيه قال `publish_cycle_poisoned`) — الاسم المنفَّذ أدق؛ مقبول ويُعتمد.
+- بعد السماح الإداري (F-7) تبقى المهمة السامة `leased` حتى انتهاء العقد ثم تُستعاد عبر `_recover_expired_leases` كـ `ambiguous_outcome` — سلوك مقصود (لا نشر مزدوج)، يُوثَّق في runbook.
+
+### 8.4 القرار
+
+**PR #55 يُدمَج في `main`** (D-063). جميع فرضيات S13-1..S13-5 التي أوقفت الدمج في §5 **أُغلقت حياً** على PG 17.11 بمسبار مستقل، والبنود F-1..F-7 مطابقة للتوجيه حرفياً، والملفات المحمية بلا تغيير، والحجم ضمن الصمام. يفتح الدمج بوابة **TTFV ≤ 30 دقيقة + Meta App Review** للمالك.
+
+*المخطط — 2026-11-04 — PG 17.11 — مسبار 13.1 (9/9) نُفِّذ وحُذف.*
+
