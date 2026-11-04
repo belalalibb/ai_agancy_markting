@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 from src.modules.ops.domain import REQUEUED_BY_ADMIN, AdminAction, DeadLetterJob
+from src.modules.ops.exceptions import ItemNotPublishFailedError
 from src.modules.ops.infrastructure.postgres_repository import (
     AdminActionRow,
     PgOpsRepository,
@@ -120,6 +121,19 @@ async def test_dead_letter_and_job_status_map_rows() -> None:
     assert await repo.job_status(uuid4()) is None
 
 
+def _job() -> DeadLetterJob:
+    return DeadLetterJob(
+        job_id=JOB,
+        item_id=ITEM,
+        brand_id=BRAND,
+        channel="facebook_page",
+        error_class=None,
+        attempt_count=3,
+        max_attempts=3,
+        failed_at=NOW,
+    )
+
+
 @pytest.mark.parametrize("moved", [1, 0])
 async def test_requeue_cas_item_and_d055_event(moved: int) -> None:
     session = StubSession(
@@ -130,18 +144,14 @@ async def test_requeue_cas_item_and_d055_event(moved: int) -> None:
             StubResult(rowcount=1),
         ]
     )
-    job = DeadLetterJob(
-        job_id=JOB,
-        item_id=ITEM,
-        brand_id=BRAND,
-        channel="facebook_page",
-        error_class=None,
-        attempt_count=3,
-        max_attempts=3,
-        failed_at=NOW,
+    ok = await PgOpsRepository(session).requeue(
+        _job(), revision_id=REV, actor_user_id=ACTOR, now=NOW, grace=3
     )
-    ok = await PgOpsRepository(session).requeue(job, revision_id=REV, actor_user_id=ACTOR, now=NOW)
     assert ok is bool(moved)
+    job_sql, job_params = session.executed[0]
+    text = str(job_sql)
+    assert "attempt_count = 0" not in text  # F-1: never reset
+    assert "max_attempts = attempt_count + :grace" in text and job_params["grace"] == 3
     if moved:
         assert len(session.executed) == 4
         params = session.executed[3][1]
@@ -150,6 +160,43 @@ async def test_requeue_cas_item_and_d055_event(moved: int) -> None:
         assert "status = 'publish_failed'" in str(session.executed[1][0])
     else:
         assert len(session.executed) == 1  # CAS lost ⇒ nothing else touched
+
+
+async def test_requeue_item_cas_miss_raises_item_not_publish_failed() -> None:
+    """F-3: the item CAS must hit exactly one row, else the whole requeue is rolled back."""
+    session = StubSession([StubResult(rowcount=1), StubResult(rowcount=0)])
+    with pytest.raises(ItemNotPublishFailedError):
+        await PgOpsRepository(session).requeue(
+            _job(), revision_id=REV, actor_user_id=ACTOR, now=NOW, grace=3
+        )
+    assert len(session.executed) == 2  # no D-055 event after a missed item CAS
+
+
+async def test_item_has_active_job_and_admin_views() -> None:
+    account = uuid4()
+    session = StubSession(
+        [
+            StubResult(rows=[(1,)]),
+            StubResult(rows=[]),
+            StubResult(rows=[(BRAND, "Nile", "nile", NOW, TENANT)]),
+            StubResult(rows=[]),
+            StubResult(rows=[(account, "+20100", "active", "GREEN", "TIER_1K")]),
+            StubResult(rows=[]),
+        ]
+    )
+    repo = PgOpsRepository(session)
+    assert await repo.item_has_active_job(ITEM) is True
+    assert await repo.item_has_active_job(ITEM) is False
+    assert "status IN ('queued', 'leased')" in str(session.executed[0][0])
+    view = await repo.admin_brand(BRAND)
+    assert view is not None and view.suspended is True and view.owner_tenant_id == TENANT
+    assert await repo.admin_brand(BRAND) is None
+    wa = await repo.admin_wa_summary(BRAND)
+    assert wa is not None and wa.id == account and wa.quality_rating == "GREEN"
+    assert "encrypted" not in str(session.executed[4][0]) and "hash" not in str(
+        session.executed[4][0]
+    )
+    assert await repo.admin_wa_summary(BRAND) is None
 
 
 async def test_admin_alerts_rows_to_dicts() -> None:

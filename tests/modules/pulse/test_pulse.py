@@ -332,6 +332,48 @@ async def test_pulse_step_respects_interval_and_uses_independent_session(
     assert await plain(NOW) == 2
 
 
+async def test_pulse_step_skips_cycle_when_db_flag_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SPRINT-13.1 F-6: the injected ``flag_reader`` is asked every cycle inside the session;
+    ``False`` ⇒ 0 and ``Pulse.run`` is never called (no ``pulse_alerts`` row)."""
+    runs: list[datetime] = []
+
+    class _Pulse:
+        def __init__(self, repo: object, *, counters_reader: object) -> None:
+            pass
+
+        async def run(self, now: datetime) -> list[Alert]:
+            runs.append(now)
+            return [object()]  # type: ignore[list-item]
+
+    class _Ctx:
+        async def __aenter__(self) -> str:
+            return "session"
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(scheduler_step, "Pulse", _Pulse)
+    monkeypatch.setattr(scheduler_step, "independent_session", lambda factory: _Ctx())
+    flag = {"value": False}
+    asked: list[object] = []
+
+    async def reader(session: object) -> bool:
+        asked.append(session)
+        return flag["value"]
+
+    step = scheduler_step.pulse_step(
+        interval_seconds=1,
+        flag_reader=reader,
+        session_factory=lambda: "sf",  # type: ignore[arg-type,return-value]
+    )
+    assert await step(NOW) == 0 and runs == []
+    flag["value"] = True
+    assert await step(NOW + timedelta(seconds=1)) == 1 and runs == [NOW + timedelta(seconds=1)]
+    assert asked == ["session", "session"]  # read on the cycle's own session, each cycle
+
+
 def test_main_scheduler_wires_pulse_as_extra_step(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

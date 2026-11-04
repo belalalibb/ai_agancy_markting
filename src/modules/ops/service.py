@@ -19,7 +19,10 @@ from src.core.config import Settings
 from src.modules.ops.domain import (
     FLAG_CACHE_SECONDS,
     FLAG_KEYS,
+    REQUEUE_GRACE_ATTEMPTS,
     AdminAction,
+    AdminBrandView,
+    AdminWaSummary,
     BrandSuspension,
     DeadLetterJob,
     PlatformFlag,
@@ -29,7 +32,11 @@ from src.modules.ops.exceptions import (
     FlagUnknownError,
     JobNotFailedError,
     JobNotFoundError,
+    ManualVerificationRequiredError,
+    PublishInProgressError,
 )
+
+AMBIGUOUS_OUTCOME = "ambiguous_outcome"  # publishing ErrorClass value (D-070)
 
 logger = logging.getLogger(__name__)
 
@@ -172,22 +179,53 @@ class OpsService:
         job, status, revision_id = found
         if status != "failed":
             raise JobNotFailedError(f"job is {status!r}, only failed jobs can be requeued")
+        if job.error_class == AMBIGUOUS_OUTCOME:  # F-1 / D-070: verify by hand, never requeue
+            raise ManualVerificationRequiredError()
+        if await self._repo.item_has_active_job(job.item_id):  # F-2
+            raise PublishInProgressError()
         now = _now()
         if not await self._repo.requeue(
-            job, revision_id=revision_id, actor_user_id=actor_user_id, now=now
+            job,
+            revision_id=revision_id,
+            actor_user_id=actor_user_id,
+            now=now,
+            grace=REQUEUE_GRACE_ATTEMPTS,
         ):
             raise JobNotFailedError("job changed state concurrently")
+        new_max = job.attempt_count + REQUEUE_GRACE_ATTEMPTS
         await self.record(
             actor_user_id=actor_user_id,
             action="job_requeued",
             target_kind="publish_job",
             target_id=str(job_id),
-            before={"status": "failed", "attempt_count": job.attempt_count},
-            after={"status": "queued", "attempt_count": 0, "item_id": str(job.item_id)},
+            before={
+                "status": "failed",
+                "attempt_count": job.attempt_count,
+                "max_attempts": job.max_attempts,
+            },
+            after={
+                "status": "queued",
+                "attempt_count": job.attempt_count,
+                "max_attempts": new_max,
+                "item_id": str(job.item_id),
+            },
             now=now,
         )
         logger.info("ops: requeued job=%s by admin=%s", job_id, actor_user_id)
-        return job.model_copy(update={"attempt_count": 0})
+        return job.model_copy(update={"max_attempts": new_max})
+
+    # --- F-5 admin brand view --------------------------------------------------------------
+    async def admin_brand(self, brand_id: UUID) -> AdminBrandView:
+        view = await self._repo.admin_brand(brand_id)
+        if view is None:
+            raise BrandNotFoundError()
+        return view
+
+    async def admin_wa_summary(self, brand_id: UUID) -> AdminWaSummary:
+        summary = await self._repo.admin_wa_summary(brand_id)
+        if summary is None:
+            raise BrandNotFoundError("no whatsapp account for brand")
+        return summary
 
     # --- A-4 alerts ------------------------------------------------------------------------
     async def admin_alerts(self, *, kind: str, limit: int) -> list[dict[str, Any]]:

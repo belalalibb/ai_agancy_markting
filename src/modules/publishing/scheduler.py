@@ -134,7 +134,11 @@ class PostgresScheduler:
         await self._recover_expired_leases(now)
         jobs = await self._lease_batch(now)
         for job in jobs:
-            await self._process(job, now)
+            try:
+                await self._process(job, now)
+            except Exception:  # noqa: BLE001 - SPRINT-13.1 F-7: one poisoned job never
+                counters.increment("publish_job_poisoned")  # starves the rest of the batch
+                logger.exception("publish: poisoned job=%s", job.id)
         return len(jobs)
 
     # ------------------------------------------------------------- step 1 ---

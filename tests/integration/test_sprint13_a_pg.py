@@ -343,13 +343,15 @@ def test_a3_dead_letter_requeue_cas_and_d055_event(admin_app: FastAPI) -> None:
         assert res.status_code == 200 and [j["job_id"] for j in res.json()] == [str(job_id)]
         assert res.json()[0]["error_class"] == "transient" and res.json()[0]["attempt_count"] == 3
         res = client.post(f"{ADMIN}/publishing/jobs/{job_id}/requeue", headers=h)
-        assert res.status_code == 200 and res.json()["attempt_count"] == 0, res.text
-        status, attempts, nxt, leased = _rows(
-            "SELECT status, attempt_count, next_attempt_at IS NOT NULL, leased_until "
-            "FROM publish_jobs WHERE id = :id",
+        assert res.status_code == 200, res.text
+        # SPRINT-13.1 F-1: attempt_count is kept (3), max_attempts extended to 3 + 3
+        assert (res.json()["attempt_count"], res.json()["max_attempts"]) == (3, 6)
+        status, attempts, max_attempts, nxt, leased = _rows(
+            "SELECT status, attempt_count, max_attempts, next_attempt_at IS NOT NULL, "
+            "leased_until FROM publish_jobs WHERE id = :id",
             {"id": job_id},
         )[0]
-        assert (status, attempts, nxt, leased) == ("queued", 0, True, None)
+        assert (status, attempts, max_attempts, nxt, leased) == ("queued", 3, 6, True, None)
         assert (
             _run("SELECT status FROM content_items WHERE id = :id", {"id": item_id}, scalar=True)
             == "scheduled"

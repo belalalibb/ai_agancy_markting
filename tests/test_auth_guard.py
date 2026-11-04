@@ -95,7 +95,7 @@ def test_protected_route_count_is_reported() -> None:
     # a PATCH-based share; the real routes are POST/DELETE share — documented in §6.)
     # SPRINT-13 A: +8 ops admin (actions, suspend, unsuspend, flags GET/PUT, dead-letter,
     # requeue, alerts) ⇒ 93. (The directive's 95 includes C-1 export ×2 + C-2 delete — Part C.)
-    assert PROTECTED_ROUTE_COUNT == 96, PROTECTED  # 85 + 8 ops admin + 3 lifecycle (S13)
+    assert PROTECTED_ROUTE_COUNT == 98, PROTECTED  # 85 + 10 ops admin + 3 lifecycle (S13.1)
 
 
 @pytest.mark.parametrize(("method", "template"), PROTECTED, ids=IDS)

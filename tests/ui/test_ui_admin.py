@@ -338,6 +338,8 @@ async def test_admin_entitlements_lookup_activate_and_wa_caps(
     wa_repo: FakeWhatsAppRepository,
     wa_account,  # noqa: ANN001
 ) -> None:
+    from src.modules.ops.domain import AdminWaSummary
+
     login(ui_client)
     res = ui_client.get(ADMIN_ENT)
     assert (
@@ -345,12 +347,25 @@ async def test_admin_entitlements_lookup_activate_and_wa_caps(
         and 'data-form="lookup"' in res.text
         and "data-card=" not in res.text
     )
+    # SPRINT-13.1 F-5: the page reads the *admin* routes (no brand membership needed); the
+    # WA card appears only when ``/admin/brands/{id}/whatsapp/summary`` answers (else 404).
     res = ui_client.get(f"{ADMIN_ENT}?brand_id={BRAND_ID}")
     assert res.status_code == 200, res.text
-    assert (
-        'data-card="entitlement" data-plan="trial"' in res.text
-        and 'data-form="wa-caps"' in res.text
+    assert 'data-card="entitlement" data-plan="trial"' in res.text
+    assert 'data-card="suspension" data-suspended="false"' in res.text
+    assert 'data-form="wa-caps"' not in res.text
+    admin_ui.state.ops_repo.wa_summaries[BRAND_ID] = AdminWaSummary(
+        id=wa_account.id,
+        display_phone=wa_account.display_phone,
+        status="active",
+        quality_rating=None,
+        messaging_limit=None,
     )
+    res = ui_client.get(f"{ADMIN_ENT}?brand_id={BRAND_ID}")
+    assert res.status_code == 200, res.text
+    assert 'data-form="wa-caps"' in res.text
+    assert f'name="account_id" value="{wa_account.id}"' in res.text
+    assert res.text.count("data-card=") == 3  # suspension + entitlement + wa-caps
     csrf = csrf_of(res.text)
     res = ui_client.post(
         f"{ADMIN_ENT}/activate",

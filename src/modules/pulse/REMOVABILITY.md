@@ -25,7 +25,9 @@ ids / counts / dates only — never customer text (D-069).
    `extra_steps` entry of the publish scheduler, and `create_app` mounts `pulse.router`
    behind `if settings.feature_pulse:`.
 2. Check (6) reads plan counters through the consumer-owned port
-   `pulse.domain.PlanCounterUsageReader` (D-016); `src/main.py` binds the entitlements adapter
+   `pulse.domain.PlanCounterUsageReader` (D-016) and `pulse_step(flag_reader=…)` (SPRINT-13.1
+   F-6: `main.py` binds `ops.guards.flag_active(…, "feature_pulse")` so a DB flag flipped off
+   skips the cycle — no `ops` import inside `pulse`); `src/main.py` binds the entitlements adapter
    `PgPlanCounterUsageReader`. **Entitlements never imports pulse** — the adapter returns
    duck-typed `PlanCounterUsageRow`s.
 

@@ -1346,10 +1346,11 @@ async def _admin_ent_ctx(api: ApiClient, brand_id: str) -> dict[str, Any]:
     ctx: dict[str, Any] = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None}
     if brand_id:
         ctx["ent"] = await api.get(f"/admin/entitlements/{brand_id}")
-        ctx["wa"] = await _optional(api, f"/brands/{brand_id}/whatsapp/account")
-        # SPRINT-13 A-2: ``suspended`` comes from the brand read (§3-9); admins who are not
-        # members of the brand see no card (the API answers 404 ⇒ ``None``).
-        ctx["brand"] = await _optional(api, f"/brands/{brand_id}")
+        # SPRINT-13.1 F-5: admin-scoped reads — a platform admin is rarely a *member* of the
+        # brand, so the tenant routes answered 404 (S13-2). ``/admin/brands/{id}`` carries
+        # ``suspended``; the WA summary carries the account ``id`` the caps form posts back.
+        ctx["wa"] = await _optional(api, f"/admin/brands/{brand_id}/whatsapp/summary")
+        ctx["brand"] = await _optional(api, f"/admin/brands/{brand_id}")
     return ctx
 
 

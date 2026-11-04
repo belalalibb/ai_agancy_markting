@@ -10,6 +10,8 @@
 | 6 | GET    | /admin/publishing/dead-letter?limit=           | read                         |
 | 7 | POST   | /admin/publishing/jobs/{job_id}/requeue        | ``job_requeued`` (+ D-055)   |
 | 8 | GET    | /admin/alerts?kind=meta_token_expiring&limit=  | read                         |
+| 9 | GET    | /admin/brands/{brand_id}                       | read (F-5, ids + suspended)  |
+| 10| GET    | /admin/brands/{brand_id}/whatsapp/summary      | read (F-5, no secrets)       |
 
 Non-admins get **404 ``not_found``** (§3-6: the panel's existence is not disclosed) — the
 ``PlatformAdmin`` 403 is remapped here in ``ops``; ``src/modules/auth`` is untouched.
@@ -38,6 +40,7 @@ from src.modules.ops.domain import (
     ADMIN_ACTIONS_MAX,
     FLAG_KEYS,
     AdminAction,
+    AdminBrandView,
     BrandSuspension,
     DeadLetterJob,
     PlatformFlag,
@@ -143,6 +146,38 @@ class DeadLetterOut(BaseModel):
         return cls.model_validate(j.model_dump())
 
 
+class AdminBrandOut(BaseModel):
+    """F-5: what the admin entitlements card needs — ids + suspension, nothing else."""
+
+    id: UUID
+    name: str
+    slug: str
+    suspended: bool
+    suspended_at: datetime | None
+    owner_tenant_id: UUID
+
+    @classmethod
+    def from_domain(cls, b: AdminBrandView) -> AdminBrandOut:
+        return cls(
+            id=b.id,
+            name=b.name,
+            slug=b.slug,
+            suspended=b.suspended,
+            suspended_at=b.suspended_at,
+            owner_tenant_id=b.owner_tenant_id,
+        )
+
+
+class AdminWaSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    display_phone: str | None
+    status: str
+    quality_rating: str | None
+    messaging_limit: str | None
+
+
 class AdminAlertOut(BaseModel):
     id: UUID
     brand_id: UUID
@@ -226,10 +261,13 @@ async def dead_letter(_: OpsAdmin, service: Service, limit: Limit = 50) -> list[
 @router.post(
     "/publishing/jobs/{job_id}/requeue",
     response_model=DeadLetterOut,
-    summary="Requeue one failed job (CAS; 409 job_not_failed)",
+    summary="Requeue one failed job (CAS; attempt_count kept, max_attempts += 3)",
     responses={
         404: {"description": "publish_job_not_found"},
-        409: {"description": "job_not_failed"},
+        409: {
+            "description": "job_not_failed | manual_verification_required | "
+            "publish_in_progress | item_not_publish_failed"
+        },
     },
 )
 async def requeue_job(job_id: UUID, actor: OpsAdmin, service: Service) -> DeadLetterOut:
@@ -238,6 +276,32 @@ async def requeue_job(job_id: UUID, actor: OpsAdmin, service: Service) -> DeadLe
     except OpsError as exc:
         raise to_http(exc) from exc
     return DeadLetterOut.from_domain(job)
+
+
+@router.get(
+    "/brands/{brand_id}",
+    response_model=AdminBrandOut,
+    summary="Admin brand card (F-5): ids + suspension, no membership needed",
+    responses={404: {"description": "brand_not_found"}},
+)
+async def admin_brand(brand_id: UUID, _: OpsAdmin, service: Service) -> AdminBrandOut:
+    try:
+        return AdminBrandOut.from_domain(await service.admin_brand(brand_id))
+    except OpsError as exc:
+        raise to_http(exc) from exc
+
+
+@router.get(
+    "/brands/{brand_id}/whatsapp/summary",
+    response_model=AdminWaSummaryOut,
+    summary="Admin WhatsApp summary (F-5): id/phone/status/quality, no secrets",
+    responses={404: {"description": "brand_not_found (no WhatsApp account)"}},
+)
+async def admin_wa_summary(brand_id: UUID, _: OpsAdmin, service: Service) -> AdminWaSummaryOut:
+    try:
+        return AdminWaSummaryOut.model_validate(await service.admin_wa_summary(brand_id))
+    except OpsError as exc:
+        raise to_http(exc) from exc
 
 
 @router.get(

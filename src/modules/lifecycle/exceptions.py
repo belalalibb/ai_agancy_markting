@@ -27,8 +27,16 @@ class ConfirmationMismatchError(LifecycleError):
     status = 422
 
 
+class ExportFailedError(LifecycleError):
+    """SPRINT-13.1 F-4: any unexpected export error — never a raw ``RuntimeError`` (500)."""
+
+    error = "export_failed"
+    status = 500
+
+
 __all__ = [
     "ConfirmationMismatchError",
+    "ExportFailedError",
     "ExportNotFoundError",
     "ExportTooLargeError",
     "LifecycleError",

@@ -2,8 +2,8 @@
 
 * **C-1 export**: synchronous inside the request for ≤ ``EXPORT_ROW_LIMIT`` rows per entity
   (else 413 ``export_too_large``); the ZIP holds one ``<entity>.json`` per entity plus
-  ``manifest.json`` (counts + sha256 of every member). No secret / token / consent / shared
-  text leaves the repository (filtered by the repository layer, re-checked here).
+  ``manifest.json`` (counts + sha256 of every member). Columns come from the explicit
+  ``EXPORT_COLUMNS`` allowlist (F-4); key names are re-checked here, customer text never is.
 * **C-2 delete**: ``confirm`` must equal the brand slug or name literally (422
   ``confirmation_mismatch``); Meta page subscriptions are unsubscribed best-effort, then
   ``DELETE FROM brands`` cascades (``ai_cost_log.brand_id ⇒ NULL``); one ``admin_actions``
@@ -34,15 +34,23 @@ from src.modules.lifecycle.domain import (
 )
 from src.modules.lifecycle.exceptions import (
     ConfirmationMismatchError,
+    ExportFailedError,
     ExportNotFoundError,
     ExportTooLargeError,
+    LifecycleError,
 )
 
 logger = logging.getLogger(__name__)
 
 Unsubscriber = Callable[[str, str], Awaitable[bool]]  # (page_id, page_token) ⇒ ok
 Audit = Callable[..., Awaitable[Any]]  # OpsService.record signature
-FORBIDDEN_FRAGMENTS = ("access_token", "refresh_token", "api_key", "gAAAA")
+# F-4: checked against **column / key names only** — customer text may legitimately contain
+# the words "api_key" or "gAAAA" (it is their data); the allowlist keeps the values clean.
+FORBIDDEN_FRAGMENTS = ("access_token", "refresh_token", "api_key", "gAAAA", "secret", "hash")
+
+
+def _key_names(rows: list[dict[str, Any]]) -> set[str]:
+    return {k for row in rows for k in row}
 
 
 def _now() -> datetime:
@@ -67,10 +75,12 @@ def build_zip(
     stamp = (now.year, now.month, now.day, now.hour, now.minute, now.second)
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name in EXPORT_ENTITIES:
-            payload = json.dumps(entities.get(name, []), ensure_ascii=False, default=str)
-            if any(f in payload for f in FORBIDDEN_FRAGMENTS):  # belt and braces (§3-12)
-                msg = f"export of {name!r} would leak a secret-shaped value"
-                raise RuntimeError(msg)
+            rows = entities.get(name, [])
+            keys = _key_names(rows)
+            if any(f in k.lower() for k in keys for f in FORBIDDEN_FRAGMENTS):  # §3-12
+                msg = f"export of {name!r} selected a secret-shaped column"
+                raise ExportFailedError(msg)
+            payload = json.dumps(rows, ensure_ascii=False, default=str)
             data = payload.encode("utf-8")
             manifest["counts"][name] = len(entities.get(name, []))
             manifest["sha256"][name] = hashlib.sha256(data).hexdigest()
@@ -100,12 +110,18 @@ class LifecycleService:
     async def export_brand(self, brand_id: UUID, *, requested_by: UUID) -> BrandExport:
         now = _now()
         entities: dict[str, list[dict[str, Any]]] = {}
-        for name in EXPORT_ENTITIES:
-            rows = await self._repo.read_entity(name, brand_id, limit=EXPORT_ROW_LIMIT)
-            if len(rows) > EXPORT_ROW_LIMIT:
-                raise ExportTooLargeError(f"{name} exceeds {EXPORT_ROW_LIMIT} rows")
-            entities[name] = rows
-        blob = build_zip(entities, brand_id=brand_id, now=now)
+        try:
+            for name in EXPORT_ENTITIES:
+                rows = await self._repo.read_entity(name, brand_id, limit=EXPORT_ROW_LIMIT)
+                if len(rows) > EXPORT_ROW_LIMIT:
+                    raise ExportTooLargeError(f"{name} exceeds {EXPORT_ROW_LIMIT} rows")
+                entities[name] = rows
+            blob = build_zip(entities, brand_id=brand_id, now=now)
+        except LifecycleError:
+            raise
+        except Exception as exc:  # F-4: a code, never a raw 500
+            logger.exception("lifecycle: export failed brand_hash=%s", brand_hash(brand_id))
+            raise ExportFailedError() from exc
         export = BrandExport(
             brand_id=brand_id,
             status="ready",
@@ -139,10 +155,10 @@ class LifecycleService:
         if self._unsubscribe is not None:
             unsubscribe = "ok"
             for page_id, token in await self._repo.page_tokens(brand_id):
-                try:
+                try:  # best effort: a bad token / network error never blocks the delete
                     if not await self._unsubscribe(page_id, token):
                         unsubscribe = "failed"
-                except Exception:  # noqa: BLE001 - best effort, never blocks the delete
+                except Exception:  # noqa: BLE001
                     unsubscribe = "failed"
         if not await self._repo.delete_brand(brand_id):
             raise ExportNotFoundError("brand not found")

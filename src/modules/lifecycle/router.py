@@ -49,13 +49,16 @@ def get_unsubscriber(request: Request, settings: SettingsDep) -> Unsubscriber | 
     """``DELETE /{page_id}/subscribed_apps`` over ``app.state.http_client``; ``None`` when the
     process has no outbound client (unit app) ⇒ the delete records ``unsubscribe=skipped``."""
     client = getattr(request.app.state, "http_client", None)
-    if client is None:
+    if client is None or settings.token_encryption_key is None:  # F-4 (S13-3)
         return None
     encryption = TokenEncryptionService(settings.token_encryption_key.get_secret_value())
     base = f"{settings.meta_graph_base_url}/{settings.meta_graph_api_version}"
 
     async def unsubscribe(page_id: str, encrypted_token: str) -> bool:
-        token = encryption.decrypt_token(encrypted_token)
+        try:
+            token = encryption.decrypt_token(encrypted_token)
+        except Exception:  # noqa: BLE001 - undecryptable token ⇒ ``unsubscribe=failed``
+            return False
         try:
             res = await client.delete(
                 f"{base}/{page_id}/subscribed_apps", params={"access_token": token}

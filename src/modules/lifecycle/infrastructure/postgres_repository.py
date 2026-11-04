@@ -1,8 +1,9 @@
 """PostgreSQL ``lifecycle`` repository (SPRINT-13 Part C, D-081) — owns ``brand_exports``;
 everything else is SQL text over other modules' tables (same discipline as ``pulse``/``ops``).
 
-* Export (C-1): ``row_to_json`` per entity, capped at ``limit + 1`` rows so the service can
-  answer 413 ``export_too_large``; secret / consent / shared-text keys are dropped here.
+* Export (C-1): an explicit column allowlist per entity (``EXPORT_COLUMNS``, F-4), capped at
+  ``limit + 1`` rows so the service can answer 413 ``export_too_large``; secret / consent /
+  share columns are simply never selected.
 * Delete (C-2): ``DELETE FROM brands`` — the FKs cascade (``ai_cost_log.brand_id`` ⇒ NULL).
 * Retention (C-3): one WHERE fragment per table drives both the dry-run count and the delete.
 """
@@ -16,29 +17,40 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.modules.lifecycle.domain import BrandExport
+from src.modules.lifecycle.domain import EXPORT_COLUMNS, BrandExport
 
-# (entity, SQL) — ``:b`` = brand id, ``:n`` = limit + 1. Keys are filtered by ``_clean``.
-_EXPORT_SQL: dict[str, str] = {
-    "brand": "SELECT row_to_json(t) FROM brands t WHERE t.id = :b LIMIT :n",
-    "profile": "SELECT row_to_json(t) FROM brand_profiles t WHERE t.brand_id = :b LIMIT :n",
-    "evidence": "SELECT row_to_json(t) FROM brand_evidence t WHERE t.brand_id = :b LIMIT :n",
-    "recommendations": (
-        "SELECT row_to_json(t) FROM brand_recommendations t WHERE t.brand_id = :b LIMIT :n"
+# (entity ⇒ (table, WHERE)) — ``:b`` = brand id, ``:n`` = limit + 1. The SELECT list comes
+# from ``EXPORT_COLUMNS`` (F-4): never ``row_to_json(t)`` over the whole row.
+_EXPORT_FROM: dict[str, tuple[str, str]] = {
+    "brand": ("brands", "t.id = :b"),
+    "profile": ("brand_profiles", "t.brand_id = :b"),
+    "evidence": ("brand_evidence", "t.brand_id = :b"),
+    "recommendations": ("brand_recommendations", "t.brand_id = :b"),
+    "content_items": ("content_items", "t.brand_id = :b"),
+    "content_revisions": (
+        "content_revisions",
+        "t.item_id IN (SELECT id FROM content_items WHERE brand_id = :b)",
     ),
-    "content_items": "SELECT row_to_json(t) FROM content_items t WHERE t.brand_id = :b LIMIT :n",
     "approval_events": (
-        "SELECT row_to_json(t) FROM approval_events t WHERE t.item_id IN "
-        "(SELECT id FROM content_items WHERE brand_id = :b) LIMIT :n"
+        "approval_events",
+        "t.item_id IN (SELECT id FROM content_items WHERE brand_id = :b)",
     ),
-    "conversations": (
-        "SELECT row_to_json(t) FROM wa_conversations t WHERE t.brand_id = :b LIMIT :n"
-    ),
-    "messages": "SELECT row_to_json(t) FROM wa_messages t WHERE t.brand_id = :b LIMIT :n",
-    "alerts": "SELECT row_to_json(t) FROM pulse_alerts t WHERE t.brand_id = :b LIMIT :n",
+    "conversations": ("wa_conversations", "t.brand_id = :b"),
+    "messages": ("wa_messages", "t.brand_id = :b"),
+    "alerts": ("pulse_alerts", "t.brand_id = :b"),
+    "brand_competitors": ("brand_competitors", "t.brand_id = :b"),
 }
-# Never exported: secrets, hashes, consent and anything about shared (sanitised) texts.
-_DROP_FRAGMENTS = ("token", "secret", "hash", "api_key", "consent", "share", "sanitiz", "sanitis")
+
+
+def _export_sql(entity: str) -> str:
+    table, where = _EXPORT_FROM[entity]
+    cols = ", ".join(f"t.{c}" for c in EXPORT_COLUMNS[entity])
+    order = "ORDER BY t.created_at " if "created_at" in EXPORT_COLUMNS[entity] else ""
+    inner = f"SELECT {cols} FROM {table} t WHERE {where} {order}LIMIT :n"  # noqa: S608
+    return f"SELECT row_to_json(s) FROM ({inner}) s"  # noqa: S608
+
+
+_EXPORT_SQL: dict[str, str] = {name: _export_sql(name) for name in EXPORT_COLUMNS}
 
 _INSERT_EXPORT = text(
     "INSERT INTO brand_exports (id, brand_id, status, requested_by, created_at, ready_at, "
@@ -70,10 +82,6 @@ _RETENTION: tuple[tuple[str, str], ...] = (
 )
 
 
-def _clean(row: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in row.items() if not any(f in k.lower() for f in _DROP_FRAGMENTS)}
-
-
 def _export(row: Any) -> BrandExport:
     return BrandExport(
         id=row[0],
@@ -96,7 +104,7 @@ class PgLifecycleRepository:
         rows = await self._session.execute(
             text(_EXPORT_SQL[entity]), {"b": brand_id, "n": limit + 1}
         )
-        return [_clean(dict(r[0])) for r in rows.all()]
+        return [dict(r[0]) for r in rows.all()]
 
     async def add_export(self, export: BrandExport, blob: bytes | None) -> BrandExport:
         await self._session.execute(

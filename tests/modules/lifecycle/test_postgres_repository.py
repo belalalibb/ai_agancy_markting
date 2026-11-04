@@ -14,13 +14,13 @@ import pytest
 from fastapi import Request
 from src.core.config import Settings
 from src.core.security import TokenEncryptionService
-from src.modules.lifecycle.domain import EXPORT_ENTITIES, BrandExport
+from src.modules.lifecycle.domain import EXPORT_COLUMNS, EXPORT_ENTITIES, BrandExport
 from src.modules.lifecycle.infrastructure.postgres_repository import (
-    _DROP_FRAGMENTS,
     _EXPORT_SQL,
     PgLifecycleRepository,
 )
 from src.modules.lifecycle.router import get_unsubscriber
+from src.modules.lifecycle.service import FORBIDDEN_FRAGMENTS
 
 from tests.fakes import StubResult, StubSession, compiled
 
@@ -28,25 +28,27 @@ NOW = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
 BRAND, USER, EXPORT = uuid4(), uuid4(), uuid4()
 
 
-def test_export_sql_covers_every_entity_and_filters_secret_columns() -> None:
-    assert set(_EXPORT_SQL) == set(EXPORT_ENTITIES)
-    for sql in _EXPORT_SQL.values():
-        assert ":b" in sql and ":n" in sql and "row_to_json" in sql
-    for fragment in ("token", "secret", "hash", "api_key", "consent", "share"):
-        assert fragment in _DROP_FRAGMENTS
+def test_export_sql_is_an_explicit_allowlist_per_entity() -> None:
+    """F-4: every entity selects only its ``EXPORT_COLUMNS`` — never ``row_to_json(t)`` over
+    the whole row — and no allowlisted column name is secret / consent / share shaped."""
+    assert set(_EXPORT_SQL) == set(EXPORT_ENTITIES) == set(EXPORT_COLUMNS)
+    assert {"content_revisions", "brand_competitors"} <= set(EXPORT_ENTITIES)
+    for name, sql in _EXPORT_SQL.items():
+        assert ":b" in sql and ":n" in sql and "row_to_json(t)" not in sql
+        assert all(f"t.{c}" in sql for c in EXPORT_COLUMNS[name])
+        for col in EXPORT_COLUMNS[name]:
+            low = col.lower()
+            assert not any(f.lower() in low for f in FORBIDDEN_FRAGMENTS), (name, col)
+            assert not any(f in low for f in ("token", "consent", "share")), (name, col)
+    assert "revision_no" in _EXPORT_SQL["content_revisions"]
+    assert "content_items WHERE brand_id = :b" in _EXPORT_SQL["content_revisions"]
 
 
-async def test_read_entity_drops_secret_shaped_columns() -> None:
-    row = {
-        "id": "x",
-        "body": "مرحبا",
-        "encrypted_page_token": "gAAAA",
-        "share_token_hash": "h",
-        "learning_consent": "none",
-    }
+async def test_read_entity_returns_rows_verbatim_with_limit_plus_one() -> None:
+    row = {"id": "x", "body": "our api_key is gAAAA — customer text is theirs"}
     session = StubSession([StubResult(rows=[(row,)])])
     rows = await PgLifecycleRepository(session).read_entity("messages", BRAND, limit=10)  # type: ignore[arg-type]
-    assert rows == [{"id": "x", "body": "مرحبا"}]
+    assert rows == [row]  # F-4: values are never inspected, columns are allowlisted
     _, params = session.executed[0]
     assert params == {"b": BRAND, "n": 11}  # limit + 1 ⇒ the service can detect overflow
 

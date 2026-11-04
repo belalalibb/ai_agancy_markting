@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from src.core.config import Settings
 from src.modules.lifecycle import scheduler_step
 from src.modules.lifecycle.domain import EXPORT_ENTITIES, EXPORT_ROW_LIMIT
+from src.modules.lifecycle.exceptions import ExportFailedError
 from src.modules.lifecycle.router import get_unsubscriber
 from src.modules.lifecycle.service import LifecycleService, brand_hash, build_zip
 from src.modules.tenancy.domain.models import GrantRole
@@ -118,13 +119,78 @@ def test_export_unknown_or_expired_is_404(
     assert res.status_code == 404  # 24h expiry (§3-11)
 
 
-def test_build_zip_refuses_secret_shaped_values() -> None:
+def test_build_zip_checks_key_names_only_never_customer_text() -> None:
+    """F-4: a secret-shaped *column name* ⇒ ``export_failed``; customer text that happens to
+    contain "api_key" / "gAAAA" is their data and is exported verbatim."""
     now = datetime(2026, 11, 3, tzinfo=UTC)
-    with pytest.raises(RuntimeError, match="secret-shaped"):
-        build_zip({"brand": [{"token": "gAAAAB..."}]}, brand_id=BRAND_ID, now=now)
+    with pytest.raises(ExportFailedError, match="secret-shaped"):
+        build_zip({"brand": [{"access_token": "x"}]}, brand_id=BRAND_ID, now=now)
+    body = "please rotate our api_key — the old one started with gAAAA"
+    blob = build_zip({"messages": [{"id": 1, "body": body}]}, brand_id=BRAND_ID, now=now)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert body in zf.read("messages.json").decode("utf-8")
+        assert set(zf.namelist()) == {f"{e}.json" for e in EXPORT_ENTITIES} | {"manifest.json"}
     a = build_zip({"brand": [{"id": 1}]}, brand_id=BRAND_ID, now=now)
     b = build_zip({"brand": [{"id": 1}]}, brand_id=BRAND_ID, now=now)
     assert a == b  # deterministic ⇒ the recorded sha256 is reproducible
+
+
+def test_export_unexpected_error_is_500_export_failed(
+    client: TestClient, auth_headers: Headers, lifecycle_repo: FakeLifecycleRepository
+) -> None:
+    async def boom(entity: str, brand_id: object, *, limit: int) -> list[dict]:
+        raise RuntimeError("column does not exist")
+
+    lifecycle_repo.read_entity = boom  # type: ignore[method-assign]
+    res = client.post(f"{API}/brands/{BRAND_ID}/export", headers=auth_headers(OWNER_ID))
+    assert res.status_code == 500 and res.json()["detail"]["error"] == "export_failed"
+
+
+def test_export_includes_revisions_and_competitors(
+    client: TestClient, auth_headers: Headers, lifecycle_repo: FakeLifecycleRepository
+) -> None:
+    lifecycle_repo.entities["content_revisions"] = [
+        {"id": "r1", "item_id": "i1", "revision_no": 1, "body": "نص المسودة api_key"}
+    ]
+    lifecycle_repo.entities["brand_competitors"] = [{"id": "c1", "name": "Rival", "kind": "page"}]
+    h = auth_headers(OWNER_ID)
+    res = client.post(f"{API}/brands/{BRAND_ID}/export", headers=h)
+    assert res.status_code == 202, res.text
+    zip_res = client.get(f"{API}/brands/{BRAND_ID}/export/{res.json()['export_id']}", headers=h)
+    with zipfile.ZipFile(io.BytesIO(zip_res.content)) as zf:
+        assert "نص المسودة api_key" in zf.read("content_revisions.json").decode("utf-8")
+        assert "Rival" in zf.read("brand_competitors.json").decode("utf-8")
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["counts"]["content_revisions"] == 1
+    assert manifest["counts"]["brand_competitors"] == 1
+
+
+def test_get_unsubscriber_is_none_without_encryption_key(settings: Settings) -> None:
+    """F-4 (S13-3): ``http_client`` present but no ``TOKEN_ENCRYPTION_KEY`` ⇒ ``None``, not 500."""
+    from types import SimpleNamespace
+
+    no_key = settings.model_copy(update={"token_encryption_key": None})
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(http_client=object())))
+    assert get_unsubscriber(request, no_key) is None  # type: ignore[arg-type]
+
+
+async def test_unsubscriber_returns_false_on_undecryptable_token(settings: Settings) -> None:
+    from types import SimpleNamespace
+
+    import httpx
+
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(http_client=http)))
+        unsubscribe = get_unsubscriber(request, settings)  # type: ignore[arg-type]
+        assert unsubscribe is not None
+        assert await unsubscribe("p1", "not-a-fernet-token") is False
+    assert calls == []  # nothing left the process
 
 
 # ------------------------------------------------------------------ C-2 delete ---

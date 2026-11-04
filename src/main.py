@@ -171,11 +171,17 @@ def pulse_scheduler_step(settings: Settings) -> SchedulerStep | None:
     if not settings.feature_pulse:
         return None
     from src.modules.entitlements.dependencies import PgPlanCounterUsageReader
+    from src.modules.ops.guards import flag_active
+    from src.modules.ops.infrastructure.postgres_repository import PgOpsRepository
     from src.modules.pulse.scheduler_step import pulse_step
+
+    async def pulse_flag(session: AsyncSession) -> bool:  # SPRINT-13.1 F-6: DB flag per cycle
+        return await flag_active(PgOpsRepository(session), settings, "feature_pulse")
 
     return pulse_step(
         interval_seconds=settings.pulse_interval_seconds,
         counters_factory=lambda session: PgPlanCounterUsageReader(session),
+        flag_reader=pulse_flag,
     )
 
 
@@ -240,9 +246,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(diagnosis_share_router, dependencies=suspended)
     api_v1.include_router(diagnosis_public_router)
     api_v1.include_router(ops_admin_router)  # SPRINT-13 A: /admin/{actions,brands,flags,…}
-    # SPRINT-13 C (D-081): export / delete — OWNER + fresh session; brand-suspended writes
-    # still 403 (``suspended``), platform_readonly still 503 (router-level guards above).
-    api_v1.include_router(lifecycle_router, dependencies=suspended)
+    # SPRINT-13 C (D-081): export / delete — OWNER + fresh session. SPRINT-13.1 F-4: a
+    # suspended brand's OWNER must still be able to export / delete (D-081), so this mount is
+    # deliberately **not** under ``suspended``; platform_readonly still 503 (``api_v1``).
+    api_v1.include_router(lifecycle_router)
     # SPRINT-11 C-5 (D-073/D-076): removable — see src/modules/entitlements/REMOVABILITY.md
     api_v1.include_router(entitlements_router)
     api_v1.include_router(entitlements_admin_router)

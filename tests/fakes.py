@@ -1883,6 +1883,10 @@ class FakeOpsRepository:
         self.flag_reads = 0
         self.fail_next_action = False
         self.requeue_events: list[tuple[UUID, UUID]] = []  # (item_id, actor_user_id)
+        self.active_items: set[UUID] = set()  # F-2: items with a queued/leased job
+        self.item_status: dict[UUID, str] = {}  # F-3: content_items.status (default failed)
+        self.admin_brands: dict[UUID, Any] = {}  # F-5: brand_id ⇒ AdminBrandView
+        self.wa_summaries: dict[UUID, Any] = {}  # F-5: brand_id ⇒ AdminWaSummary
 
     async def add_action(self, action: Any) -> Any:
         if self.fail_next_action:
@@ -1935,16 +1939,42 @@ class FakeOpsRepository:
         row = self.jobs.get(job_id)
         return None if row is None else (row["job"], row["status"], row["revision_id"])
 
+    async def item_has_active_job(self, item_id: UUID) -> bool:
+        return item_id in self.active_items
+
     async def requeue(
-        self, job: Any, *, revision_id: UUID, actor_user_id: UUID, now: datetime
+        self, job: Any, *, revision_id: UUID, actor_user_id: UUID, now: datetime, grace: int
     ) -> bool:
+        from src.modules.ops.exceptions import ItemNotPublishFailedError
+
         row = self.jobs[job.job_id]
         if row["status"] != "failed":
             return False
+        if self.item_status.get(job.item_id, "publish_failed") != "publish_failed":
+            raise ItemNotPublishFailedError()  # the request transaction rolls back (F-3)
         row["status"] = "queued"
-        row["job"] = job.model_copy(update={"attempt_count": 0})
+        row["job"] = job.model_copy(update={"max_attempts": job.attempt_count + grace})
         self.requeue_events.append((job.item_id, actor_user_id))
         return True
+
+    async def admin_brand(self, brand_id: UUID) -> Any:
+        from src.modules.ops.domain import AdminBrandView
+
+        if brand_id in self.admin_brands:
+            return self.admin_brands[brand_id]
+        brand = self.store.brands.get(brand_id) if self.store is not None else None
+        if brand is None:
+            return None
+        return AdminBrandView(
+            id=brand.id,
+            name=brand.name,
+            slug=brand.slug,
+            suspended_at=self.suspended.get(brand_id, getattr(brand, "suspended_at", None)),
+            owner_tenant_id=brand.owner_tenant_id,
+        )
+
+    async def admin_wa_summary(self, brand_id: UUID) -> Any:
+        return self.wa_summaries.get(brand_id)
 
     async def admin_alerts(self, *, kind: str, limit: int) -> list[dict[str, Any]]:
         return [a for a in self.alerts if a["kind"] == kind][:limit]

@@ -21,7 +21,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from src.core.config import Settings, get_settings
-from src.modules.ops.domain import FLAG_KEYS, DeadLetterJob
+from src.modules.ops.domain import FLAG_KEYS, REQUEUE_GRACE_ATTEMPTS, DeadLetterJob
 from src.modules.ops.service import PLATFORM_FLAGS, OpsService, PlatformFlags
 
 from tests.conftest import AGENCY_ID, BRAND_ID, OWNER_ID, OWNER_USER_ID
@@ -214,9 +214,11 @@ def test_actions_list_filters_and_caps(
 
 
 # ------------------------------------------------------------------- A-3 -----
-def test_dead_letter_requeue_cas_409_and_404(
+def test_dead_letter_requeue_keeps_attempt_count_and_extends_max(
     admin_client: TestClient, auth_headers: Headers, ops_repo: FakeOpsRepository
 ) -> None:
+    """SPRINT-13.1 F-1: ``attempt_count`` is never reset (``attempt_no`` stays unique);
+    ``max_attempts = attempt_count + REQUEUE_GRACE_ATTEMPTS`` in the response and audit."""
     h = auth_headers(OWNER_ID)
     failed, queued = uuid4(), uuid4()
     ops_repo.jobs[failed] = _dead(failed)
@@ -226,13 +228,16 @@ def test_dead_letter_requeue_cas_409_and_404(
     assert rows[0]["error_class"] == "permanent_failure" and rows[0]["attempt_count"] == 3
 
     res = admin_client.post(f"{ADMIN}/publishing/jobs/{failed}/requeue", headers=h)
-    assert res.status_code == 200 and res.json()["attempt_count"] == 0
+    assert res.status_code == 200, res.text
+    assert res.json()["attempt_count"] == 3
+    assert res.json()["max_attempts"] == 3 + REQUEUE_GRACE_ATTEMPTS == 6
     assert ops_repo.jobs[failed]["status"] == "queued"
     assert ops_repo.requeue_events == [(ops_repo.jobs[failed]["job"].item_id, OWNER_USER_ID)]
     [row] = ops_repo.actions
     assert row.action == "job_requeued" and row.target_kind == "publish_job"
-    assert row.before == {"status": "failed", "attempt_count": 3}
-    assert row.after["status"] == "queued" and row.after["attempt_count"] == 0
+    assert row.before == {"status": "failed", "attempt_count": 3, "max_attempts": 3}
+    assert row.after["status"] == "queued" and row.after["attempt_count"] == 3
+    assert row.after["max_attempts"] == 6
 
     res = admin_client.post(f"{ADMIN}/publishing/jobs/{queued}/requeue", headers=h)
     assert res.status_code == 409 and res.json()["detail"]["error"] == "job_not_failed"
@@ -242,6 +247,89 @@ def test_dead_letter_requeue_cas_409_and_404(
     assert res.status_code == 404 and res.json()["detail"]["error"] == "publish_job_not_found"
     assert admin_client.get(f"{ADMIN}/publishing/dead-letter", headers=h).json() == []
     assert len(ops_repo.actions) == 1
+
+
+def test_requeue_ambiguous_outcome_is_409_manual_verification_required(
+    admin_client: TestClient, auth_headers: Headers, ops_repo: FakeOpsRepository
+) -> None:
+    """F-1 / D-070: an ``ambiguous_outcome`` job is never requeued blindly — nothing changes."""
+    job_id = uuid4()
+    row = _dead(job_id)
+    row["job"] = row["job"].model_copy(update={"error_class": "ambiguous_outcome"})
+    ops_repo.jobs[job_id] = row
+    h = auth_headers(OWNER_ID)
+    res = admin_client.post(f"{ADMIN}/publishing/jobs/{job_id}/requeue", headers=h)
+    assert res.status_code == 409
+    assert res.json()["detail"]["error"] == "manual_verification_required"
+    assert ops_repo.jobs[job_id]["status"] == "failed"
+    assert ops_repo.actions == [] and ops_repo.requeue_events == []
+
+
+def test_requeue_with_active_job_on_item_is_409_publish_in_progress(
+    admin_client: TestClient, auth_headers: Headers, ops_repo: FakeOpsRepository
+) -> None:
+    """F-2: owner already retried (a queued/leased job owns the item) ⇒ 409, no CAS."""
+    job_id = uuid4()
+    ops_repo.jobs[job_id] = _dead(job_id)
+    ops_repo.active_items.add(ops_repo.jobs[job_id]["job"].item_id)
+    h = auth_headers(OWNER_ID)
+    res = admin_client.post(f"{ADMIN}/publishing/jobs/{job_id}/requeue", headers=h)
+    assert res.status_code == 409 and res.json()["detail"]["error"] == "publish_in_progress"
+    assert ops_repo.jobs[job_id]["status"] == "failed" and ops_repo.actions == []
+
+
+def test_requeue_archived_item_is_409_item_not_publish_failed(
+    admin_client: TestClient, auth_headers: Headers, ops_repo: FakeOpsRepository
+) -> None:
+    """F-3: the item CAS must hit exactly one row; otherwise 409 and zero audit rows."""
+    job_id = uuid4()
+    ops_repo.jobs[job_id] = _dead(job_id)
+    ops_repo.item_status[ops_repo.jobs[job_id]["job"].item_id] = "archived"
+    h = auth_headers(OWNER_ID)
+    res = admin_client.post(f"{ADMIN}/publishing/jobs/{job_id}/requeue", headers=h)
+    assert res.status_code == 409
+    assert res.json()["detail"]["error"] == "item_not_publish_failed"
+    assert ops_repo.actions == [] and ops_repo.requeue_events == []
+
+
+# ------------------------------------------------------------------- F-5 -----
+def test_admin_brand_view_and_wa_summary(
+    admin_client: TestClient, auth_headers: Headers, ops_repo: FakeOpsRepository
+) -> None:
+    from src.modules.ops.domain import AdminWaSummary
+
+    h = auth_headers(OWNER_ID)
+    res = admin_client.get(f"{ADMIN}/brands/{BRAND_ID}", headers=h)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["id"] == str(BRAND_ID) and body["suspended"] is False
+    assert set(body) == {"id", "name", "slug", "suspended", "suspended_at", "owner_tenant_id"}
+    assert admin_client.get(f"{ADMIN}/brands/{uuid4()}", headers=h).status_code == 404
+
+    ops_repo.suspended[BRAND_ID] = datetime.now(tz=UTC)
+    assert admin_client.get(f"{ADMIN}/brands/{BRAND_ID}", headers=h).json()["suspended"] is True
+
+    res = admin_client.get(f"{ADMIN}/brands/{BRAND_ID}/whatsapp/summary", headers=h)
+    assert res.status_code == 404  # no account ⇒ the UI's ``_optional`` yields None
+    account_id = uuid4()
+    ops_repo.wa_summaries[BRAND_ID] = AdminWaSummary(
+        id=account_id,
+        display_phone="+20 10 0000 0000",
+        status="active",
+        quality_rating="GREEN",
+        messaging_limit="TIER_1K",
+    )
+    res = admin_client.get(f"{ADMIN}/brands/{BRAND_ID}/whatsapp/summary", headers=h)
+    assert res.status_code == 200
+    assert res.json()["id"] == str(account_id) and res.json()["status"] == "active"
+    assert set(res.json()) == {
+        "id",
+        "display_phone",
+        "status",
+        "quality_rating",
+        "messaging_limit",
+    }
+    assert not any("token" in k or "secret" in k or "hash" in k for k in res.json())
 
 
 # ------------------------------------------------------------------- A-4 -----

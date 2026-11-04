@@ -21,10 +21,13 @@ from src.modules.ops.domain import (
     ADMIN_ACTIONS_MAX,
     REQUEUED_BY_ADMIN,
     AdminAction,
+    AdminBrandView,
+    AdminWaSummary,
     BrandSuspension,
     DeadLetterJob,
     PlatformFlag,
 )
+from src.modules.ops.exceptions import ItemNotPublishFailedError
 
 
 class AdminActionRow(Base):
@@ -70,9 +73,13 @@ _JOB = text(
     "SELECT id, item_id, brand_id, channel, last_error_class, attempt_count, max_attempts, "
     "updated_at, status, revision_id FROM publish_jobs WHERE id = :job_id"
 )
-_REQUEUE_JOB = text(
-    "UPDATE publish_jobs SET status = 'queued', attempt_count = 0, next_attempt_at = :now, "
-    "leased_until = NULL, lease_owner = NULL, updated_at = :now "
+_ACTIVE_JOB = text(
+    "SELECT 1 FROM publish_jobs WHERE item_id = :item_id "
+    "AND status IN ('queued', 'leased') LIMIT 1"
+)
+_REQUEUE_JOB = text(  # F-1: attempt_count is never reset — attempt_no stays unique per job
+    "UPDATE publish_jobs SET status = 'queued', max_attempts = attempt_count + :grace, "
+    "next_attempt_at = :now, leased_until = NULL, lease_owner = NULL, updated_at = :now "
     "WHERE id = :job_id AND status = 'failed'"
 )
 _ITEM_CAS = text(
@@ -85,6 +92,13 @@ _REQUEUE_EVENT = text(
     ":tenant_id, :user_id, NULL, :now)"
 )
 _ADMIN_TENANT = text("SELECT tenant_id FROM users WHERE id = :user_id")
+_ADMIN_BRAND = text(
+    "SELECT id, name, slug, suspended_at, owner_tenant_id FROM brands WHERE id = :brand_id"
+)
+_ADMIN_WA_SUMMARY = text(
+    "SELECT id, display_phone, status, quality_rating, messaging_limit "
+    "FROM whatsapp_accounts WHERE brand_id = :brand_id ORDER BY created_at DESC LIMIT 1"
+)
 _ADMIN_ALERTS = text(
     "SELECT id, brand_id, kind, severity, payload, created_at, acknowledged_at "
     "FROM pulse_alerts WHERE kind = :kind ORDER BY created_at DESC LIMIT :limit"
@@ -173,6 +187,9 @@ class PgOpsRepository:
         row = (await self._session.execute(_JOB, {"job_id": job_id})).first()
         return None if row is None else (_dead_letter(row), str(row[8]), row[9])
 
+    async def item_has_active_job(self, item_id: uuid.UUID) -> bool:
+        return (await self._session.execute(_ACTIVE_JOB, {"item_id": item_id})).first() is not None
+
     async def requeue(
         self,
         job: DeadLetterJob,
@@ -180,13 +197,20 @@ class PgOpsRepository:
         revision_id: uuid.UUID,
         actor_user_id: uuid.UUID,
         now: datetime,
+        grace: int,
     ) -> bool:
-        """CAS on the job (``failed ⇒ queued``) and on the item (``publish_failed ⇒
-        scheduled``) + the D-055 ``requeued_by_admin`` event; ``False`` if the job moved."""
-        moved = await self._session.execute(_REQUEUE_JOB, {"job_id": job.job_id, "now": now})
+        """CAS on the job (``failed ⇒ queued``, ``max_attempts = attempt_count + grace``) and
+        on the item (``publish_failed ⇒ scheduled``) + the D-055 ``requeued_by_admin`` event.
+        ``False`` if the job moved; ``ItemNotPublishFailedError`` if the item CAS misses
+        (F-3) — the caller's transaction rolls the job update back."""
+        moved = await self._session.execute(
+            _REQUEUE_JOB, {"job_id": job.job_id, "now": now, "grace": grace}
+        )
         if (moved.rowcount or 0) != 1:
             return False
-        await self._session.execute(_ITEM_CAS, {"item_id": job.item_id, "now": now})
+        item = await self._session.execute(_ITEM_CAS, {"item_id": job.item_id, "now": now})
+        if (item.rowcount or 0) != 1:
+            raise ItemNotPublishFailedError()
         tenant = (await self._session.execute(_ADMIN_TENANT, {"user_id": actor_user_id})).first()
         await self._session.execute(
             _REQUEUE_EVENT,
@@ -201,6 +225,27 @@ class PgOpsRepository:
             },
         )
         return True
+
+    # --- F-5 admin brand view --------------------------------------------------------------
+    async def admin_brand(self, brand_id: uuid.UUID) -> AdminBrandView | None:
+        row = (await self._session.execute(_ADMIN_BRAND, {"brand_id": brand_id})).first()
+        if row is None:
+            return None
+        return AdminBrandView(
+            id=row[0], name=row[1], slug=row[2], suspended_at=row[3], owner_tenant_id=row[4]
+        )
+
+    async def admin_wa_summary(self, brand_id: uuid.UUID) -> AdminWaSummary | None:
+        row = (await self._session.execute(_ADMIN_WA_SUMMARY, {"brand_id": brand_id})).first()
+        if row is None:
+            return None
+        return AdminWaSummary(
+            id=row[0],
+            display_phone=row[1],
+            status=row[2],
+            quality_rating=row[3],
+            messaging_limit=row[4],
+        )
 
     # --- A-4 admin alerts ------------------------------------------------------------------
     async def admin_alerts(self, *, kind: str, limit: int) -> list[dict[str, Any]]:
