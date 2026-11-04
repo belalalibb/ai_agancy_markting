@@ -587,3 +587,65 @@ def test_brain_routes_are_protected_and_counted() -> None:
 
 def test_sample_uuid_type_matches_router() -> None:
     assert isinstance(UUID(int=0), UUID)
+
+
+# ------------------------------------------------------------- SPRINT-13 B-3 -----
+def test_b3_sector_set_preserved_and_cleared_through_put_profile(
+    brain_client: TestClient, owner_headers, viewer_headers
+) -> None:
+    """``sector`` rides on the profile: set ⇒ returned to every role; a body **without** the
+    key preserves it; an explicit ``null`` clears it; an unknown value is 422."""
+    res = _put(brain_client, owner_headers, version=1, body={**PROFILE_BODY, "sector": "clinics"})
+    assert res.status_code == 200 and res.json()["sector"] == "clinics"
+    assert brain_client.get(f"{BRAIN}/profile", headers=viewer_headers).json()["sector"] == (
+        "clinics"
+    )
+    # the first PUT *inserts* at version 1 (no bump) ⇒ the next If-Match is still 1
+    res = _put(brain_client, owner_headers, version=1)  # no ``sector`` key ⇒ preserved
+    assert res.status_code == 200 and res.json()["sector"] == "clinics"
+    res = _put(brain_client, owner_headers, version=2, body={**PROFILE_BODY, "sector": None})
+    assert res.status_code == 200 and res.json()["sector"] is None
+    res = _put(brain_client, owner_headers, version=3, body={**PROFILE_BODY, "sector": "hotels"})
+    assert res.status_code == 422
+
+
+def test_b3_playbooks_filter_by_sector_and_by_brand(
+    brain_client: TestClient, brain_app, owner_headers, viewer_headers, auth_headers
+) -> None:
+    """``GET /playbooks``: no filter ⇒ both; ``?sector=`` ⇒ one; ``?brand_id=`` ⇒ the brand's
+    stored sector (any member) or all when none is stored; a stranger ⇒ 404; unknown ⇒ 404."""
+    from src.modules.brand_brain.playbooks import get_brand_sector_reader
+
+    sectors: dict[UUID, str | None] = {BRAND_ID: None}
+
+    async def _reader(_session, brand_id):  # noqa: ANN001, ANN202
+        return sectors.get(brand_id)
+
+    brain_app.dependency_overrides[get_brand_sector_reader] = lambda: _reader
+    books = brain_client.get("/api/v1/playbooks", headers=owner_headers).json()
+    assert {b["sector"] for b in books} == {"restaurants", "clinics"}
+    res = brain_client.get(
+        "/api/v1/playbooks", params={"sector": "clinics"}, headers=owner_headers
+    )
+    assert res.status_code == 200 and [b["sector"] for b in res.json()] == ["clinics"]
+    res = brain_client.get(
+        "/api/v1/playbooks", params={"brand_id": str(BRAND_ID)}, headers=viewer_headers
+    )
+    assert res.status_code == 200 and len(res.json()) == 2  # nothing stored ⇒ all
+    sectors[BRAND_ID] = "restaurants"
+    res = brain_client.get(
+        "/api/v1/playbooks", params={"brand_id": str(BRAND_ID)}, headers=viewer_headers
+    )
+    assert [b["sector"] for b in res.json()] == ["restaurants"]
+    res = brain_client.get(
+        "/api/v1/playbooks",
+        params={"brand_id": str(BRAND_ID), "sector": "clinics"},  # explicit override wins
+        headers=owner_headers,
+    )
+    assert [b["sector"] for b in res.json()] == ["clinics"]
+    res = brain_client.get(
+        "/api/v1/playbooks", params={"brand_id": str(BRAND2_ID)}, headers=viewer_headers
+    )
+    assert res.status_code == 404 and res.json()["detail"]["error"] == "brand_not_found"
+    res = brain_client.get("/api/v1/playbooks", params={"sector": "hotels"}, headers=owner_headers)
+    assert res.status_code == 404 and res.json()["detail"]["error"] == "playbook_not_found"

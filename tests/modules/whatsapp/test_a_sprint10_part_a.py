@@ -466,3 +466,35 @@ async def test_a4_wa_draft_tokens_block_content_generate_in_the_fake_world(
         again = _suggest(client, owner, conv.id)
         assert again.status_code == 429  # the same shared allowance
     assert not wa_repo.drafts
+
+
+# ------------------------------------------------------------- SPRINT-13 B-2 -----
+async def test_b2_account_view_carries_caps_and_quality_without_any_secret(
+    wa_app: FastAPI, auth_headers, roles: None, wa_repo: FakeWhatsAppRepository, wa_account
+) -> None:
+    """``WhatsAppAccountPublic`` += quality_rating / messaging_limit / daily_reply_cap /
+    kill_switch / replies_today — read-only, no secret or hash field; VIEWER stays 403."""
+    from src.modules.whatsapp.domain.models import NumberCap
+
+    with TestClient(wa_app) as client:
+        res = client.get(f"{BASE}/account", headers=auth_headers(OWNER_ID))
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["daily_reply_cap"] == 300 and body["kill_switch"] is False  # D-082 default
+        assert body["replies_today"] == 0
+        assert body["quality_rating"] is None and body["messaging_limit"] is None
+        forbidden = {"encrypted_system_token", "encrypted_app_secret", "verify_token_hash"}
+        assert not forbidden & set(body)
+        assert not any("token" in k or "secret" in k or "hash" in k for k in body)
+        await wa_repo.upsert_number_cap(
+            NumberCap(
+                account_id=wa_account.id,
+                daily_reply_cap=50,
+                kill_switch=True,
+                updated_at=datetime.now(tz=UTC),
+            )
+        )
+        body = client.get(f"{BASE}/account", headers=auth_headers(AGENCY_ID)).json()  # MANAGER
+        assert body["daily_reply_cap"] == 50 and body["kill_switch"] is True
+        res = client.get(f"{BASE}/account", headers=auth_headers(STRANGER_ID))  # VIEWER
+        assert res.status_code == 403

@@ -146,11 +146,19 @@ class WhatsAppRepository(Protocol):
     ) -> None: ...
 
     async def update_status_by_wamid(
-        self, wamid: str, status: DeliveryStatus, *, brand_id: UUID, error_code: int | None
+        self,
+        wamid: str,
+        status: DeliveryStatus,
+        *,
+        brand_id: UUID,
+        error_code: int | None,
+        pricing: tuple[bool | None, str | None] | None = None,
     ) -> bool:
         """A-3: ``WHERE wamid = :w AND direction = 'outbound' AND brand_id = :brand_id`` and
         the transition is allowed by :func:`delivery_transition_allowed` (monotonic ranks).
-        ``False`` ⇒ ignored (unknown wamid, other brand, or backwards transition)."""
+        ``False`` ⇒ ignored (unknown wamid, other brand, or backwards transition).
+        SPRINT-13 B-1: ``pricing=(billable, category)`` from the webhook fills
+        ``wa_messages.billable`` / ``pricing_category`` when present."""
         ...
 
     # --------------------------------------------------------- reply drafts ----

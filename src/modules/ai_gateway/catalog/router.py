@@ -66,6 +66,7 @@ from src.modules.ai_gateway.gateway import AIGateway
 from src.modules.ai_gateway.http_errors import budget_error_to_http
 from src.modules.auth.dependencies import PlatformAdmin, get_rate_limiter
 from src.modules.auth.domain.rate_limit import RateLimiter
+from src.modules.ops.audit import Audit  # SPRINT-13 A-1: one admin_actions row per write
 
 router = APIRouter(prefix="/admin/ai", tags=["Platform admin — AI catalog (D-077)"])
 
@@ -126,23 +127,41 @@ async def list_providers(_: PlatformAdmin, service: AdminService) -> list[Provid
     summary="Register a provider (api_key encrypted on receipt, never returned)",
 )
 async def create_provider(
-    payload: ProviderCreate, actor: PlatformAdmin, service: AdminService
+    payload: ProviderCreate, actor: PlatformAdmin, service: AdminService, audit: Audit
 ) -> ProviderOut:
     try:
         created = await service.create_provider(payload, actor_user_id=actor.user_id)
     except CatalogError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="provider_created",
+        target_kind="ai_provider",
+        target_id=str(created.id),
+        after={"slug": created.slug, "kind": str(created.kind)},
+    )
     return ProviderOut.from_domain(created)
 
 
 @router.patch("/providers/{provider_id}", response_model=ProviderOut, summary="Update a provider")
 async def patch_provider(
-    provider_id: UUID, payload: ProviderPatch, actor: PlatformAdmin, service: AdminService
+    provider_id: UUID,
+    payload: ProviderPatch,
+    actor: PlatformAdmin,
+    service: AdminService,
+    audit: Audit,
 ) -> ProviderOut:
     try:
         updated = await service.patch_provider(provider_id, payload, actor_user_id=actor.user_id)
     except CatalogError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="provider_updated",
+        target_kind="ai_provider",
+        target_id=str(provider_id),
+        after={"fields": sorted(payload.model_dump(exclude_unset=True))},
+    )
     return ProviderOut.from_domain(updated)
 
 
@@ -152,12 +171,18 @@ async def patch_provider(
     summary="Delete a provider (CASCADE to its models and routes)",
 )
 async def delete_provider(
-    provider_id: UUID, actor: PlatformAdmin, service: AdminService
+    provider_id: UUID, actor: PlatformAdmin, service: AdminService, audit: Audit
 ) -> Response:
     try:
         await service.delete_provider(provider_id, actor_user_id=actor.user_id)
     except CatalogError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="provider_deleted",
+        target_kind="ai_provider",
+        target_id=str(provider_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -176,34 +201,56 @@ async def list_models(
     summary="Register a model with its pricing",
 )
 async def create_model(
-    payload: ModelCreate, actor: PlatformAdmin, service: AdminService
+    payload: ModelCreate, actor: PlatformAdmin, service: AdminService, audit: Audit
 ) -> ModelOut:
     try:
         created = await service.create_model(payload, actor_user_id=actor.user_id)
     except CatalogError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="model_created",
+        target_kind="ai_model",
+        target_id=str(created.id),
+        after={"provider_id": str(created.provider_id), "model_name": created.model_name},
+    )
     return ModelOut.from_domain(created)
 
 
 @router.patch("/models/{model_id}", response_model=ModelOut, summary="Update a model")
 async def patch_model(
-    model_id: UUID, payload: ModelPatch, actor: PlatformAdmin, service: AdminService
+    model_id: UUID, payload: ModelPatch, actor: PlatformAdmin, service: AdminService, audit: Audit
 ) -> ModelOut:
     try:
         updated = await service.patch_model(model_id, payload, actor_user_id=actor.user_id)
     except CatalogError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="model_updated",
+        target_kind="ai_model",
+        target_id=str(model_id),
+        after={"fields": sorted(payload.model_dump(exclude_unset=True))},
+    )
     return ModelOut.from_domain(updated)
 
 
 @router.delete(
     "/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model"
 )
-async def delete_model(model_id: UUID, actor: PlatformAdmin, service: AdminService) -> Response:
+async def delete_model(
+    model_id: UUID, actor: PlatformAdmin, service: AdminService, audit: Audit
+) -> Response:
     try:
         await service.delete_model(model_id, actor_user_id=actor.user_id)
     except CatalogError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="model_deleted",
+        target_kind="ai_model",
+        target_id=str(model_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -222,13 +269,20 @@ async def list_routing(
     summary="Replace the ordered model chain of a purpose (index = priority; empty = none)",
 )
 async def put_routing(
-    purpose: str, payload: RoutingPut, actor: PlatformAdmin, service: AdminService
+    purpose: str, payload: RoutingPut, actor: PlatformAdmin, service: AdminService, audit: Audit
 ) -> list[RouteOut]:
     target = _purpose_or_422(purpose)
     try:
         stored = await service.replace_routing(target, payload, actor_user_id=actor.user_id)
     except CatalogError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="routing_replaced",
+        target_kind="ai_routing",
+        target_id=target,
+        after={"models": [str(r.model_id) for r in stored]},
+    )
     return [RouteOut.from_domain(r) for r in stored]
 
 

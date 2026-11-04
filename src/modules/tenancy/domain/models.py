@@ -58,6 +58,8 @@ class Brand(BaseModel):
     learning_consent: LearningConsent = DEFAULT_LEARNING_CONSENT
     # SPRINT-11 C-4 (D-078): the referring brand, if any — set once at creation.
     referred_by_brand_id: UUID | None = None
+    # SPRINT-13 A-2: set by the platform admin kill switch; writes answer 403 while set.
+    suspended_at: datetime | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

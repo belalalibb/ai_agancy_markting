@@ -39,6 +39,14 @@ from src.modules.content.domain.models import Channel
 from src.modules.entitlements.dependencies import counter_guard_dependency
 from src.modules.entitlements.router import admin_router as entitlements_admin_router
 from src.modules.entitlements.router import router as entitlements_router
+from src.modules.lifecycle.router import router as lifecycle_router
+from src.modules.lifecycle.scheduler_step import retention_step
+from src.modules.ops.guards import (
+    feature_flag,
+    platform_readonly_guard,
+    require_brand_not_suspended,
+)
+from src.modules.ops.router import router as ops_admin_router
 from src.modules.publishing.channels import get_registry
 from src.modules.publishing.channels.router import router as channels_router
 from src.modules.publishing.domain.publisher import Publisher
@@ -131,6 +139,7 @@ def _start_scheduler(app: FastAPI, settings: Settings) -> asyncio.Task[None] | N
                 for step in (
                     settle_stale_cost_reservations_step(settings),
                     pulse_scheduler_step(settings),
+                    retention_step(settings),  # SPRINT-13 C-3 (D-081), dry-run default
                 )
                 if step is not None
             ),
@@ -162,11 +171,17 @@ def pulse_scheduler_step(settings: Settings) -> SchedulerStep | None:
     if not settings.feature_pulse:
         return None
     from src.modules.entitlements.dependencies import PgPlanCounterUsageReader
+    from src.modules.ops.guards import flag_active
+    from src.modules.ops.infrastructure.postgres_repository import PgOpsRepository
     from src.modules.pulse.scheduler_step import pulse_step
+
+    async def pulse_flag(session: AsyncSession) -> bool:  # SPRINT-13.1 F-6: DB flag per cycle
+        return await flag_active(PgOpsRepository(session), settings, "feature_pulse")
 
     return pulse_step(
         interval_seconds=settings.pulse_interval_seconds,
         counters_factory=lambda session: PgPlanCounterUsageReader(session),
+        flag_reader=pulse_flag,
     )
 
 
@@ -209,20 +224,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
 
-    api_v1 = APIRouter(prefix=settings.api_v1_prefix)
+    # SPRINT-13 A-2: ``platform_readonly`` (DB flag, Settings fallback) ⇒ 503 on every write
+    # under /api/v1 except /auth/* and /admin/*; ``brands.suspended_at`` ⇒ 403 on brand writes.
+    # Both are router-level dependencies — no handler changed. Removing ``ops`` = delete the
+    # two imports above, ``suspended`` below and the ``ops_admin_router`` mount.
+    api_v1 = APIRouter(
+        prefix=settings.api_v1_prefix, dependencies=[Depends(platform_readonly_guard)]
+    )
+    suspended = [Depends(require_brand_not_suspended)]
     api_v1.include_router(auth_router)
-    api_v1.include_router(tenancy_router)
-    api_v1.include_router(social_connect_router)
-    api_v1.include_router(content_router)
+    api_v1.include_router(tenancy_router, dependencies=suspended)
+    api_v1.include_router(social_connect_router, dependencies=suspended)
+    api_v1.include_router(content_router, dependencies=suspended)
     api_v1.include_router(channels_router)  # SPRINT-08 B-2: GET /channels[/{channel}]
     # SPRINT-09 B-1: public, signed Cloud API webhook (GET handshake + POST events).
     api_v1.include_router(whatsapp_webhook_router)
-    api_v1.include_router(whatsapp_router)  # SPRINT-09 B-2/B-3: /brands/{id}/whatsapp/…
-    api_v1.include_router(brand_brain_router)  # SPRINT-10 B-1: /brands/{id}/brain/…
+    api_v1.include_router(whatsapp_router, dependencies=suspended)  # SPRINT-09 B-2/B-3
+    api_v1.include_router(brand_brain_router, dependencies=suspended)  # SPRINT-10 B-1
     api_v1.include_router(playbooks_router)  # SPRINT-12.1-B D-4: GET /playbooks (CurrentUser)
     # SPRINT-12 C-1: share/unshare (OWNER) + the public, watermarked ``GET /d/{token}``.
-    api_v1.include_router(diagnosis_share_router)
+    api_v1.include_router(diagnosis_share_router, dependencies=suspended)
     api_v1.include_router(diagnosis_public_router)
+    api_v1.include_router(ops_admin_router)  # SPRINT-13 A: /admin/{actions,brands,flags,…}
+    # SPRINT-13 C (D-081): export / delete — OWNER + fresh session. SPRINT-13.1 F-4: a
+    # suspended brand's OWNER must still be able to export / delete (D-081), so this mount is
+    # deliberately **not** under ``suspended``; platform_readonly still 503 (``api_v1``).
+    api_v1.include_router(lifecycle_router)
     # SPRINT-11 C-5 (D-073/D-076): removable — see src/modules/entitlements/REMOVABILITY.md
     api_v1.include_router(entitlements_router)
     api_v1.include_router(entitlements_admin_router)
@@ -253,11 +280,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from src.modules.whatsapp.router import admin_router as whatsapp_admin_router
 
     app.dependency_overrides[whatsapp_lead_loop.get_published_post_lookup] = _published_post_lookup
+    # SPRINT-13 A-2: the two feature switches read the DB flag first (``platform_flags``),
+    # ``Settings`` next — flipping the row turns the feature off without a redeploy.
+    app.dependency_overrides[whatsapp_lead_loop.get_lead_loop_enabled] = feature_flag(
+        "feature_lead_loop"
+    )
     api_v1.include_router(whatsapp_admin_router)
     if settings.feature_pulse:
-        from src.modules.pulse.router import router as pulse_router
+        from src.modules.pulse import router as pulse_module
 
-        api_v1.include_router(pulse_router)
+        app.dependency_overrides[pulse_module.get_pulse_enabled] = feature_flag("feature_pulse")
+        api_v1.include_router(pulse_module.router, dependencies=suspended)
     else:
         logger.warning("FEATURE_PULSE=false — Pulse routes and scheduler step are not mounted")
     app.include_router(api_v1)

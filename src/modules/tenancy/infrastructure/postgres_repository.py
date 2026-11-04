@@ -283,6 +283,7 @@ def _brand(row: BrandRow) -> Brand:
         name=row.name,
         learning_consent=row.learning_consent or DEFAULT_LEARNING_CONSENT,
         referred_by_brand_id=row.referred_by_brand_id,
+        suspended_at=row.suspended_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

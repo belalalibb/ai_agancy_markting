@@ -402,3 +402,26 @@ async def test_scheduler_loop_logs_and_counts_cycle_errors_then_continues(
     assert calls >= 2  # the loop survived the failing cycle
     assert counters["scheduler_cycle_errors"] == 1
     assert "scheduler cycle failed" in caplog.text
+
+
+# ------------------------------------------------------- SPRINT-13.1 F-7 poisoned job ---
+async def test_poisoned_job_is_counted_and_rest_of_batch_still_processed(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One job whose processing raises must not starve the batch: ``publish_job_poisoned``
+    +1, the exception is logged, and the second job in the same ``run_once`` succeeds."""
+    _, bad = await world.scheduled(run_at=PAST - timedelta(seconds=1))
+    item_ok, good = await world.scheduled(run_at=PAST)
+    real_process = world.scheduler._process
+
+    async def process(job, now):  # noqa: ANN001, ANN202
+        if job.id == bad.id:
+            raise RuntimeError("poisoned")
+        return await real_process(job, now)
+
+    monkeypatch.setattr(world.scheduler, "_process", process)
+    assert await world.scheduler.run_once(NOW) == 2
+    assert counters["publish_job_poisoned"] == 1
+    assert counters["publish_succeeded"] == 1
+    assert world.job(good.id).status is JobStatus.SUCCEEDED
+    assert world.item(item_ok.id).status is ContentStatus.PUBLISHED

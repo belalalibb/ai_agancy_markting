@@ -6,8 +6,10 @@ any API behaviour, migration, or test outside `tests/ui/` and `tests/isolation/`
 ## What it owns
 
 * `src/ui/router.py` — `/app/*` routes (login, brand pick, today, inbox, content, diagnosis,
-  settings — SPRINT-12.1-B C; `/app/admin/ai` 4 tabs + probe and `/app/admin/entitlements` —
-  D, non-admins ⇒ 404 before any API call) — `include_in_schema=False`. Every screen reads/writes only through
+  settings — SPRINT-12.1-B C; `/app/admin/ai` 4 tabs + probe + SPRINT-13 `audit` (last 50
+  `admin_actions` + platform flags) and `dead_letter` (failed publish jobs + requeue) tabs, and
+  `/app/admin/entitlements` with suspend/unsuspend — D, non-admins ⇒ 404 before any API call) —
+  `include_in_schema=False`. Every screen reads/writes only through
   `ApiClient`; roles, entitlements, consent and the content state machine are enforced upstream.
 * `src/ui/session.py` — three `Path=/app` cookies: `app_session` (copy of the auth refresh value),
   `app_access` (the short-lived access JWT, decoded locally — `/auth/refresh` is called only on

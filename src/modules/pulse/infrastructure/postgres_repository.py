@@ -103,9 +103,12 @@ _PUBLISH_FAILED = text(
     "SELECT id, brand_id, last_error_class FROM publish_jobs "
     "WHERE status = 'failed' AND updated_at >= :since"
 )
+# SPRINT-13 A-4: a connection whose periodic refresh failed is ``reauth_required`` (the marker
+# ``social_connect`` already writes) ⇒ same alert kind with ``reason = refresh_failed``.
 _TOKEN_EXPIRING = text(
-    "SELECT id, brand_id, token_expires_at FROM social_connections "
-    "WHERE status = 'active' AND token_expires_at IS NOT NULL AND token_expires_at <= :until"
+    "SELECT id, brand_id, token_expires_at, status FROM social_connections "
+    "WHERE (status = 'active' AND token_expires_at IS NOT NULL AND token_expires_at <= :until) "
+    "OR status = 'reauth_required'"
 )
 _ACCOUNT_COLUMNS = text(
     "SELECT column_name FROM information_schema.columns "
@@ -123,6 +126,18 @@ _DAILY_CAP = text(
     "AS used "
     "FROM whatsapp_accounts a LEFT JOIN wa_number_caps c ON c.account_id = a.id "
     "WHERE a.status = 'active' AND (c.kill_switch IS NULL OR c.kill_switch = false)"
+)
+
+# SPRINT-13 B-1 (D-082/Q16): billable outbound service messages per number in the calendar
+# month. ``billable IS NULL`` counts (conservative: the webhook ``pricing`` block may be absent).
+_MONTHLY_SERVICE = text(
+    "SELECT a.id, a.brand_id, count(m.id) AS used "
+    "FROM whatsapp_accounts a JOIN wa_conversations v ON v.account_id = a.id "
+    "JOIN wa_messages m ON m.conversation_id = v.id "
+    "WHERE a.status = 'active' AND m.direction = 'outbound' AND m.created_at >= :month_start "
+    "AND (m.billable IS TRUE OR m.billable IS NULL) "
+    "AND (m.pricing_category IS NULL OR m.pricing_category = 'service') "
+    "GROUP BY a.id, a.brand_id HAVING count(m.id) >= :threshold"
 )
 
 
@@ -252,19 +267,23 @@ class PgPulseRepository:
 
     async def token_expiring(self, now: datetime, *, days: int) -> list[Finding]:
         rows = await self._session.execute(_TOKEN_EXPIRING, {"until": now + timedelta(days=days)})
-        return [
-            Finding(
-                brand_id=brand_id,
-                kind="meta_token_expiring",
-                severity="critical" if expires <= now else "warning",
-                payload={
-                    "ref": str(conn_id),
-                    "connection_id": str(conn_id),
-                    "token_expires_at": expires.isoformat(),
-                },
+        out: list[Finding] = []
+        for conn_id, brand_id, expires, conn_status in rows.all():
+            failed = conn_status == "reauth_required"
+            out.append(
+                Finding(
+                    brand_id=brand_id,
+                    kind="meta_token_expiring",
+                    severity="critical" if failed or expires <= now else "warning",
+                    payload={
+                        "ref": str(conn_id),
+                        "connection_id": str(conn_id),
+                        "token_expires_at": expires.isoformat() if expires else None,
+                        "reason": "refresh_failed" if failed else "expiring",
+                    },
+                )
             )
-            for conn_id, brand_id, expires in rows.all()
-        ]
+        return out
 
     async def quality_degraded(self, now: datetime) -> list[Finding]:
         columns = {c for (c,) in (await self._session.execute(_ACCOUNT_COLUMNS)).all()}
@@ -304,6 +323,28 @@ class PgPulseRepository:
                 )
             )
         return out
+
+    async def monthly_service_near(
+        self, now: datetime, *, threshold: int, cap: int
+    ) -> list[Finding]:
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        rows = await self._session.execute(
+            _MONTHLY_SERVICE, {"month_start": month_start, "threshold": threshold}
+        )
+        return [
+            Finding(
+                brand_id=brand_id,
+                kind="wa_monthly_service_80pct",
+                severity="warning",
+                payload={
+                    "ref": f"{account_id}:{month_start.strftime('%Y-%m')}",
+                    "account_id": str(account_id),
+                    "count": int(used),
+                    "cap": cap,
+                },
+            )
+            for account_id, brand_id, used in rows.all()
+        ]
 
 
 __all__ = ["PgPulseRepository", "PulseAlertRow"]

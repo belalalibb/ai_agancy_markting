@@ -73,7 +73,8 @@ class WhatsAppAccountRotate(BaseModel):
 
 
 class WhatsAppAccountPublic(BaseModel):
-    """OWNER/MANAGER view — no secret, no hash."""
+    """OWNER/MANAGER view — no secret, no hash. SPRINT-13 B-2 (D-082): the Meta quality
+    signals and the D-082 caps are **read-only** here (changing them stays admin wa-caps)."""
 
     id: UUID
     brand_id: UUID
@@ -81,11 +82,23 @@ class WhatsAppAccountPublic(BaseModel):
     waba_id: str
     display_phone: str
     status: AccountStatus
+    quality_rating: str | None = None
+    messaging_limit: str | None = None
+    daily_reply_cap: int | None = None
+    kill_switch: bool | None = None
+    replies_today: int | None = None
     created_at: datetime
     updated_at: datetime
 
     @classmethod
-    def from_domain(cls, account: WhatsAppAccount) -> WhatsAppAccountPublic:
+    def from_domain(
+        cls,
+        account: WhatsAppAccount,
+        *,
+        cap: NumberCap | None = None,
+        default_cap: int | None = None,
+        replies_today: int | None = None,
+    ) -> WhatsAppAccountPublic:
         return cls(
             id=account.id,
             brand_id=account.brand_id,
@@ -93,6 +106,11 @@ class WhatsAppAccountPublic(BaseModel):
             waba_id=account.waba_id,
             display_phone=account.display_phone,
             status=account.status,
+            quality_rating=account.quality_rating,
+            messaging_limit=account.messaging_limit,
+            daily_reply_cap=cap.daily_reply_cap if cap is not None else default_cap,
+            kill_switch=cap.kill_switch if cap is not None else (False if default_cap else None),
+            replies_today=replies_today,
             created_at=account.created_at,
             updated_at=account.updated_at,
         )

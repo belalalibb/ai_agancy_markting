@@ -58,6 +58,8 @@ def _account(row: WhatsAppAccountRow) -> WhatsAppAccount:
         encrypted_app_secret=row.encrypted_app_secret,
         verify_token_hash=row.verify_token_hash,
         status=AccountStatus(row.status),
+        quality_rating=row.quality_rating,
+        messaging_limit=row.messaging_limit,
         created_by_user_id=row.created_by_user_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -475,7 +477,13 @@ class PostgresWhatsAppRepository:
         )
 
     async def update_status_by_wamid(
-        self, wamid: str, status: DeliveryStatus, *, brand_id: UUID, error_code: int | None
+        self,
+        wamid: str,
+        status: DeliveryStatus,
+        *,
+        brand_id: UUID,
+        error_code: int | None,
+        pricing: tuple[bool | None, str | None] | None = None,
     ) -> bool:
         """A-3: the row is locked, then the monotonic transition is checked in Python with
         :func:`delivery_transition_allowed` — same rule as the fake, one source of truth."""
@@ -495,6 +503,12 @@ class PostgresWhatsAppRepository:
         row.delivery_status = status.value
         if error_code is not None:
             row.error_code = error_code
+        if pricing is not None:  # SPRINT-13 B-1
+            billable, category = pricing
+            if billable is not None:
+                row.billable = billable
+            if category is not None:
+                row.pricing_category = category[:32]
         await self._session.flush()
         return True
 

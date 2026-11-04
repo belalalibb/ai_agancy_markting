@@ -24,6 +24,14 @@
     <header><strong>{{ t("settings.whatsapp") }}</strong></header>
     {% if wa %}
     <p data-wa-phone>{{ t("settings.phone") }}: {{ wa.display_phone }} · <small>{{ t("wa_status." ~ wa.status) }}</small></p>
+    {# SPRINT-13 B-2 (D-082): read-only quality + caps; the owner sees why sending stopped. #}
+    <ul data-wa-economics>
+      <li data-wa-quality>{{ t("settings.wa_quality") }}: {{ t("wa_quality." ~ wa.quality_rating) if wa.quality_rating in ("GREEN", "YELLOW", "RED") else t("settings.wa_unknown") }}</li>
+      <li data-wa-limit>{{ t("settings.wa_messaging_limit") }}: {{ wa.messaging_limit or t("settings.wa_unknown") }}</li>
+      <li data-wa-cap>{{ t("settings.wa_daily_cap") }}: {{ wa.replies_today if wa.replies_today is not none else "—" }} / {{ wa.daily_reply_cap if wa.daily_reply_cap is not none else "—" }}</li>
+    </ul>
+    {% if wa.kill_switch %}<p data-wa-stopped="kill_switch"><mark>{{ t("settings.wa_stopped_reason") }}: {{ t("settings.wa_stopped_kill") }}</mark></p>
+    {% elif wa.daily_reply_cap is not none and wa.replies_today is not none and wa.replies_today >= wa.daily_reply_cap %}<p data-wa-stopped="daily_cap"><mark>{{ t("settings.wa_stopped_reason") }}: {{ t("settings.wa_stopped_cap") }}</mark></p>{% endif %}
     {% else %}<p data-empty>{{ t("settings.no_whatsapp") }}</p>{% endif %}
   </article>
 </div>
@@ -70,6 +78,22 @@
       <select name="role">{% for r in grant_roles %}<option value="{{ r }}">{{ t("role." ~ r) }}</option>{% endfor %}</select>
       <button type="submit">{{ t("settings.add_member") }}</button>
     </div>
+  </form>
+</article>
+{% endif %}
+{% if is_owner %}
+<article data-card="danger">
+  <header><strong>{{ t("settings.danger_title") }}</strong></header>
+  <p>{{ t("settings.danger_export_hint") }}</p>
+  <form method="post" action="{{ base }}/export" data-form="export">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="secondary">{{ t("settings.danger_export") }}</button>
+  </form>
+  <p>{{ t("settings.danger_delete_hint", slug=brand.slug) }}</p>
+  <form method="post" action="{{ base }}/delete" data-form="delete" hx-post="{{ base }}/delete" hx-target="this" hx-swap="none">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="text" name="confirm" required autocomplete="off" placeholder="{{ brand.slug }}">
+    <button type="submit" class="contrast">{{ t("settings.danger_delete") }}</button>
   </form>
 </article>
 {% endif %}

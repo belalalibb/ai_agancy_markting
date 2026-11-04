@@ -167,8 +167,9 @@ def test_b6_u1_scheduler_loop_started_and_cancelled_when_enabled(
         calls.append(type(scheduler).__name__)
         assert poll_seconds == 1
         # SPRINT-11 B-4: settle_stale_reservations; SPRINT-12 B-3: pulse_step (FEATURE_PULSE
-        # defaults to true — ``test_pulse.py`` covers the 1-step shape when it is off).
-        assert len(extra_steps) == 2
+        # defaults to true — ``test_pulse.py`` covers the 1-step shape when it is off);
+        # SPRINT-13 C-3: retention_step (always registered; RETENTION_DRY_RUN gates deletes).
+        assert len(extra_steps) == 3
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:

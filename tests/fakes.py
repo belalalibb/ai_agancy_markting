@@ -428,6 +428,10 @@ class StubResult:
     def all(self) -> list[object]:
         return list(self._rows) if self._rows else list(self._scalars)
 
+    def first(self) -> object:
+        """SPRINT-13 ``ops`` repository: ``Result.first()`` over scripted ``rows``."""
+        return self._rows[0] if self._rows else None
+
 
 class StubSession:
     """Records every statement; replays scripted :class:`StubResult`s in order.
@@ -944,6 +948,7 @@ class FakeWhatsAppRepository:
         self.accounts: dict[UUID, object] = {}
         self.conversations: dict[UUID, object] = {}
         self.messages: dict[UUID, object] = {}
+        self.pricing: dict[str, tuple[bool | None, str | None]] = {}  # SPRINT-13 B-1
         self.drafts: dict[UUID, object] = {}
         self.signals: dict[UUID, object] = {}
         self.attributions: dict[UUID, object] = {}  # SPRINT-12 B-2
@@ -1210,6 +1215,7 @@ class FakeWhatsAppRepository:
         *,
         brand_id: UUID,
         error_code,  # noqa: ANN001
+        pricing=None,  # noqa: ANN001 - SPRINT-13 B-1 (billable, category)
     ) -> bool:
         from src.modules.whatsapp.domain.models import delivery_transition_allowed
 
@@ -1221,6 +1227,8 @@ class FakeWhatsAppRepository:
                 if error_code is not None:
                     update["error_code"] = error_code
                 self.messages[mid] = m.model_copy(update=update)
+                if pricing is not None:  # SPRINT-13 B-1: recorded for the webhook tests
+                    self.pricing[wamid] = pricing
                 return True
         return False
 
@@ -1857,3 +1865,184 @@ class FakeCatalogRepository:
             models=list(self.models.values()),
             routes=list(self.routes),
         )
+
+
+# --------------------------------------------------------------- SPRINT-13 ops ---
+class FakeOpsRepository:
+    """In-memory ``PgOpsRepository`` twin (SPRINT-13 Part A): audit rows, flags, brand
+    suspension, a dead-letter job table and platform-wide alerts. ``fail_next_action`` lets a
+    test prove the audit row rolls back with the act (A-1)."""
+
+    def __init__(self, store: FakeStore | None = None) -> None:
+        self.store = store
+        self.actions: list[Any] = []
+        self.flags: dict[str, Any] = {}
+        self.suspended: dict[UUID, datetime | None] = {}
+        self.jobs: dict[UUID, dict[str, Any]] = {}  # job_id ⇒ {status, revision_id, job}
+        self.alerts: list[dict[str, Any]] = []
+        self.flag_reads = 0
+        self.fail_next_action = False
+        self.requeue_events: list[tuple[UUID, UUID]] = []  # (item_id, actor_user_id)
+        self.active_items: set[UUID] = set()  # F-2: items with a queued/leased job
+        self.item_status: dict[UUID, str] = {}  # F-3: content_items.status (default failed)
+        self.admin_brands: dict[UUID, Any] = {}  # F-5: brand_id ⇒ AdminBrandView
+        self.wa_summaries: dict[UUID, Any] = {}  # F-5: brand_id ⇒ AdminWaSummary
+
+    async def add_action(self, action: Any) -> Any:
+        if self.fail_next_action:
+            self.fail_next_action = False
+            raise RuntimeError("audit write failed")
+        self.actions.append(action)
+        return action
+
+    async def list_actions(self, *, target_kind: str | None, target_id: str | None, limit: int):  # noqa: ANN201
+        rows = [
+            a
+            for a in self.actions
+            if (not target_kind or a.target_kind == target_kind)
+            and (not target_id or a.target_id == target_id)
+        ]
+        return sorted(rows, key=lambda a: a.at, reverse=True)[:limit]
+
+    async def get_flags(self) -> dict[str, Any]:
+        self.flag_reads += 1
+        return dict(self.flags)
+
+    async def set_flag(self, key: str, value: bool, *, now: datetime) -> Any:
+        from src.modules.ops.domain import PlatformFlag
+
+        flag = PlatformFlag(key=key, value=value, updated_at=now)  # type: ignore[arg-type]
+        self.flags[key] = flag
+        return flag
+
+    async def brand_suspension(self, brand_id: UUID) -> Any:
+        from src.modules.ops.domain import BrandSuspension
+
+        known = self.store is not None and brand_id in self.store.brands
+        if not known and brand_id not in self.suspended:
+            return None
+        return BrandSuspension(brand_id=brand_id, suspended_at=self.suspended.get(brand_id))
+
+    async def set_suspended(self, brand_id: UUID, at: datetime | None) -> bool:
+        self.suspended[brand_id] = at
+        if self.store is not None and brand_id in self.store.brands:  # mirror brands.suspended_at
+            self.store.brands[brand_id] = self.store.brands[brand_id].model_copy(
+                update={"suspended_at": at}
+            )
+        return True
+
+    async def dead_letter(self, *, limit: int) -> list[Any]:
+        failed = [j["job"] for j in self.jobs.values() if j["status"] == "failed"]
+        return sorted(failed, key=lambda j: j.failed_at, reverse=True)[:limit]
+
+    async def job_status(self, job_id: UUID) -> Any:
+        row = self.jobs.get(job_id)
+        return None if row is None else (row["job"], row["status"], row["revision_id"])
+
+    async def item_has_active_job(self, item_id: UUID) -> bool:
+        return item_id in self.active_items
+
+    async def requeue(
+        self, job: Any, *, revision_id: UUID, actor_user_id: UUID, now: datetime, grace: int
+    ) -> bool:
+        from src.modules.ops.exceptions import ItemNotPublishFailedError
+
+        row = self.jobs[job.job_id]
+        if row["status"] != "failed":
+            return False
+        if self.item_status.get(job.item_id, "publish_failed") != "publish_failed":
+            raise ItemNotPublishFailedError()  # the request transaction rolls back (F-3)
+        row["status"] = "queued"
+        row["job"] = job.model_copy(update={"max_attempts": job.attempt_count + grace})
+        self.requeue_events.append((job.item_id, actor_user_id))
+        return True
+
+    async def admin_brand(self, brand_id: UUID) -> Any:
+        from src.modules.ops.domain import AdminBrandView
+
+        if brand_id in self.admin_brands:
+            return self.admin_brands[brand_id]
+        brand = self.store.brands.get(brand_id) if self.store is not None else None
+        if brand is None:
+            return None
+        return AdminBrandView(
+            id=brand.id,
+            name=brand.name,
+            slug=brand.slug,
+            suspended_at=self.suspended.get(brand_id, getattr(brand, "suspended_at", None)),
+            owner_tenant_id=brand.owner_tenant_id,
+        )
+
+    async def admin_wa_summary(self, brand_id: UUID) -> Any:
+        return self.wa_summaries.get(brand_id)
+
+    async def admin_alerts(self, *, kind: str, limit: int) -> list[dict[str, Any]]:
+        return [a for a in self.alerts if a["kind"] == kind][:limit]
+
+
+class FakeLifecycleRepository:
+    """In-memory ``PgLifecycleRepository`` twin (SPRINT-13 Part C, D-081). ``entities`` holds
+    the rows each export entity returns; ``pages`` the (page_id, encrypted_token) pairs the
+    delete must unsubscribe; ``sweep_counts`` what a sweep reports."""
+
+    def __init__(self, store: FakeStore | None = None) -> None:
+        self.store = store
+        self.entities: dict[str, list[dict[str, Any]]] = {}
+        self.exports: dict[UUID, tuple[Any, bytes | None]] = {}
+        self.pages: list[tuple[str, str]] = []
+        self.deleted: list[UUID] = []
+        self.sweeps: list[dict[str, Any]] = []
+        self.sweep_counts: dict[str, int] = {"wa_messages": 0, "brand_exports": 0}
+
+    async def read_entity(self, entity: str, brand_id: UUID, *, limit: int) -> list[dict]:
+        rows = self.entities.get(entity)
+        if rows is None and self.store is not None and entity == "brand":
+            brand = self.store.brands.get(brand_id)
+            rows = [] if brand is None else [{"id": str(brand.id), "name": brand.name}]
+        return list(rows or [])[: limit + 1]
+
+    async def add_export(self, export: Any, blob: bytes | None) -> Any:
+        self.exports[export.id] = (export, blob)
+        return export
+
+    async def get_export(
+        self, brand_id: UUID, export_id: UUID, *, not_before: datetime
+    ) -> tuple[Any, bytes | None] | None:
+        found = self.exports.get(export_id)
+        if found is None or found[0].brand_id != brand_id or found[0].created_at < not_before:
+            return None
+        return found
+
+    async def brand_names(self, brand_id: UUID) -> tuple[str, str] | None:
+        if self.store is None:
+            return None
+        brand = self.store.brands.get(brand_id)
+        return None if brand is None else (brand.slug, brand.name)
+
+    async def page_tokens(self, brand_id: UUID) -> list[tuple[str, str]]:
+        return list(self.pages)
+
+    async def delete_brand(self, brand_id: UUID) -> bool:
+        if self.store is None or brand_id not in self.store.brands:
+            return False
+        self.store.brands.pop(brand_id)
+        self.deleted.append(brand_id)
+        return True
+
+    async def sweep(
+        self,
+        *,
+        cutoff_default: datetime,
+        cutoff_agency: datetime,
+        export_cutoff: datetime,
+        dry_run: bool,
+    ) -> dict[str, int]:
+        self.sweeps.append(
+            {
+                "cutoff_default": cutoff_default,
+                "cutoff_agency": cutoff_agency,
+                "export_cutoff": export_cutoff,
+                "dry_run": dry_run,
+            }
+        )
+        return dict(self.sweep_counts)

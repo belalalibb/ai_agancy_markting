@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Annotated, Protocol
 from uuid import UUID
 
+from fastapi import Depends
+
+from src.core.config import Settings, get_settings
 from src.core.metrics import counters
 from src.modules.whatsapp.domain.models import (
     Conversation,
@@ -141,8 +144,15 @@ def get_published_post_lookup() -> PublishedPostLookup | None:
     return None
 
 
+def get_lead_loop_enabled(settings: Annotated[Settings, Depends(get_settings)]) -> bool:
+    """SPRINT-13 A-2: consumer-owned port for the ``feature_lead_loop`` switch — the
+    ``Settings`` value here; ``src/main.py`` overrides it with the DB-first platform flag."""
+    return settings.feature_lead_loop
+
+
 __all__ = [
     "LeadLoopService",
     "PublishedPostLookup",
+    "get_lead_loop_enabled",
     "get_published_post_lookup",
 ]

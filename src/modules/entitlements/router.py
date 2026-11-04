@@ -32,6 +32,7 @@ from src.modules.entitlements.schemas import (
     BrandEntitlementPublic,
 )
 from src.modules.entitlements.service import current_usage
+from src.modules.ops.audit import Audit  # SPRINT-13 A-1
 from src.modules.tenancy.domain.access import READ_ROLES
 from src.modules.tenancy.exceptions import TenancyError
 from src.modules.tenancy.router import Service as TenancyServiceDep
@@ -48,7 +49,7 @@ router = APIRouter(tags=["Entitlements (D-073)"])
     summary="Activate or extend a brand's plan (platform admin; audited)",
 )
 async def activate_entitlement(
-    payload: ActivateRequest, actor: PlatformAdmin, service: Service
+    payload: ActivateRequest, actor: PlatformAdmin, service: Service, audit: Audit
 ) -> BrandEntitlementOut:
     try:
         ent = await service.activate(
@@ -60,6 +61,13 @@ async def activate_entitlement(
         )
     except EntitlementsError as exc:
         raise to_http(exc) from exc
+    await audit.record(
+        actor_user_id=actor.user_id,
+        action="entitlement_activated",
+        target_kind="brand",
+        target_id=str(payload.brand_id),
+        after={"plan": str(ent.plan), "months": payload.months},
+    )
     return BrandEntitlementOut.from_domain(ent, await service.recent_events(payload.brand_id))
 
 

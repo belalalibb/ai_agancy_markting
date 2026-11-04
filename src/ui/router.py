@@ -498,7 +498,10 @@ async def _today_ctx(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
         f"/brands/{brand_id}/content/items", status="pending_approval", limit=TODAY_LIMIT
     )
     playbooks = await api.get("/playbooks")
-    sector = (frame["brand"].get("sector") or "").strip()  # no brand sector field yet ⇒ ""
+    # SPRINT-13 B-3: the stored ``brand_profiles.sector`` drives the card (``?sector=`` on the
+    # page stays an override when nothing is stored).
+    profile = await _optional(api, f"/brands/{brand_id}/brain/profile")
+    sector = ((profile or {}).get("sector") or "").strip()
     chosen = next((p for p in playbooks if p["sector"] == sector), None)
     return {
         **frame,
@@ -525,7 +528,7 @@ async def _today_page(
         user, data = await _call(request, settings, user, lambda api: _today_ctx(api, brand_id))
     except ApiError as exc:
         return _api_failure(request, settings, user, exc)
-    if data["playbook"] is None and sector:  # D-4: no ``brand_profiles.sector`` yet ⇒ select
+    if data["playbook"] is None and sector:  # D-4 / B-3: ``?sector=`` override when unset
         data["playbook"] = next((p for p in data["playbooks"] if p["sector"] == sector), None)
     ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash}
     name = "partials/today_cards.html" if _is_partial(request) else "today.html"
@@ -1091,8 +1094,67 @@ async def revoke_grant(
     )
 
 
+@router.post("/b/{brand_id}/settings/export")
+async def export_brand(
+    request: Request, brand_id: UUID, csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None
+) -> Response:
+    """SPRINT-13 C-1 (D-081): request the export, then stream the ZIP back through the
+    ApiClient (D-068) — the browser never talks to ``/api`` directly."""
+    path = f"/brands/{brand_id}/export"
+    gate, flash, created = await _action(request, csrf, "POST", path, None)
+    if gate.response is not None:
+        return gate.response
+    if flash is not None or not isinstance(created, dict):
+        return await _settings_page(request, get_settings(), gate.user, brand_id, flash)
+
+    async def _download(api: ApiClient) -> Any:
+        return await api.request("GET", f"{path}/{created['export_id']}")
+
+    try:
+        user, raw = await _call(request, get_settings(), gate.user, _download)
+    except ApiError as exc:
+        return _api_failure(request, get_settings(), gate.user, exc)
+    if raw.status_code != 200:
+        return await _settings_page(
+            request, get_settings(), user, brand_id, _error_text("generic")
+        )
+    response = Response(
+        raw.content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": raw.headers.get("content-disposition", "attachment"),
+            "X-Export-SHA256": raw.headers.get("x-export-sha256", ""),
+        },
+    )
+    return _with_session(get_settings(), user, response)
+
+
+@router.post("/b/{brand_id}/settings/delete", response_class=HTMLResponse)
+async def delete_brand(
+    request: Request,
+    brand_id: UUID,
+    confirm: Annotated[str, Form()] = "",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """SPRINT-13 C-2 (D-081): ``DELETE /brands/{id}`` with the typed confirmation; on 204
+    the brand is gone ⇒ ``HX-Redirect: /app`` (htmx) or a 303 to ``/app``."""
+    path = f"/brands/{brand_id}"
+    gate, flash, _ = await _action(request, csrf, "DELETE", path, {"confirm": confirm})
+    if gate.response is not None:
+        return gate.response
+    if flash is not None:
+        return await _settings_page(request, get_settings(), gate.user, brand_id, flash)
+    target = f"{APP_PREFIX}/"
+    if _is_partial(request):
+        response: Response = Response(status_code=200, headers={"HX-Redirect": target})
+    else:
+        response = RedirectResponse(target, status_code=303)
+    return _with_session(get_settings(), gate.user, response)
+
+
 # ------------------------------------------------------------------- admin ---
-ADMIN_TABS = ("providers", "models", "routing", "probe")
+ADMIN_TABS = ("providers", "models", "routing", "probe", "audit", "dead_letter")  # SPRINT-13
+FLAG_KEYS = ("platform_readonly", "feature_pulse", "feature_lead_loop")  # = ops.domain.FLAG_KEYS
 PURPOSES = (
     "content_generation",
     "whatsapp_suggest_reply",
@@ -1164,6 +1226,11 @@ async def _admin_ai_ctx(api: ApiClient, tab: str) -> dict[str, Any]:
         for r in sorted(routes, key=lambda r: (r["purpose"], r["priority"])):
             chains.setdefault(r["purpose"], []).append(r)
         ctx["chains"] = chains
+    elif tab == "audit":  # SPRINT-13 A-1/A-2: last 50 admin acts (read-only) + kill switches
+        ctx["actions"] = await api.get("/admin/actions", limit=50)
+        ctx["flags"] = await api.get("/admin/flags")
+    elif tab == "dead_letter":  # SPRINT-13 A-3
+        ctx["jobs"] = await api.get("/admin/publishing/dead-letter", limit=50)
     ctx["kinds"], ctx["capabilities"] = PROVIDER_KINDS, CAPABILITIES
     return ctx
 
@@ -1238,6 +1305,10 @@ async def _admin_ai_spec(
         if form.get("max_tokens"):
             body["max_tokens"] = int(form["max_tokens"])
         return ("POST", "/admin/ai/probe", body)
+    elif tab == "audit" and action == "flag" and form.get("key") in FLAG_KEYS:
+        return ("PUT", f"/admin/flags/{form['key']}", {"value": form.get("value") == "true"})
+    elif tab == "dead_letter" and action == "requeue" and target:
+        return ("POST", f"/admin/publishing/jobs/{target}/requeue", None)
     return None
 
 
@@ -1275,7 +1346,11 @@ async def _admin_ent_ctx(api: ApiClient, brand_id: str) -> dict[str, Any]:
     ctx: dict[str, Any] = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None}
     if brand_id:
         ctx["ent"] = await api.get(f"/admin/entitlements/{brand_id}")
-        ctx["wa"] = await _optional(api, f"/brands/{brand_id}/whatsapp/account")
+        # SPRINT-13.1 F-5: admin-scoped reads — a platform admin is rarely a *member* of the
+        # brand, so the tenant routes answered 404 (S13-2). ``/admin/brands/{id}`` carries
+        # ``suspended``; the WA summary carries the account ``id`` the caps form posts back.
+        ctx["wa"] = await _optional(api, f"/admin/brands/{brand_id}/whatsapp/summary")
+        ctx["brand"] = await _optional(api, f"/admin/brands/{brand_id}")
     return ctx
 
 
@@ -1289,7 +1364,7 @@ async def _admin_ent_page(
     except ApiError as exc:
         if exc.status == 401:
             return _denied(settings, request)
-        data = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None}
+        data = {"plans": PLANS, "brand_id": brand_id, "ent": None, "wa": None, "brand": None}
         flash = flash or _error_text(exc.code)
     ctx = {**_base_ctx(user, settings), **data, "flash": flash}
     return _with_session(settings, user, _render(request, "admin_entitlements.html", ctx))
@@ -1329,6 +1404,8 @@ async def admin_entitlements_action(request: Request, action: str) -> Response:
         if form.get("kill_switch") in ("true", "false"):
             caps["kill_switch"] = form["kill_switch"] == "true"
         spec = ("PATCH", f"/admin/entitlements/wa-caps/{form['account_id']}", caps)
+    elif action in ("suspend", "unsuspend") and brand_id:  # SPRINT-13 A-2 kill switch
+        spec = ("POST", f"/admin/brands/{brand_id}/{action}", None)
     if spec is None:
         return _with_session(settings, gate.user, _not_found_page(request))
     try:

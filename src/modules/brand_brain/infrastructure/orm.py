@@ -68,6 +68,7 @@ class BrandProfileRow(Base):
     audience: Mapped[dict[str, Any]] = _jsonb("{}")
     tone: Mapped[dict[str, Any]] = _jsonb("{}")
     goals: Mapped[list[dict[str, Any]]] = _jsonb("[]")
+    sector: Mapped[str | None] = mapped_column(String(32), nullable=True)  # SPRINT-13 B-3
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True

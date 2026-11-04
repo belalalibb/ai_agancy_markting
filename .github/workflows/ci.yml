@@ -1,7 +1,7 @@
 # =============================================================================
 # AI Growth OS — Continuous Integration (SPRINT-03 Part A)
 # =============================================================================
-# Five INDEPENDENT jobs, each surfaced as its own status check so the owner can
+# Six INDEPENDENT jobs, each surfaced as its own status check so the owner can
 # mark every one of them "Required" in branch protection (directive §8):
 #
 #   lint         ruff check + ruff format --check   on  src tests alembic scripts
@@ -14,8 +14,12 @@
 #                read` to enumerate the PR's commits (no secret to configure —
 #                GITHUB_TOKEN is auto-issued; personal accounts need no license).
 #   licenses     D-054 license gate: a CLEAN venv with `pip install .` ONLY (no
-#                [dev] extras) then `python scripts/check_licenses.py`.
+#                [dev] extras) then `python scripts/check_licenses.py`.#   restore-drill  SPRINT-13 C-4 (D-081): alembic upgrade head on a fresh PG, seed one brand
+#                + one admin_actions row, scripts/backup_pg.sh (pg_dump -Fc + openssl), restore
+#                into a second EMPTY database with scripts/restore_pg.sh, assert
+#                `alembic current == 0017` and identical row counts; prints restore seconds.
 #
+
 # Policy: Python 3.12 (= requires-python floor), no `continue-on-error` anywhere,
 # no repository secrets required, concurrency cancels superseded runs per ref.
 # Local equivalents: see directive §5 (`ruff check …`, `pytest -m …`,
@@ -131,3 +135,73 @@ jobs:
           .venv-licenses/bin/pip install .
       - name: D-054 license gate
         run: .venv-licenses/bin/python scripts/check_licenses.py
+
+  restore-drill:
+    name: restore-drill
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aigos_source
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: postgres
+      SOURCE_URL: postgresql://postgres:postgres@localhost:5432/aigos_source
+      TARGET_URL: postgresql://postgres:postgres@localhost:5432/aigos_drill
+      EXPECTED_HEAD: "0017"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install (dev extras)
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: PostgreSQL 16 client tools (pg_dump / pg_restore must match the server major)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common >/dev/null
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
+          sudo apt-get install -y -qq postgresql-client-16 >/dev/null
+          pg_dump --version && pg_restore --version
+      - name: Migrate the source database to head and seed one brand + one audit row
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/aigos_source
+        run: |
+          alembic upgrade head
+          psql "$SOURCE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO tenants (id, slug, name)
+            VALUES ('00000000-0000-4000-8000-000000000001', 'drill', 'Drill');
+          INSERT INTO brands (id, owner_tenant_id, slug, name)
+            VALUES ('00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-000000000001', 'drill-brand', 'Drill Brand');
+          INSERT INTO admin_actions (id, actor_user_id, action, target_kind, target_id, after)
+            VALUES (gen_random_uuid(), NULL, 'retention_sweep', 'platform', 'retention', '{"dry_run": true}'::jsonb);
+          SQL
+          psql "$SOURCE_URL" -At -c "SELECT 'brands=' || count(*) FROM brands UNION ALL SELECT 'admin_actions=' || count(*) FROM admin_actions UNION ALL SELECT 'ai_cost_log=' || count(*) FROM ai_cost_log" | tee before.txt
+      - name: Backup (plain -Fc and openssl-encrypted) with scripts/backup_pg.sh
+        run: |
+          PG_DUMP_URL="$SOURCE_URL" BACKUP_ENCRYPT=none bash scripts/backup_pg.sh ./drill | tee backup.txt
+          BACKUP_PASSPHRASE=drill-only PG_DUMP_URL="$SOURCE_URL" bash scripts/backup_pg.sh ./drill-enc | tee backup-enc.txt
+      - name: Restore the encrypted dump into a fresh EMPTY database and time it
+        run: |
+          psql "postgresql://postgres:postgres@localhost:5432/postgres" -c "CREATE DATABASE aigos_drill"
+          BACKUP_PASSPHRASE=drill-only bash scripts/restore_pg.sh "$(ls ./drill-enc/*.dump.enc)" "$TARGET_URL" | tee restore.txt
+      - name: Verify alembic current == 0017 and identical row counts
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/aigos_drill
+        run: |
+          alembic current | tee current.txt
+          grep -q "^$EXPECTED_HEAD " current.txt || { echo "alembic current is not $EXPECTED_HEAD"; exit 1; }
+          psql "$TARGET_URL" -At -c "SELECT 'brands=' || count(*) FROM brands UNION ALL SELECT 'admin_actions=' || count(*) FROM admin_actions UNION ALL SELECT 'ai_cost_log=' || count(*) FROM ai_cost_log" > after.txt
+          diff before.txt after.txt && echo "row counts identical"
+          grep -q "^brands=1$" after.txt && grep -q "^admin_actions=1$" after.txt
+          echo "RESTORE DRILL: $(grep restore_pg restore.txt) | $(grep backup_pg backup-enc.txt)"
