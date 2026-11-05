@@ -140,38 +140,67 @@ TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ai_growt
 
 ## 6. تقرير المنفذ (يملؤه المنفذ)
 
+> **الحالة: `SPRINT_14_A_DELIVERED`** — PR [#60](https://github.com/belalalibb/ai_agancy_markting/pull/60) `work/implementation → main` (من `main @ 34fce3c`). CI run [41944836846](https://github.com/belalalibb/ai_agancy_markting/actions/runs/41944836846) على `c42f9c5`: **6/6** (lint ✅ · unit **1668 passed / 1 skipped / 95.08%** ✅ · integration **163 passed** ✅ · secrets ✅ · licenses ✅ · restore-drill `restore_pg seconds=1 bytes=109232` ✅). المنفذ **متوقف** (D-063).
+
 ### 6-أ. الكوميتات
 | SHA | الرسالة | ملفات |
 |---|---|---|
-| | | |
+| `c42f9c5` | `feat(sprint-14a): self-serve onboarding part A — register, first brand + sector, Meta bridge + page selection, WhatsApp card, onboarding bar` | 15 ملفاً (+1193/−34): `src/ui/router.py`, `src/ui/api.py`, **`src/ui/slug.py`** (جديد), `src/ui/templates/{register,pages}.html` (جديدان), `{login,brands,settings}.html`, `src/ui/i18n/ar.json` (+62 مفتاحاً), `src/ui/REMOVABILITY.md`, `.env.template` (تعليق فقط), **`tests/ui/test_ui_onboarding.py`** (جديد، 32 اختباراً), `tests/ui/test_ui_session.py`, `tests/test_auth_guard.py`, `tests/isolation/test_ui_removable.py` |
+| (هذا الكوميت) | `docs(sprint-14a): §6 report` | `CURRENT_DIRECTIVE.md`, `WORK_STATE.md` |
 
 ### 6-ب. ما نُفِّذ (A-1..A-5)
 | البند | الملفات/الدوال | ملاحظات |
 |---|---|---|
-| A-1 | | |
-| A-2 | | |
-| A-3 | | |
-| A-4 | | |
-| A-5 | | |
+| A-1 | `router.py`: `register_form` / `register_submit` (`GET/POST /app/register`)، **`_establish_session(response, settings, next)`** مستخرجة من `login_submit` ويستعملها الاثنان (§4-أ)، `_auth_code()` مشتركة لأخطاء `/auth/*`؛ `templates/register.html` (slug مخفي خلف `<details>`، `autocomplete="new-password"`)؛ `login.html` رابط «سجّل» / `register.html` رابط «ادخل» | نداء `/auth/register` **واحد** ⇒ 201 ⇒ كوكيز `/app` + 303 `/app/`؛ كلمتا المرور غير متطابقتين ⇒ 400 محلي **بلا نداء** (اختبار يثبت أن `FakeStore` لم يتغير)؛ `email_taken` 409 / `tenant_slug_taken` 409 / `rate_limited` 429 / 422 ⇒ `http_422` بالعربية بنفس كود الاستجابة؛ تعارض slug المشتق يُعاد تلقائياً (`nile-owner` ⇒ `nile-owner-2`) واليدوي يفشل فوراً |
+| A-2 | `router.py`: `create_first_brand` (`POST /app/brands`)، `SECTORS`، `_brands_ctx` / `_brands_page`؛ **`src/ui/slug.py`**: `derive_slug(name, prefix)` + `slug_retry(base, attempt)` (نص فقط)؛ `brands.html` الحالة الفارغة = نموذج «أنشئ علامتك الأولى» (اسم، راديو `restaurants`/`clinics`، slug خلف «متقدم») | `POST /brands` ثم `GET …/brain/profile` ⇒ `PUT …/brain/profile` بـ`If-Match: <version>` (الملف `version=1` للعلامة الجديدة)؛ فشل القطاع ⇒ 303 إلى `…/settings?flash=sector_failed#connect` والعلامة باقية (اختبار بـ`IntegrityError` من الـfake)؛ `brand_slug_taken` ⇒ `-2` ثم `-<4hex>` ثم خطأ عربي؛ slug يدوي غير صالح ⇒ 422 `error.slug_invalid`؛ `brand_profiles.sector` محفوظ (`brain_repo.profiles[id].sector == "clinics"`) |
+| A-3 | `router.py`: `meta_callback_bridge` (`GET /app/social/meta/callback`)، `_meta_callback_code()` (يقرأ `detail.error.type`)، `META_CALLBACK_CODES`، `select_pages_form` / `select_pages_submit` (`GET/POST …/connections/{cid}/pages`)، `_pages_ctx` / `_pages_page`؛ `templates/pages.html`؛ `settings.html`: `id="connect"` + `settings.connect_hint` + رابط «اختيار الصفحات» لصاحب الاتصال؛ `.env.template` تعليق §4-ج-3 | الجسر يمرّر **نفس** معاملات الاستعلام إلى `GET /social/meta/callback` بتوكن المستخدم (B9 يبقى في API؛ المسار JSON **لم يُمسّ**)؛ 201 ⇒ 303 `/app/b/{brand_id}/settings/connections/{id}/pages`؛ 4xx ⇒ 303 `/app/?flash=<type>` (`user_denied`/`invalid_oauth_state`/`provider_error`/`missing_parameters` بالعربية)؛ بلا جلسة ⇒ `/app/login?next=/app/social/meta/callback?code=…&state=…`؛ الصفحة تعرض كل الصفحات بـcheckbox (المختارة `checked`)؛ POST فارغ ⇒ 400 عربي بلا نداء؛ نجاح ⇒ 303 `…/settings?flash=pages_selected`؛ `PUBLIC` لم يتغير |
+| A-4 | `router.py`: `WA_FIELDS` (`wa_pnid/wa_waba/wa_phone/wa_sys/wa_sec/wa_verify` ⇒ أسماء API في Python فقط)، **`_wa_payload(form, rotate)`**، `_wa_422_text()`، `_wa_action`، `whatsapp_connect` / `whatsapp_rotate` (`POST …/settings/whatsapp[/rotate]`)؛ `settings.html` بطاقة واتساب للمالك: ربط (لا حساب) / تدوير + «تحديث» خلف `<details>` (حساب موجود) | الحقول السرّية `type="password"` `autocomplete="new-password"` **بلا `value=`** (اختبار regex على الوسم)؛ بعد الربط لا تظهر أي قيمة سرّية في HTML؛ صفحة النجاح تعرض `phone_number_id`/`display_phone`/`status`/`quality_rating` من `GET …/account` فقط؛ 422 ⇒ «الحقل «رمز مستخدم النظام» قصير جداً.»؛ `whatsapp_credentials_invalid` 422 بالعربية؛ التدوير يرسل `system_token`+`app_secret` فقط |
+| A-5 | `router.py`: `ONBOARDING_STEPS`، **`_onboarding(api, brands)`**، `brands.html` `<nav data-onboarding>` بـ`data-step` / `data-done` | 4 خطوات لأول علامة: `account` دائماً ✓، `brand`، `channel` (= `wa` موجود **أو** أي صفحة `is_selected` في الاتصالات)، `draft` (`GET …/content/items?limit=1`)؛ كل خطوة ناقصة تحمل رابط الإجراء (`/app/#create`، `…/settings#connect`، `…/content`)؛ فشل نداء فرعي ⇒ `done=None` «غير معروف» لا 500؛ **يختفي كلياً** عند اكتمال الأربع (اختبار: حساب WA + مسودة ⇒ لا `data-onboarding`)؛ إعادة التوجيه التلقائية لعلامة واحدة إلى `/today` تبقى **فقط** عند غياب الشريط |
+
+**لقطة HTML (نصية) لشريط التقدّم:**
+```html
+<!-- بعد التسجيل مباشرة (0 علامات) -->
+<nav data-onboarding aria-label="خطوات البداية"><ol>
+  <li data-step="account" data-done="true">الحساب <span aria-hidden="true">✓</span></li>
+  <li data-step="brand" data-done="false">العلامة <a href="/app/#create">أكمل الآن</a></li>
+  <li data-step="channel" data-done="false">القناة <small>غير معروف</small> <a href="/app/#create">أكمل الآن</a></li>
+  <li data-step="draft" data-done="false">أول مسودة <small>غير معروف</small> <a href="/app/#create">أكمل الآن</a></li>
+</ol></nav>
+<!-- بعد أول علامة + ربط واتساب -->
+<li data-step="account" data-done="true">…✓</li>
+<li data-step="brand" data-done="true">…✓</li>
+<li data-step="channel" data-done="true">…✓</li>
+<li data-step="draft" data-done="false">أول مسودة <a href="/app/b/{id}/content">أكمل الآن</a></li>
+<!-- مكتمل: لا عنصر data-onboarding في الصفحة -->
+```
 
 ### 6-ج. أوامر التحقق (§1-ب) — النتائج
 | الأمر | النتيجة |
 |---|---|
-| ui py+html added | |
-| diff خارج الواجهة | |
-| grep D-068 | |
-| grep الأسرار | |
-| PROTECTED / `/app` | / |
-| ruff / unit / integration | |
+| ui py+html added | **619** (≤ 900) |
+| diff خارج الواجهة (`src/modules src/core src/main.py alembic pyproject.toml`) | **فارغ — 0 سطر** |
+| grep D-068 | سطر واحد فقط: `src/ui/router.py:29 from src.modules.auth.jwt import …` — **موجود قبل 14-A** (منذ 12.1-B C-0، مسموح في `tests/isolation/test_ui_removable.py`)؛ لا `httpx`/`sqlalchemy`/`src.modules` جديد |
+| grep الأسرار في القوالب (`gAAAA|system_token|api_key|app_secret|verify_token`) | **لا نتائج (exit=1)** |
+| PROTECTED / `/app` | **98** / **37** (انظر 6-هـ-1) |
+| ruff / unit / integration | `ruff check . && ruff format --check .` ✅ · unit **1668 passed, 1 skipped, TOTAL 95.08%** (CI) · integration **163 passed** (CI، بلا تغيير كما توقّع §3-1) |
 
 ### 6-د. الحدود (§0) — مُحترَمة
-- [ ] 0 سطر في `src/modules|src/core|src/main.py|alembic|pyproject.toml`
-- [ ] لا تبعية جديدة
-- [ ] CSRF على كل POST جديد
-- [ ] `/app` = 38 · PROTECTED = 98
+- [x] 0 سطر في `src/modules|src/core|src/main.py|alembic|pyproject.toml`
+- [x] لا تبعية جديدة (Jinja2 + `ApiClient` الحاليان؛ `re`/`unicodedata` من المكتبة القياسية لـ`slug.py` — أُضيفا إلى قائمة `STDLIB` في اختبار العزل)
+- [x] CSRF على كل POST جديد (`test_new_posts_require_csrf` ×5 + `test_app_routes_redirect_without_session` 32 عملية محمية)
+- [x] `/app` = **37** · PROTECTED = 98 (الـ38 في التوجيه خطأ حسابي — 6-هـ-1)
 
 ### 6-هـ. انحرافات/ملاحظات للمخطط
--
+1. **عدّاد `/app` = 37 لا 38.** جدول §1 يعدّ المسارات الجديدة: A-1 **2** + A-2 **1** + A-3 **3** + A-4 **2** + A-5 **0** = **8** ⇒ 29 + 8 = **37**؛ سطر «المجموع 9 ⇒ 38» خطأ جمع. ثُبِّت 37 في `test_ui_session.py`، `test_ui_onboarding.py::test_eight_new_app_routes_exist`، و`test_auth_guard.py` (26 ⇒ **32** عملية محمية؛ `/app/register` GET/POST معفاة من الجلسة مثل `/app/login`).
+2. **`_establish_session` بدل تكرار كود `login_submit`** (§4-أ حرفياً) + `_auth_code()` مشتركة — `test_ui_session.py` بقيت خضراء بلا تعديل سلوك.
+3. **A-2 بعد فشل القطاع:** التوجيه يقول «يُظهر تنبيهاً»؛ لأن الاستجابة 303 إلى الإعدادات، نُقل التنبيه عبر `?flash=sector_failed` إلى **قائمة مفاتيح مغلقة** `SETTINGS_FLASHES` (لا نص حر في الرابط) — نفس الآلية لـ`pages_selected` / `wa_connected` / `wa_rotated`، ولرسائل جسر Meta عبر `/app/?flash=<type>` مقيّدة بـ`META_CALLBACK_CODES`.
+4. **A-4 أكواد 422:** الـ422 من Pydantic ليست `detail.error` بل قائمة؛ `_wa_422_text()` يترجم `loc[-1]` إلى تسمية `wa.*` و`type` إلى «قصير جداً»/«غير صالح». أخطاء الخدمة (`whatsapp_credentials_invalid`, `whatsapp_account_exists`, `whatsapp_phone_number_in_use`) أُضيفت إلى `ar.json`.
+5. **A-5 «القناة»:** اعتُبرت صفحة Meta مختارة (`pages[].is_selected`) **أو** حساب WA موجود (`GET …/account` 200) — كما في §1؛ الحالة «غير معروف» تُعرض بـ`data-done="false"` + `onboarding.unknown` (لا قيمة ثالثة في `data-done` حفاظاً على عقد `true|false` في §1).
+6. **إعادة توجيه العلامة الواحدة:** سابقاً `GET /app/` بعلامة واحدة ⇒ 303 `/today` دائماً؛ الآن فقط عندما يكون الشريط غائباً (الأربع مكتملة) وإلا تُعرض صفحة الاختيار بالشريط — وإلا لما رأى المستخدم الجديد الشريط أبداً. `test_ui_session.py` الحالي (علامتان) غير متأثر.
+7. **`ApiClient`:** أُضيف `put(path, body, headers=)` و`delete(path, body=)` ومُرِّر `headers` عبر `request`/`json` (لـ`If-Match`) — ضمن الحجم.
+8. **لا نص عربي في `src/ui/*.py`:** `tests/ui/test_vendor_assets.py` يمنع الحروف العربية حتى في التعليقات؛ استُبدلت إشارات `§4-أ..د` في docstrings بـ`directive 4-A..D` (كشفها CI في المحاولة الأولى `e3d33b5` ⇒ أُصلح في نفس الكوميت بـ`--amend`).
+9. **TTFV تقريبي (§3-4):** من `/app/register` حتى «قناة مربوطة» = **4 شاشات** (تسجيل ⇒ `/app/` بالنموذج ⇒ إعدادات العلامة ⇒ نجاح واتساب) أو **5** عبر Meta (+ صفحة اختيار الصفحات) — ≤ 6.
+10. **`.env.template`** (لا `.env.example` في المستودع): أُضيف تعليق §4-ج-3 فقط؛ القيمة الافتراضية لم تتغير.
 
 ---
 
