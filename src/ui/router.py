@@ -44,6 +44,7 @@ from src.ui.session import (
     set_session,
     verify_csrf,
 )
+from src.ui.slug import derive_slug, slug_retry
 
 router = APIRouter(prefix=APP_PREFIX, include_in_schema=False)
 
@@ -408,19 +409,34 @@ async def login_submit(
         await api.aclose()
     if response.status_code != 200:
         code = "invalid_credentials" if response.status_code in (401, 400) else None
-        if response.status_code == 429:
-            code = "rate_limited"
-        payload = response.json() if response.content else {}
-        detail = payload.get("detail") if isinstance(payload, dict) else None
-        if isinstance(detail, dict) and isinstance(detail.get("error"), str):
-            code = detail["error"]
-        ctx = {"error": _error_text(code or "generic"), "next": next, "email": email}
+        ctx = {"error": _error_text(_auth_code(response, code)), "next": next, "email": email}
         return _render(request, "login.html", ctx, status=response.status_code)
+    established = _establish_session(response, settings, next)
+    if established is None:
+        ctx = {"error": _error_text("generic"), "next": next, "email": email}
+        return _render(request, "login.html", ctx, status=502)
+    return established
+
+
+def _auth_code(response: Any, default: str | None) -> str:
+    """Error code of an ``/auth/*`` failure: body ``detail.error`` ⇒ 429 ⇒ ``default``."""
+    code = "rate_limited" if response.status_code == 429 else default
+    payload = response.json() if response.content else {}
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, dict) and isinstance(detail.get("error"), str):
+        code = detail["error"]
+    elif isinstance(detail, list) and response.status_code == 422:
+        code = "http_422"
+    return code or "generic"
+
+
+def _establish_session(response: Any, settings: Settings, next: str) -> Response | None:  # noqa: A002
+    """Directive 4-A: ``TokenOut`` + refresh cookie (from ``/auth/login`` **or**
+    ``/auth/register``) ⇒ the ``/app`` cookies + 303; ``None`` when either part is missing."""
     refresh_value = response.cookies.get(settings.auth_refresh_cookie_name)
     access_token = (response.json() or {}).get("access_token")
     if not refresh_value or not access_token:
-        ctx = {"error": _error_text("generic"), "next": next, "email": email}
-        return _render(request, "login.html", ctx, status=502)
+        return None
     target = next if next.startswith(f"{APP_PREFIX}/") and next != LOGIN_PATH else f"{APP_PREFIX}/"
     redirect = RedirectResponse(target, status_code=303)
     set_session(
@@ -431,6 +447,57 @@ async def login_submit(
         nonce=new_nonce(),
     )
     return redirect
+
+
+# ------------------------------------------------------- register (14-A A-1) ---
+@router.get("/register", response_class=HTMLResponse)
+async def register_form(request: Request) -> Response:
+    return _render(request, "register.html", {"error": None, "form": {}})
+
+
+@router.post("/register", response_class=HTMLResponse)
+async def register_submit(  # noqa: PLR0913 - one form field per input
+    request: Request,
+    email: Annotated[str, Form()] = "",
+    password: Annotated[str, Form()] = "",
+    password_confirm: Annotated[str, Form()] = "",
+    tenant_name: Annotated[str, Form()] = "",
+    tenant_slug: Annotated[str, Form()] = "",
+) -> Response:
+    """One ``POST /auth/register`` (201 ``TokenOut`` + refresh cookie) ⇒ session — never a
+    second ``/auth/login`` (directive 4-A). Mismatched passwords ⇒ local 400, no API call."""
+    settings = get_settings()
+    form = {"email": email, "tenant_name": tenant_name, "tenant_slug": tenant_slug}
+    if password != password_confirm:
+        ctx = {"error": t("register.password_mismatch"), "form": form}
+        return _render(request, "register.html", ctx, status=400)
+    manual = bool(tenant_slug.strip())
+    slug = tenant_slug.strip() or derive_slug(tenant_name, "org")
+    api = _api(request, settings)
+    try:
+        for attempt in range(3):
+            body = {
+                "email": email,
+                "password": password,
+                "tenant_slug": slug,
+                "tenant_name": tenant_name,
+            }
+            response = await api.request("POST", "/auth/register", json=body)
+            if response.status_code == 201:
+                established = _establish_session(response, settings, "")
+                if established is None:
+                    ctx = {"error": _error_text("generic"), "form": form}
+                    return _render(request, "register.html", ctx, status=502)
+                return established
+            code = _auth_code(response, "generic")
+            if code != "tenant_slug_taken" or manual or attempt == 2:
+                break
+            slug = slug_retry(slug, attempt + 1)  # directive 4-B-4: ``-2`` then ``-<4hex>``
+    finally:
+        await api.aclose()
+    status = response.status_code if response.status_code in (400, 409, 422, 429) else 502
+    ctx = {"error": _error_text(code), "form": form}
+    return _render(request, "register.html", ctx, status=status)
 
 
 @router.post("/logout")
@@ -459,20 +526,158 @@ async def logout(
 
 # -------------------------------------------------------------- brand pick ---
 @router.get("/", response_class=HTMLResponse)
-async def pick_brand(request: Request) -> Response:
+async def pick_brand(request: Request, flash: str = "") -> Response:
     settings = get_settings()
     gate = await _gate_user(request, settings)
     if gate.response is not None:
         return gate.response
+    text = _error_text(flash) if flash in META_CALLBACK_CODES else None  # A-3 bridge 4xx
+    return await _brands_page(request, settings, gate.user, text)
+
+
+SECTORS = ("restaurants", "clinics")  # = brand_brain Sector (14-A shows these two only)
+ONBOARDING_STEPS = ("account", "brand", "channel", "draft")  # 14-A A-5
+
+
+async def _onboarding(api: ApiClient, brands: list[Any]) -> list[dict[str, Any]] | None:
+    """A-5: 4 steps for the **first** brand; ``None`` once all are done (bar disappears). A
+    failing sub-call marks that step *unknown* (``done=None``) — never a 500."""
+    if not brands:
+        link = f"{APP_PREFIX}/#create"
+        return [
+            {"step": "account", "done": True, "href": None},
+            {"step": "brand", "done": False, "href": link},
+            {"step": "channel", "done": None, "href": link},
+            {"step": "draft", "done": None, "href": link},
+        ]
+    bid = brands[0]["id"]
+    base = f"{APP_PREFIX}/b/{bid}"
+    channel: bool | None
+    draft: bool | None
     try:
-        user, brands = await _call(request, settings, gate.user, lambda api: api.get("/brands"))
+        connections = await api.get(f"/brands/{bid}/social/meta/connections")
+        wa = await _optional(api, f"/brands/{bid}/whatsapp/account")
+        channel = bool(wa) or any(
+            p.get("is_selected") for c in connections for p in c.get("pages", [])
+        )
+    except ApiError:
+        channel = None
+    try:
+        items = await api.get(f"/brands/{bid}/content/items", limit=1)
+        draft = bool(items.get("items"))
+    except ApiError:
+        draft = None
+    steps = [
+        {"step": "account", "done": True, "href": None},
+        {"step": "brand", "done": True, "href": None},
+        {"step": "channel", "done": channel, "href": f"{base}/settings#connect"},
+        {"step": "draft", "done": draft, "href": f"{base}/content"},
+    ]
+    return None if all(s["done"] is True for s in steps) else steps
+
+
+async def _brands_ctx(api: ApiClient) -> dict[str, Any]:
+    brands = await api.get("/brands")
+    return {"brands": brands, "onboarding": await _onboarding(api, brands)}
+
+
+async def _brands_page(
+    request: Request,
+    settings: Settings,
+    user: AppUser,
+    flash: str | None = None,
+    *,
+    form: Mapping[str, str] | None = None,
+    status: int = 200,
+) -> Response:
+    try:
+        user, data = await _call(request, settings, user, _brands_ctx)
     except ApiError as exc:
-        return _api_failure(request, settings, gate.user, exc)
-    if len(brands) == 1:
+        return _api_failure(request, settings, user, exc)
+    brands = data["brands"]
+    if len(brands) == 1 and data["onboarding"] is None and flash is None:
         target = f"{APP_PREFIX}/b/{brands[0]['id']}/today"
         return _with_session(settings, user, RedirectResponse(target, status_code=303))
-    ctx = {**_base_ctx(user, settings), "brands": brands}
-    return _with_session(settings, user, _render(request, "brands.html", ctx))
+    ctx = {
+        **_base_ctx(user, settings),
+        **data,
+        "flash": flash,
+        "form": form or {},
+        "sectors": SECTORS,
+    }
+    return _with_session(settings, user, _render(request, "brands.html", ctx, status=status))
+
+
+@router.post("/brands", response_class=HTMLResponse)
+async def create_first_brand(
+    request: Request,
+    name: Annotated[str, Form()] = "",
+    sector: Annotated[str, Form()] = "",
+    slug: Annotated[str, Form()] = "",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """A-2: ``POST /brands`` (slug derived per directive 4-B, retried on ``brand_slug_taken``) then
+    ``PUT …/brain/profile`` with ``If-Match`` from the GET. The sector write never fails the
+    creation — it only adds a flash. 303 ⇒ ``…/settings#connect``."""
+    settings = get_settings()
+    gate = await _gate_user(request, settings, csrf)
+    if gate.response is not None:
+        return gate.response
+    form = {"name": name, "sector": sector, "slug": slug}
+    manual = bool(slug.strip())
+    candidate = slug.strip() or derive_slug(name, "brand")
+
+    async def _create(api: ApiClient) -> Any:
+        current = candidate
+        for attempt in range(3):
+            try:
+                return await api.post("/brands", {"slug": current, "name": name})
+            except ApiError as exc:
+                if exc.code != "brand_slug_taken" or manual or attempt == 2:
+                    raise
+                current = slug_retry(current, attempt + 1)
+        return None  # pragma: no cover - loop always returns or raises
+
+    try:
+        user, brand = await _call(request, settings, gate.user, _create)
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        code = "slug_invalid" if exc.status == 422 else exc.code
+        status = exc.status if exc.status in (400, 403, 409, 422, 429) else 502
+        return await _brands_page(
+            request, settings, gate.user, _error_text(code), form=form, status=status
+        )
+    flash: str | None = None
+    if sector in SECTORS:
+
+        async def _set_sector(api: ApiClient) -> Any:
+            path = f"/brands/{brand['id']}/brain/profile"
+            profile = await api.get(path)
+            body = {
+                "products": profile.get("products", []),
+                "audience": profile.get("audience", {}),
+                "tone": {
+                    k: v
+                    for k, v in (profile.get("tone") or {}).items()
+                    if k in ("voice", "formality", "emoji_policy", "banned_phrases")
+                    and v is not None
+                },
+                "goals": profile.get("goals", []),
+                "sector": sector,
+            }
+            return await api.put(path, body, headers={"If-Match": str(profile["version"])})
+
+        try:
+            user, _ = await _call(request, settings, user, _set_sector)
+        except ApiError as exc:
+            if exc.status == 401:
+                return _denied(settings, request)
+            flash = t("brands.sector_failed")
+    target = f"{APP_PREFIX}/b/{brand['id']}/settings#connect"
+    if flash is not None:
+        target = f"{APP_PREFIX}/b/{brand['id']}/settings?flash=sector_failed#connect"
+    return _with_session(settings, user, RedirectResponse(target, status_code=303))
 
 
 def _api_failure(request: Request, settings: Settings, user: AppUser, exc: ApiError) -> Response:
@@ -1010,13 +1215,22 @@ async def _settings_page(
     return _with_session(settings, user, _render(request, "settings.html", ctx))
 
 
+SETTINGS_FLASHES = {  # 14-A: translated keys for ``?flash=`` after a 303 (no free text)
+    "sector_failed": "brands.sector_failed",
+    "pages_selected": "pages.saved",
+    "wa_connected": "wa.connected_ok",
+    "wa_rotated": "wa.rotated_ok",
+}
+
+
 @router.get("/b/{brand_id}/settings", response_class=HTMLResponse)
-async def brand_settings(request: Request, brand_id: UUID) -> Response:
+async def brand_settings(request: Request, brand_id: UUID, flash: str = "") -> Response:
     settings = get_settings()
     gate = await _gate_user(request, settings)
     if gate.response is not None:
         return gate.response
-    return await _settings_page(request, settings, gate.user, brand_id)
+    key = SETTINGS_FLASHES.get(flash)
+    return await _settings_page(request, settings, gate.user, brand_id, t(key) if key else None)
 
 
 async def _settings_action(
@@ -1044,6 +1258,147 @@ async def connection_start(
     return await _settings_page(request, get_settings(), gate.user, brand_id, flash)
 
 
+@router.get("/social/meta/callback")
+async def meta_callback_bridge(  # noqa: PLR0913 - Meta's query parameters
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> Response:
+    """A-3 / directive 4-C: the browser lands here after Facebook Login; the UI forwards the
+    **same** query to ``GET /social/meta/callback`` (JSON, unchanged) under the user's token. 201 ⇒
+    303 to the page-selection screen; 4xx ⇒ 303 ``/app/`` with the translated code (the
+    brand is unknown then). No session ⇒ login with ``next`` carrying ``code``/``state``."""
+    settings = get_settings()
+    gate = await _gate_user(request, settings)
+    if gate.response is not None:
+        query = f"?{request.url.query}" if request.url.query else ""
+        target = login_target(f"{request.url.path}{query}")
+        response: Response = RedirectResponse(target, status_code=303)
+        clear_session(response, settings)
+        return response
+    params = {
+        k: v
+        for k, v in (
+            ("code", code),
+            ("state", state),
+            ("error", error),
+            ("error_description", error_description),
+        )
+        if v is not None
+    }
+
+    async def _complete(api: ApiClient) -> Any:
+        return await api.json("GET", "/social/meta/callback", params=params)
+
+    try:
+        user, account = await _call(request, settings, gate.user, _complete)
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        code_ = _meta_callback_code(exc)
+        target = f"{APP_PREFIX}/?flash={code_}"
+        return _with_session(settings, gate.user, RedirectResponse(target, status_code=303))
+    target = f"{APP_PREFIX}/b/{account['brand_id']}/settings/connections/{account['id']}/pages"
+    return _with_session(settings, user, RedirectResponse(target, status_code=303))
+
+
+META_CALLBACK_CODES = (
+    "user_denied",
+    "invalid_oauth_state",
+    "provider_error",
+    "missing_parameters",
+)
+
+
+def _meta_callback_code(exc: ApiError) -> str:
+    """The callback's 400s carry ``detail.error.type`` (not ``detail.error``)."""
+    detail = exc.detail.get("detail") if isinstance(exc.detail, dict) else None
+    inner = detail.get("error") if isinstance(detail, dict) else None
+    kind = inner.get("type") if isinstance(inner, dict) else None
+    return kind if kind in META_CALLBACK_CODES else exc.code
+
+
+async def _pages_ctx(api: ApiClient, brand_id: UUID, connection_id: UUID) -> dict[str, Any]:
+    frame = await _brand_frame(api, brand_id)
+    connection = await api.get(f"/brands/{brand_id}/social/meta/connections/{connection_id}")
+    return {**frame, "connection": connection}
+
+
+async def _pages_page(
+    request: Request,
+    settings: Settings,
+    user: AppUser,
+    brand_id: UUID,
+    connection_id: UUID,
+    error: str | None = None,
+    *,
+    status: int = 200,
+) -> Response:
+    try:
+        user, data = await _call(
+            request, settings, user, lambda api: _pages_ctx(api, brand_id, connection_id)
+        )
+    except ApiError as exc:
+        return _api_failure(request, settings, user, exc)
+    ctx = {**_base_ctx(user, settings, data["brand"]), **data, "error": error}
+    return _with_session(settings, user, _render(request, "pages.html", ctx, status=status))
+
+
+@router.get(
+    "/b/{brand_id}/settings/connections/{connection_id}/pages", response_class=HTMLResponse
+)
+async def select_pages_form(request: Request, brand_id: UUID, connection_id: UUID) -> Response:
+    settings = get_settings()
+    gate = await _gate_user(request, settings)
+    if gate.response is not None:
+        return gate.response
+    return await _pages_page(request, settings, gate.user, brand_id, connection_id)
+
+
+@router.post(
+    "/b/{brand_id}/settings/connections/{connection_id}/pages", response_class=HTMLResponse
+)
+async def select_pages_submit(
+    request: Request,
+    brand_id: UUID,
+    connection_id: UUID,
+    page_ids: Annotated[list[str], Form()] = [],  # noqa: B006 - FastAPI multi-value form
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """Empty selection ⇒ local Arabic error, no API call; else ``PUT …/pages/selection``."""
+    settings = get_settings()
+    gate = await _gate_user(request, settings, csrf)
+    if gate.response is not None:
+        return gate.response
+    chosen = [p.strip() for p in page_ids if p.strip()]
+    if not chosen:
+        return await _pages_page(
+            request, settings, gate.user, brand_id, connection_id, t("pages.none"), status=400
+        )
+    path = f"/brands/{brand_id}/social/meta/connections/{connection_id}/pages/selection"
+    try:
+        user, _ = await _call(
+            request, settings, gate.user, lambda api: api.put(path, {"page_ids": chosen})
+        )
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        status = exc.status if exc.status in (403, 404, 409, 422) else 502
+        return await _pages_page(
+            request,
+            settings,
+            gate.user,
+            brand_id,
+            connection_id,
+            _error_text(exc.code),
+            status=status,
+        )
+    target = f"{APP_PREFIX}/b/{brand_id}/settings?flash=pages_selected"
+    return _with_session(settings, user, RedirectResponse(target, status_code=303))
+
+
 @router.post("/b/{brand_id}/settings/connections/{connection_id}/resync")
 async def connection_resync(
     request: Request,
@@ -1053,6 +1408,74 @@ async def connection_resync(
 ) -> Response:
     path = f"/brands/{brand_id}/social/meta/connections/{connection_id}/resync"
     return await _settings_action(request, brand_id, csrf, "POST", path, None, "settings.resynced")
+
+
+# ------------------------------------------------- WhatsApp Cloud API (14-A A-4) ---
+WA_FIELDS = {  # directive 4-D: neutral form names (templates) ⇒ API body keys (Python only)
+    "wa_pnid": "phone_number_id",
+    "wa_waba": "waba_id",
+    "wa_phone": "display_phone",
+    "wa_sys": "system_token",
+    "wa_sec": "app_secret",
+    "wa_verify": "verify_token",
+}
+WA_ROTATE_FIELDS = ("wa_sys", "wa_sec")  # ``…/account/rotate`` body (``extra="forbid"``)
+
+
+def _wa_payload(form: Mapping[str, str], *, rotate: bool = False) -> dict[str, str]:
+    """Map the ``wa_*`` inputs to the API body; empty secrets are dropped (rotate sends
+    only what was typed; connect lets the API's 422 name the short field)."""
+    names = WA_ROTATE_FIELDS if rotate else tuple(WA_FIELDS)
+    body = {WA_FIELDS[n]: (form.get(n) or "").strip() for n in names}
+    return {k: v for k, v in body.items() if v or k in ("phone_number_id", "waba_id")}
+
+
+def _wa_422_text(exc: ApiError) -> str:
+    """Pydantic 422 ⇒ "field X is too short / invalid" using the ``wa.*`` label of the field."""
+    detail = exc.detail.get("detail") if isinstance(exc.detail, dict) else None
+    if isinstance(detail, list) and detail:
+        loc = detail[0].get("loc") or ()
+        field = next((n for n, api in WA_FIELDS.items() if loc and loc[-1] == api), None)
+        if field is not None:
+            kind = "short" if "short" in str(detail[0].get("type", "")) else "invalid"
+            return t(f"wa.field_{kind}", field=t(f"wa.{field[3:]}"))
+    return _error_text(exc.code)
+
+
+async def _wa_action(request: Request, brand_id: UUID, *, rotate: bool) -> Response:
+    settings = get_settings()
+    form = await _admin_form(request)
+    gate = await _gate_user(request, settings, form.get(CSRF_FIELD))
+    if gate.response is not None:
+        return gate.response
+    body = _wa_payload(form, rotate=rotate)
+    base = f"/brands/{brand_id}/whatsapp/account"
+    path = f"{base}/rotate" if rotate else base
+
+    try:
+        user, _ = await _call(request, settings, gate.user, lambda api: api.post(path, body))
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        text = _wa_422_text(exc) if exc.status == 422 else _error_text(exc.code)
+        page = await _settings_page(request, settings, gate.user, brand_id, text)
+        page.status_code = exc.status if exc.status in (403, 404, 409, 422) else 400
+        return page
+    flash = "wa_rotated" if rotate else "wa_connected"
+    target = f"{APP_PREFIX}/b/{brand_id}/settings?flash={flash}"
+    return _with_session(settings, user, RedirectResponse(target, status_code=303))
+
+
+@router.post("/b/{brand_id}/settings/whatsapp", response_class=HTMLResponse)
+async def whatsapp_connect(request: Request, brand_id: UUID) -> Response:
+    """Connect (no account) or reconnect in place (``POST …/account`` answers 200 for a
+    disabled number — A-2 of SPRINT-10); the secrets are never echoed back."""
+    return await _wa_action(request, brand_id, rotate=False)
+
+
+@router.post("/b/{brand_id}/settings/whatsapp/rotate", response_class=HTMLResponse)
+async def whatsapp_rotate(request: Request, brand_id: UUID) -> Response:
+    return await _wa_action(request, brand_id, rotate=True)
 
 
 @router.post("/b/{brand_id}/settings/consent", response_class=HTMLResponse)

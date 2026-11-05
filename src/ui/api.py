@@ -60,15 +60,27 @@ class ApiClient:
         await self._client.aclose()
 
     async def request(
-        self, method: str, path: str, *, json: Any = None, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         """The raw response (``status_code`` / ``json()`` / ``cookies`` / ``content``)."""
-        return await self._client.request(method, path, json=json, params=params)
+        return await self._client.request(method, path, json=json, params=params, headers=headers)
 
     async def json(
-        self, method: str, path: str, *, json: Any = None, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
-        response = await self.request(method, path, json=json, params=params)
+        response = await self.request(method, path, json=json, params=params, headers=headers)
         payload = _payload(response)
         status = response.status_code
         if status >= 400:
@@ -83,6 +95,12 @@ class ApiClient:
 
     async def patch(self, path: str, body: Any) -> Any:
         return await self.json("PATCH", path, json=body)
+
+    async def put(self, path: str, body: Any, *, headers: dict[str, str] | None = None) -> Any:
+        return await self.json("PUT", path, json=body, headers=headers)
+
+    async def delete(self, path: str, body: Any = None) -> Any:
+        return await self.json("DELETE", path, json=body)
 
 
 def _payload(response: Any) -> Any:

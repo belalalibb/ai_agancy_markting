@@ -132,17 +132,18 @@ def test_openapi_marks_every_protected_route_with_bearer_auth(app: FastAPI) -> N
 
 
 def test_app_routes_redirect_without_session(client: TestClient) -> None:
-    """SPRINT-12.1 B: every ``/app/*`` route except login/logout answers 303 ⇒ ``/app/login``
-    without a session cookie (and with a garbage/expired one) — never 200, never 401 JSON."""
+    """SPRINT-12.1 B: every ``/app/*`` route except login/logout/register answers 303 ⇒
+    ``/app/login`` without a session cookie (and with a garbage/expired one) — never 200,
+    never 401 JSON."""
     from src.ui.router import router as ui_router
 
     guarded = [
         (m, r.path)
         for r in ui_router.routes
         for m in sorted(getattr(r, "methods", None) or ())
-        if m != "HEAD" and r.path not in {"/app/login", "/app/logout"}
+        if m != "HEAD" and r.path not in {"/app/login", "/app/logout", "/app/register"}
     ]
-    assert len(guarded) == 26, guarded  # SPRINT-13 C: settings export + delete
+    assert len(guarded) == 32, guarded  # SPRINT-14-A: +6 (brands, bridge, pages ×2, WA ×2)
     for method, template in guarded:
         path = _concrete(template)
         for cookies in ({}, {"app_session": "expired.or.garbage"}):

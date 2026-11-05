@@ -29,9 +29,11 @@ STDLIB = {
     "hmac",
     "json",
     "pathlib",
-    "secrets",  # C-0.3: per-login CSRF nonce
+    "re",  # SPRINT-14-A §4-ب: slug derivation (text only)
+    "secrets",  # C-0.3: per-login CSRF nonce · 14-A: slug fallback suffix
     "time",  # C-0.2: refresh-result cache expiry
     "typing",
+    "unicodedata",  # SPRINT-14-A §4-ب: ASCII folding of Arabic/accented names
     "uuid",
 }
 FORBIDDEN = ("sqlalchemy", ".infrastructure", "import httpx")
