@@ -2,6 +2,19 @@
 {% block title %}{{ t("brands.title") }}{% endblock %}
 {% block content %}
 <h1>{{ t("brands.title") }}</h1>
+{% if onboarding %}
+<nav data-onboarding aria-label="{{ t('onboarding.title') }}">
+  <ol>
+    {% for s in onboarding %}
+    <li data-step="{{ s.step }}" data-done="{{ 'true' if s.done else 'false' }}">
+      {{ t("onboarding." ~ s.step) }}
+      {% if s.done %}<span aria-hidden="true">✓</span>{% elif s.done is none %}<small>{{ t("onboarding.unknown") }}</small>{% endif %}
+      {% if not s.done and s.href %}<a href="{{ s.href }}">{{ t("onboarding.next") }}</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+</nav>
+{% endif %}
 {% if brands %}
 <ul data-brands>
   {% for b in brands %}
@@ -9,6 +22,29 @@
   {% endfor %}
 </ul>
 {% else %}
-<p data-empty>{{ t("brands.empty") }}</p>
+<article id="create" data-form="first-brand">
+  <header><strong>{{ t("brands.first_title") }}</strong></header>
+  <p data-empty>{{ t("brands.first_hint") }}</p>
+  <form method="post" action="/app/brands">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>{{ t("brands.name") }}
+      <input type="text" name="name" value="{{ form.name or '' }}" required maxlength="255" autofocus>
+    </label>
+    <fieldset>
+      <legend>{{ t("brands.sector") }}</legend>
+      {% for s in sectors %}
+      <label><input type="radio" name="sector" value="{{ s }}"{% if (form.sector or sectors[0]) == s %} checked{% endif %}> {{ t("sector." ~ s) }}</label>
+      {% endfor %}
+    </fieldset>
+    <details>
+      <summary>{{ t("register.advanced") }}</summary>
+      <label>{{ t("register.tenant_slug") }}
+        <input type="text" name="slug" value="{{ form.slug or '' }}" pattern="[a-z0-9-]{3,64}" placeholder="brand-xxxxxxxx">
+        <small>{{ t("register.slug_hint") }}</small>
+      </label>
+    </details>
+    <button type="submit">{{ t("brands.create") }}</button>
+  </form>
+</article>
 {% endif %}
 {% endblock %}

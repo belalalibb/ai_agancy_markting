@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}{{ t("pages.title") }}{% endblock %}
+{% block content %}
+<article data-screen="pages" data-connection="{{ connection.id }}">
+  <h1>{{ t("pages.title") }}</h1>
+  <p>{{ t("pages.hint") }} <small>{{ connection.provider_user_name or connection.provider_user_id }}</small></p>
+  {% if error %}<p role="alert" data-error>{{ error }}</p>{% endif %}
+  {% if connection.pages %}
+  <form method="post" action="/app/b/{{ brand.id }}/settings/connections/{{ connection.id }}/pages" data-form="pages">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <ul data-pages>
+      {% for p in connection.pages %}
+      <li data-page="{{ p.page_id }}">
+        <label>
+          <input type="checkbox" name="page_ids" value="{{ p.page_id }}"{% if p.is_selected %} checked{% endif %}>
+          {{ p.page_name }}{% if p.category %} <small>({{ p.category }})</small>{% endif %}
+          {% if p.instagram %}<small data-ig>· Instagram</small>{% endif %}
+        </label>
+      </li>
+      {% endfor %}
+    </ul>
+    <button type="submit">{{ t("pages.save") }}</button>
+  </form>
+  {% else %}
+  <p data-empty>{{ t("pages.empty") }}</p>
+  {% endif %}
+  <p><a href="/app/b/{{ brand.id }}/settings">{{ t("pages.back") }}</a></p>
+</article>
+{% endblock %}

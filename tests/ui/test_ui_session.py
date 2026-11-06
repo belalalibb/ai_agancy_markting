@@ -16,7 +16,7 @@ from tests.conftest import BRAND2_ID, BRAND_ID
 from tests.ui.conftest import INBOX, LOGIN, OWNER_LOGIN, TODAY, csrf_of, login
 
 SAMPLE = "00000000-0000-4000-8000-0000000000ff"
-EXEMPT = {"/app/login", "/app/logout"}
+EXEMPT = {"/app/login", "/app/logout", "/app/register"}
 
 
 def _app_operations() -> list[tuple[str, str]]:
@@ -55,8 +55,10 @@ def test_ui_routes_are_hidden_from_openapi_and_counted(ui_app: FastAPI) -> None:
     POST), diagnosis (GET + 2 POST), settings (GET + 5 POST)."""
     spec_paths = ui_app.openapi()["paths"]
     assert not any(path.startswith("/app") for path in spec_paths)
-    assert len(ui_router.routes) == 29  # SPRINT-13 C: +2 (settings export / delete)
-    assert len(APP_OPERATIONS) == 26
+    assert (
+        len(ui_router.routes) == 37
+    )  # SPRINT-14-A: +8 (register ×2, brands, bridge, pages ×2, WA ×2)
+    assert len(APP_OPERATIONS) == 32  # +6 session-guarded (GET/POST register are public)
 
 
 @pytest.mark.parametrize(("method", "template"), APP_OPERATIONS, ids=IDS)

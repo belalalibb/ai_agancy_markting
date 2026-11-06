@@ -17,7 +17,9 @@
     </ul>
     {% else %}<p data-empty>{{ t("settings.no_connections") }}</p>{% endif %}
     {% if brand.role != "viewer" %}
-    <form method="post" action="{{ base }}/connections/start" target="_blank" data-form="connect"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">{{ t("settings.connect") }}</button></form>
+    <form id="connect" method="post" action="{{ base }}/connections/start" target="_blank" data-form="connect"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">{{ t("settings.connect") }}</button></form>
+    <small data-connect-hint>{{ t("settings.connect_hint") }}</small>
+    {% for c in connections if c.is_connection_owner %}<p><a href="{{ base }}/connections/{{ c.id }}/pages" data-link="pages">{{ t("pages.title") }}</a></p>{% endfor %}
     {% endif %}
   </article>
   <article data-card="whatsapp">
@@ -33,6 +35,30 @@
     {% if wa.kill_switch %}<p data-wa-stopped="kill_switch"><mark>{{ t("settings.wa_stopped_reason") }}: {{ t("settings.wa_stopped_kill") }}</mark></p>
     {% elif wa.daily_reply_cap is not none and wa.replies_today is not none and wa.replies_today >= wa.daily_reply_cap %}<p data-wa-stopped="daily_cap"><mark>{{ t("settings.wa_stopped_reason") }}: {{ t("settings.wa_stopped_cap") }}</mark></p>{% endif %}
     {% else %}<p data-empty>{{ t("settings.no_whatsapp") }}</p>{% endif %}
+    {% if is_owner %}
+    {# 14-A A-4 (directive 4-D): neutral input names; secrets are password fields with no value= #}
+    {% if wa %}
+    <p data-wa-connected-as>{{ t("wa.connected_as") }}: {{ wa.phone_number_id }}</p>
+    <form method="post" action="{{ base }}/whatsapp/rotate" data-form="wa-rotate">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>{{ t("wa.sys") }}<input type="password" name="wa_sys" autocomplete="new-password" required minlength="16"></label>
+      <label>{{ t("wa.sec") }}<input type="password" name="wa_sec" autocomplete="new-password" required minlength="8"></label>
+      <button type="submit" class="secondary">{{ t("wa.rotate") }}</button>
+    </form>
+    <details><summary>{{ t("wa.update") }}</summary>
+    {% endif %}
+    <form method="post" action="{{ base }}/whatsapp" data-form="wa-connect">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>{{ t("wa.pnid") }}<input type="text" name="wa_pnid" value="{{ wa.phone_number_id if wa else '' }}" required maxlength="32" pattern="[A-Za-z0-9_-]+"></label>
+      <label>{{ t("wa.waba") }}<input type="text" name="wa_waba" value="{{ wa.waba_id if wa else '' }}" required maxlength="32" pattern="[A-Za-z0-9_-]+"></label>
+      <label>{{ t("wa.phone") }}<input type="tel" name="wa_phone" value="{{ wa.display_phone if wa else '' }}" maxlength="32"></label>
+      <label>{{ t("wa.sys") }}<input type="password" name="wa_sys" autocomplete="new-password" required minlength="16"></label>
+      <label>{{ t("wa.sec") }}<input type="password" name="wa_sec" autocomplete="new-password" required minlength="8"></label>
+      <label>{{ t("wa.verify") }}<input type="password" name="wa_verify" autocomplete="new-password" required minlength="8"></label>
+      <button type="submit">{{ t("wa.update") if wa else t("wa.connect") }}</button>
+    </form>
+    {% if wa %}</details>{% endif %}
+    {% endif %}
   </article>
 </div>
 <div class="grid">

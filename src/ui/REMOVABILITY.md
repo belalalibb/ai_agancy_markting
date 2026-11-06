@@ -5,12 +5,19 @@ any API behaviour, migration, or test outside `tests/ui/` and `tests/isolation/`
 
 ## What it owns
 
-* `src/ui/router.py` — `/app/*` routes (login, brand pick, today, inbox, content, diagnosis,
-  settings — SPRINT-12.1-B C; `/app/admin/ai` 4 tabs + probe + SPRINT-13 `audit` (last 50
+* `src/ui/router.py` — `/app/*` routes (login, **register** (SPRINT-14-A A-1: one
+  `POST /auth/register` ⇒ session via `_establish_session`, shared with login), brand pick
+  (+ **first-brand form** `POST /app/brands` with `derive_slug` and the **onboarding bar** — A-2/A-5),
+  today, inbox, content, diagnosis, settings (+ **WhatsApp connect/rotate** `POST …/settings/whatsapp[/rotate]`
+  with `wa_*` form names mapped by `_wa_payload` — A-4), the **Meta OAuth browser bridge**
+  `GET /app/social/meta/callback` and the **page-selection screen** `GET/POST …/connections/{cid}/pages`
+  (A-3; the JSON callback under `/api/v1` is untouched) — SPRINT-12.1-B C; `/app/admin/ai` 4 tabs + probe + SPRINT-13 `audit` (last 50
   `admin_actions` + platform flags) and `dead_letter` (failed publish jobs + requeue) tabs, and
   `/app/admin/entitlements` with suspend/unsuspend — D, non-admins ⇒ 404 before any API call) —
   `include_in_schema=False`. Every screen reads/writes only through
   `ApiClient`; roles, entitlements, consent and the content state machine are enforced upstream.
+* `src/ui/slug.py` — SPRINT-14-A §4-ب: `derive_slug(name, prefix)` / `slug_retry` — pure text
+  transformation for Arabic names (no business rule; the API still validates `Slug`).
 * `src/ui/session.py` — three `Path=/app` cookies: `app_session` (copy of the auth refresh value),
   `app_access` (the short-lived access JWT, decoded locally — `/auth/refresh` is called only on
   expiry, SPRINT-12.1-B C-0) and `app_csrf` (per-login nonce) + the CSRF stamp
