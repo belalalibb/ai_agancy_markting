@@ -148,7 +148,7 @@ def test_register_rate_limited_is_429_arabic(
 
 def test_register_weak_password_shows_422_arabic(ui_client: TestClient) -> None:
     res = _register(ui_client, password="short", password_confirm="short")
-    assert res.status_code == 422 and MESSAGES["error.http_422"] in res.text
+    assert res.status_code == 422 and MESSAGES["error.password_too_weak"] in res.text
 
 
 def test_register_tenant_slug_conflict_retries_automatically(
@@ -243,7 +243,10 @@ def test_meta_bridge_without_session_keeps_code_and_state_in_next(
 ) -> None:
     res = ui_client.get("/app/social/meta/callback", params={"code": "x", "state": "y"})
     assert res.status_code == 303
-    assert res.headers["location"] == f"{LOGIN}?next=/app/social/meta/callback?code=x&state=y"
+    # 14-B B-0.1: the inner query is quoted once, so ``&state=`` stays inside ``next``
+    assert (
+        res.headers["location"] == f"{LOGIN}?next=/app/social/meta/callback%3Fcode%3Dx%26state%3Dy"
+    )
 
 
 def test_meta_bridge_completes_and_pages_screen_selects(
@@ -431,9 +434,10 @@ NEW_POSTS = [p for m, p in NEW_ROUTES if m == "POST" and p != "/app/register"]
 
 def test_eight_new_app_routes_exist() -> None:
     """The directive's §1 table lists 8 new ``/app`` routes (2 + 1 + 3 + 2 + 0) ⇒ 29 + 8 = 37
-    (its "9 ⇒ 38" line is an arithmetic slip — documented in §6-هـ)."""
-    assert len(NEW_ROUTES) == 8, NEW_ROUTES
-    assert len(ui_router.routes) == 37
+    (its "9 ⇒ 38" line is an arithmetic slip — documented in §6-هـ). 14-B B-0.2 adds the WA
+    ``disable`` POST ⇒ 9 / 38."""
+    assert len(NEW_ROUTES) == 9, NEW_ROUTES
+    assert len(ui_router.routes) == 38
 
 
 @pytest.mark.parametrize("path", NEW_POSTS)

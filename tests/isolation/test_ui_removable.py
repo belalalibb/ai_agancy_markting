@@ -34,6 +34,7 @@ STDLIB = {
     "time",  # C-0.2: refresh-result cache expiry
     "typing",
     "unicodedata",  # SPRINT-14-A §4-ب: ASCII folding of Arabic/accented names
+    "urllib",  # SPRINT-14-B B-0.1: ``quote`` for the login ``next`` value (stdlib only)
     "uuid",
 }
 FORBIDDEN = ("sqlalchemy", ".infrastructure", "import httpx")

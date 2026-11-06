@@ -46,7 +46,8 @@ Unsubscriber = Callable[[str, str], Awaitable[bool]]  # (page_id, page_token) â‡
 Audit = Callable[..., Awaitable[Any]]  # OpsService.record signature
 # F-4: checked against **column / key names only** â€” customer text may legitimately contain
 # the words "api_key" or "gAAAA" (it is their data); the allowlist keeps the values clean.
-FORBIDDEN_FRAGMENTS = ("access_token", "refresh_token", "api_key", "gAAAA", "secret", "hash")
+# Fragments are lower-case: the comparison is made on ``k.lower()`` (B-0.4).
+FORBIDDEN_FRAGMENTS = ("access_token", "refresh_token", "api_key", "gaaaa", "secret", "hash")
 
 
 def _key_names(rows: list[dict[str, Any]]) -> set[str]:

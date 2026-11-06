@@ -418,6 +418,10 @@ async def login_submit(
     return established
 
 
+# auth's fixed model-validator message (matched, never displayed)
+WEAK_PASSWORD_RULE = "password must not equal the email address"  # noqa: S105 - a message
+
+
 def _auth_code(response: Any, default: str | None) -> str:
     """Error code of an ``/auth/*`` failure: body ``detail.error`` ⇒ 429 ⇒ ``default``."""
     code = "rate_limited" if response.status_code == 429 else default
@@ -426,8 +430,25 @@ def _auth_code(response: Any, default: str | None) -> str:
     if isinstance(detail, dict) and isinstance(detail.get("error"), str):
         code = detail["error"]
     elif isinstance(detail, list) and response.status_code == 422:
-        code = "http_422"
+        code = "password_too_weak" if _only_weak_password(detail) else "http_422"
     return code or "generic"
+
+
+def _only_weak_password(detail: list[Any]) -> bool:
+    """B-0.3 (S14A-3): ``True`` only when *every* 422 entry is the register password rule —
+    ``password`` ``string_too_short`` or the model rule ``password must not equal the email``.
+    The message/input is never shown; the code only selects ``error.password_too_weak``."""
+    if not detail:
+        return False
+    for err in detail:
+        if not isinstance(err, dict):
+            return False
+        loc = err.get("loc") or ()
+        short = bool(loc) and loc[-1] == "password" and err.get("type") == "string_too_short"
+        same = err.get("type") == "value_error" and WEAK_PASSWORD_RULE in str(err.get("msg", ""))
+        if not (short or same):
+            return False
+    return True
 
 
 def _establish_session(response: Any, settings: Settings, next: str) -> Response | None:  # noqa: A002
@@ -557,8 +578,11 @@ async def _onboarding(api: ApiClient, brands: list[Any]) -> list[dict[str, Any]]
     try:
         connections = await api.get(f"/brands/{bid}/social/meta/connections")
         wa = await _optional(api, f"/brands/{bid}/whatsapp/account")
-        channel = bool(wa) or any(
-            p.get("is_selected") for c in connections for p in c.get("pages", [])
+        channel = (isinstance(wa, dict) and wa.get("status") == "active") or any(
+            p.get("is_selected")
+            for c in connections
+            if c.get("status") == "active"
+            for p in c.get("pages", [])
         )
     except ApiError:
         channel = None
@@ -1220,6 +1244,7 @@ SETTINGS_FLASHES = {  # 14-A: translated keys for ``?flash=`` after a 303 (no fr
     "pages_selected": "pages.saved",
     "wa_connected": "wa.connected_ok",
     "wa_rotated": "wa.rotated_ok",
+    "wa_disabled": "wa.disabled_ok",
 }
 
 
@@ -1442,18 +1467,31 @@ def _wa_422_text(exc: ApiError) -> str:
     return _error_text(exc.code)
 
 
-async def _wa_action(request: Request, brand_id: UUID, *, rotate: bool) -> Response:
+async def _wa_action(request: Request, brand_id: UUID, *, action: str) -> Response:
+    """``action``: ``connect`` | ``rotate`` | ``disable`` (B-0.2: disable = ``DELETE …/account``,
+    which keeps every conversation; it needs the explicit ``wa_confirm`` box)."""
     settings = get_settings()
     form = await _admin_form(request)
     gate = await _gate_user(request, settings, form.get(CSRF_FIELD))
     if gate.response is not None:
         return gate.response
-    body = _wa_payload(form, rotate=rotate)
     base = f"/brands/{brand_id}/whatsapp/account"
-    path = f"{base}/rotate" if rotate else base
+    if action == "disable" and form.get("wa_confirm") != "yes":
+        page = await _settings_page(
+            request, settings, gate.user, brand_id, t("wa.disable_confirm_needed")
+        )
+        page.status_code = 400
+        return page
+
+    async def _send(api: ApiClient) -> Any:
+        if action == "disable":
+            return await api.delete(base)
+        rotate = action == "rotate"
+        path = f"{base}/rotate" if rotate else base
+        return await api.post(path, _wa_payload(form, rotate=rotate))
 
     try:
-        user, _ = await _call(request, settings, gate.user, lambda api: api.post(path, body))
+        user, _ = await _call(request, settings, gate.user, _send)
     except ApiError as exc:
         if exc.status == 401:
             return _denied(settings, request)
@@ -1461,7 +1499,7 @@ async def _wa_action(request: Request, brand_id: UUID, *, rotate: bool) -> Respo
         page = await _settings_page(request, settings, gate.user, brand_id, text)
         page.status_code = exc.status if exc.status in (403, 404, 409, 422) else 400
         return page
-    flash = "wa_rotated" if rotate else "wa_connected"
+    flash = {"rotate": "wa_rotated", "disable": "wa_disabled"}.get(action, "wa_connected")
     target = f"{APP_PREFIX}/b/{brand_id}/settings?flash={flash}"
     return _with_session(settings, user, RedirectResponse(target, status_code=303))
 
@@ -1470,12 +1508,17 @@ async def _wa_action(request: Request, brand_id: UUID, *, rotate: bool) -> Respo
 async def whatsapp_connect(request: Request, brand_id: UUID) -> Response:
     """Connect (no account) or reconnect in place (``POST …/account`` answers 200 for a
     disabled number — A-2 of SPRINT-10); the secrets are never echoed back."""
-    return await _wa_action(request, brand_id, rotate=False)
+    return await _wa_action(request, brand_id, action="connect")
 
 
 @router.post("/b/{brand_id}/settings/whatsapp/rotate", response_class=HTMLResponse)
 async def whatsapp_rotate(request: Request, brand_id: UUID) -> Response:
-    return await _wa_action(request, brand_id, rotate=True)
+    return await _wa_action(request, brand_id, action="rotate")
+
+
+@router.post("/b/{brand_id}/settings/whatsapp/disable", response_class=HTMLResponse)
+async def whatsapp_disable(request: Request, brand_id: UUID) -> Response:
+    return await _wa_action(request, brand_id, action="disable")
 
 
 @router.post("/b/{brand_id}/settings/consent", response_class=HTMLResponse)

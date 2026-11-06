@@ -55,10 +55,9 @@ def test_ui_routes_are_hidden_from_openapi_and_counted(ui_app: FastAPI) -> None:
     POST), diagnosis (GET + 2 POST), settings (GET + 5 POST)."""
     spec_paths = ui_app.openapi()["paths"]
     assert not any(path.startswith("/app") for path in spec_paths)
-    assert (
-        len(ui_router.routes) == 37
-    )  # SPRINT-14-A: +8 (register ×2, brands, bridge, pages ×2, WA ×2)
-    assert len(APP_OPERATIONS) == 32  # +6 session-guarded (GET/POST register are public)
+    # SPRINT-14-A: +8 (register ×2, brands, bridge, pages ×2, WA ×2) · 14-B B-0.2: +1 (WA disable)
+    assert len(ui_router.routes) == 38
+    assert len(APP_OPERATIONS) == 33  # +7 session-guarded (GET/POST register are public)
 
 
 @pytest.mark.parametrize(("method", "template"), APP_OPERATIONS, ids=IDS)

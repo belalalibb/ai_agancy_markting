@@ -119,6 +119,18 @@ def test_export_unknown_or_expired_is_404(
     assert res.status_code == 404  # 24h expiry (§3-11)
 
 
+def test_build_zip_rejects_a_mixed_case_fernet_prefixed_key_name() -> None:
+    """B-0.4: the guard compares ``k.lower()``, so the fragment is lower-case ``gaaaa`` —
+    a column named with the mixed-case Fernet prefix is refused (literal, not a real secret)."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    with pytest.raises(ExportFailedError):
+        build_zip({"brand": [{"gAAAAB_cipher": "x"}]}, brand_id=BRAND_ID, now=now)
+    body = "old key began with gAAAAB and our api_key was rotated"
+    blob = build_zip({"messages": [{"id": 1, "body": body}]}, brand_id=BRAND_ID, now=now)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert body in json.loads(zf.read("messages.json"))[0]["body"]
+
+
 def test_build_zip_checks_key_names_only_never_customer_text() -> None:
     """F-4: a secret-shaped *column name* ⇒ ``export_failed``; customer text that happens to
     contain "api_key" / "gAAAA" is their data and is exported verbatim."""

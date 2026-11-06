@@ -36,8 +36,9 @@
     {% elif wa.daily_reply_cap is not none and wa.replies_today is not none and wa.replies_today >= wa.daily_reply_cap %}<p data-wa-stopped="daily_cap"><mark>{{ t("settings.wa_stopped_reason") }}: {{ t("settings.wa_stopped_cap") }}</mark></p>{% endif %}
     {% else %}<p data-empty>{{ t("settings.no_whatsapp") }}</p>{% endif %}
     {% if is_owner %}
-    {# 14-A A-4 (directive 4-D): neutral input names; secrets are password fields with no value= #}
-    {% if wa %}
+    {# 14-B B-0.2: active ⇒ rotate + disable only; disabled/absent ⇒ connect (reconnect keeps the id).
+       Neutral input names; secrets are password fields with no value=. #}
+    {% if wa and wa.status == "active" %}
     <p data-wa-connected-as>{{ t("wa.connected_as") }}: {{ wa.phone_number_id }}</p>
     <form method="post" action="{{ base }}/whatsapp/rotate" data-form="wa-rotate">
       <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -45,8 +46,14 @@
       <label>{{ t("wa.sec") }}<input type="password" name="wa_sec" autocomplete="new-password" required minlength="8"></label>
       <button type="submit" class="secondary">{{ t("wa.rotate") }}</button>
     </form>
-    <details><summary>{{ t("wa.update") }}</summary>
-    {% endif %}
+    <form method="post" action="{{ base }}/whatsapp/disable" data-form="wa-disable">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <p><small>{{ t("wa.disable_explain") }}</small></p>
+      <label><input type="checkbox" name="wa_confirm" value="yes" required> {{ t("wa.disable_confirm") }}</label>
+      <button type="submit" class="secondary outline">{{ t("wa.disable") }}</button>
+    </form>
+    {% else %}
+    {% if wa %}<p data-wa-disabled><mark>{{ t("wa.disabled_hint") }}</mark></p>{% endif %}
     <form method="post" action="{{ base }}/whatsapp" data-form="wa-connect">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>{{ t("wa.pnid") }}<input type="text" name="wa_pnid" value="{{ wa.phone_number_id if wa else '' }}" required maxlength="32" pattern="[A-Za-z0-9_-]+"></label>
@@ -55,9 +62,9 @@
       <label>{{ t("wa.sys") }}<input type="password" name="wa_sys" autocomplete="new-password" required minlength="16"></label>
       <label>{{ t("wa.sec") }}<input type="password" name="wa_sec" autocomplete="new-password" required minlength="8"></label>
       <label>{{ t("wa.verify") }}<input type="password" name="wa_verify" autocomplete="new-password" required minlength="8"></label>
-      <button type="submit">{{ t("wa.update") if wa else t("wa.connect") }}</button>
+      <button type="submit">{{ t("wa.reconnect") if wa else t("wa.connect") }}</button>
     </form>
-    {% if wa %}</details>{% endif %}
+    {% endif %}
     {% endif %}
   </article>
 </div>

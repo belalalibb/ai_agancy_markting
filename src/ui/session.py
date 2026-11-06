@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import secrets
 from dataclasses import dataclass
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import Response
@@ -73,7 +74,9 @@ def new_nonce() -> str:
 def login_target(next_path: str | None = None) -> str:
     """Login URL; ``next`` is kept only for in-app paths (open-redirect guard)."""
     if next_path and next_path.startswith(f"{APP_PREFIX}/") and next_path != LOGIN_PATH:
-        return f"{LOGIN_PATH}?next={next_path}"
+        # B-0.1 (S14A-1): quote once so ``?``/``&``/``=`` of the *inner* query stay inside the
+        # ``next`` value (a raw ``&state=`` became a login-page parameter and was lost).
+        return f"{LOGIN_PATH}?next={quote(next_path, safe='/')}"
     return LOGIN_PATH
 
 
