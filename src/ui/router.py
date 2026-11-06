@@ -956,6 +956,8 @@ CONTENT_TABS = (
 )
 CONTENT_LIMIT = 50
 BATCH_MAX = 50
+MIN_IMAGE_URL = 12  # = content.schemas.MediaRef.url min_length
+CONTENT_FLASHES = {"draft_created": "content.created"}
 ITEM_ACTIONS = ("submit", "withdraw", "approve", "unschedule", "archive")  # optional-note posts
 GRADES = ("measured", "inferred", "estimated")  # = share.EVIDENCE_GRADES (D-074 order)
 CONSENTS = ("signals_only", "none", "full")  # = tenancy LearningConsent
@@ -1009,7 +1011,60 @@ async def _content_ctx(api: ApiClient, brand_id: UUID, status: str | None) -> di
     if status:
         params["status"] = status
     page = await api.get(f"/brands/{brand_id}/content/items", **params)
-    return {**frame, "items": page["items"], "status": status or "", "tabs": CONTENT_TABS}
+    can_write = frame["brand"].get("role") in ("owner", "manager")
+    targets = await _targets(api, brand_id) if can_write else {"channels": [], "pages": []}
+    return {
+        **frame,
+        "items": page["items"],
+        "status": status or "",
+        "tabs": CONTENT_TABS,
+        "can_write": can_write,
+        **targets,
+    }
+
+
+async def _targets(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
+    """What a draft may aim at (B-4): the *active* channels of the registry and the pages of
+    *active* connections that the owner selected — ``value`` is the Graph ``page_id``."""
+    registry = await api.get("/channels")
+    accounts = await api.get(f"/brands/{brand_id}/social/meta/connections")
+    return {
+        "channels": [
+            c["channel"] for c in registry["channels"] if c["activation_status"] == "active"
+        ],
+        "pages": [
+            {"page_id": p["page_id"], "name": p["page_name"], "ig": bool(p.get("instagram"))}
+            for a in accounts
+            if a.get("status") == "active"
+            for p in a.get("pages", [])
+            if p.get("is_selected")
+        ],
+    }
+
+
+def _utc_iso(value: str) -> str | None:
+    """``datetime-local`` text (no zone; the form says UTC) ⇒ aware ISO ``…+00:00``."""
+    try:
+        moment = datetime.fromisoformat(value)
+        moment = moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    except (ValueError, OverflowError):
+        return None
+    return moment.isoformat()
+
+
+def _draft_problem(targets: Mapping[str, Any], channel: str, page_id: str, image: str) -> str:
+    """The first reason a draft must not be sent (``""`` = fine) — decided before the API
+    call because ``POST /content/items`` does not look at the target."""
+    page = next((p for p in targets["pages"] if p["page_id"] == page_id), None)
+    if channel not in targets["channels"]:
+        return "channel_not_activated"
+    if page_id and page is None:
+        return "target_page_not_selected"
+    if channel == "instagram" and page_id and not page["ig"]:
+        return "instagram_not_linked"
+    if image and not (image.startswith("https://") and len(image) >= MIN_IMAGE_URL):
+        return "invalid_image_url"
+    return ""
 
 
 async def _content_page(
@@ -1021,6 +1076,8 @@ async def _content_page(
     *,
     flash: str | None = None,
     batch: list[dict[str, str]] | None = None,
+    draft: Mapping[str, str] | None = None,
+    code: int = 200,
 ) -> Response:
     try:
         user, data = await _call(
@@ -1028,18 +1085,80 @@ async def _content_page(
         )
     except ApiError as exc:
         return _api_failure(request, settings, user, exc)
-    ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash, "batch": batch}
+    ctx = {
+        **_base_ctx(user, settings, data["brand"]),
+        **data,
+        "flash": flash,
+        "batch": batch,
+        "draft": draft or {},
+    }
     name = "partials/content_list.html" if _is_partial(request) else "content.html"
-    return _with_session(settings, user, _render(request, name, ctx))
+    return _with_session(settings, user, _render(request, name, ctx, status=code))
 
 
 @router.get("/b/{brand_id}/content", response_class=HTMLResponse)
-async def content(request: Request, brand_id: UUID, status: str = "") -> Response:
+async def content(request: Request, brand_id: UUID, status: str = "", flash: str = "") -> Response:
     settings = get_settings()
     gate = await _gate_user(request, settings)
     if gate.response is not None:
         return gate.response
-    return await _content_page(request, settings, gate.user, brand_id, _tab(status))
+    key = CONTENT_FLASHES.get(flash)  # closed set: no free text in a query string
+    return await _content_page(
+        request, settings, gate.user, brand_id, _tab(status), flash=t(key) if key else None
+    )
+
+
+@router.post("/b/{brand_id}/content/new", response_class=HTMLResponse)
+async def content_new(  # noqa: PLR0913 - one form field per draft input
+    request: Request,
+    brand_id: UUID,
+    channel: Annotated[str, Form()] = "",
+    body: Annotated[str, Form()] = "",
+    target_page_id: Annotated[str, Form()] = "",
+    image_url: Annotated[str, Form()] = "",
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    """A human drafts a post (D-055: a *draft* only — submit/approve/schedule stay separate
+    actions). Bad targets are refused here with the user's text kept; the API decides the rest."""
+    settings = get_settings()
+    gate = await _gate_user(request, settings, csrf)
+    if gate.response is not None:
+        return gate.response
+    keep = {"channel": channel, "body": body, "target_page_id": target_page_id}
+    keep["image_url"] = image_url
+    payload: dict[str, Any] = {"channel": channel, "body": body, "media_refs": []}
+    if target_page_id:
+        payload["target_page_id"] = target_page_id
+    if channel == "instagram" and image_url:
+        payload["media_refs"] = [{"url": image_url, "kind": "image"}]
+
+    async def create(api: ApiClient) -> str:
+        problem = _draft_problem(await _targets(api, brand_id), channel, target_page_id, image_url)
+        if not problem:
+            await api.json("POST", f"/brands/{brand_id}/content/items", json=payload)
+        return problem
+
+    code, status = "", 200
+    try:
+        user, code = await _call(request, settings, gate.user, create)
+    except ApiError as exc:
+        if exc.status == 401:
+            return _denied(settings, request)
+        user, code, status = gate.user, exc.code, exc.status
+    if code:
+        status = status if status in (400, 403, 404, 409, 422, 429) else 422
+        return await _content_page(
+            request,
+            settings,
+            user,
+            brand_id,
+            None,
+            flash=_error_text(code),
+            draft=keep,
+            code=status,
+        )
+    target = f"{APP_PREFIX}/b/{brand_id}/content?status=draft&flash=draft_created"
+    return _with_session(settings, user, RedirectResponse(target, status_code=303))
 
 
 @router.post("/b/{brand_id}/content/batch-approve", response_class=HTMLResponse)
@@ -1091,7 +1210,16 @@ async def content_item_action(  # noqa: PLR0913 - one form field per lifecycle i
     elif action == "reject":
         spec = ("POST", f"{base}/reject", {"note": note})
     elif action == "schedule":
-        body: dict[str, Any] = {"scheduled_for": scheduled_for}
+        when = _utc_iso(scheduled_for)
+        if when is None:  # naive/garbled text never reaches the API (and never a 500)
+            gate = await _gate_user(request, get_settings(), csrf)
+            if gate.response is not None:
+                return gate.response
+            return await _content_page(
+                request, get_settings(), gate.user, brand_id, _tab(status),
+                flash=_error_text("invalid_datetime"), code=400,
+            )  # fmt: skip
+        body: dict[str, Any] = {"scheduled_for": when}
         if target_page_id:
             body["target_page_id"] = target_page_id
         spec = ("POST", f"{base}/schedule", body)

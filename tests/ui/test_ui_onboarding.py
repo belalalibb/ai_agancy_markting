@@ -437,8 +437,9 @@ def test_eight_new_app_routes_exist() -> None:
     (its "9 ⇒ 38" line is an arithmetic slip — documented in §6-هـ). 14-B B-0.2 adds the WA
     ``disable`` POST ⇒ 9 / 38."""
     assert len(NEW_ROUTES) == 9, NEW_ROUTES
-    # 14-B: B-0.2 +1 (WA disable) · B-1/B-2 +6 (brain GET/POST, competitors ×3, evidence) · B-3 +1
-    assert len(ui_router.routes) == 45
+    # 14-B: B-0.2 +1 (WA disable) · B-1/B-2 +6 (brain, competitors ×3, evidence)
+    #       · B-3 +1 (content-plan) · B-4 +1 (content/new)
+    assert len(ui_router.routes) == 46
 
 
 @pytest.mark.parametrize("path", NEW_POSTS)

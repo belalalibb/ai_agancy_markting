@@ -5,6 +5,24 @@
 </ul>
 {% endif %}
 {% set base = "/app/b/" ~ brand.id ~ "/content" %}
+{% if can_write %}
+<article data-card="new-draft">
+  <header><strong>{{ t("content.new") }}</strong></header>
+  {% if not pages %}<p data-no-page><mark>{{ t("content.no_page_warning") }}</mark> <a href="/app/b/{{ brand.id }}/settings#connect">{{ t("content.connect_link") }}</a></p>{% endif %}
+  <form method="post" action="{{ base }}/new" data-form="new-draft">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>{{ t("content.channel") }}<select name="channel">{% for c in channels %}<option value="{{ c }}" {% if draft.channel == c %}selected{% endif %}>{{ t("channel." ~ c) }}</option>{% endfor %}</select></label>
+    <label>{{ t("content.body") }}<textarea name="body" required maxlength="5000" rows="4">{{ draft.body or "" }}</textarea></label>
+    <label>{{ t("content.page") }}<select name="target_page_id" data-pages>
+      <option value="">{{ t("content.page_none") }}</option>
+      {% for p in pages %}<option value="{{ p.page_id }}" {% if draft.target_page_id == p.page_id %}selected{% endif %}>{{ p.name }}{% if p.ig %} · {{ t("channel.instagram") }}{% endif %}</option>{% endfor %}
+    </select></label>
+    <label>{{ t("content.image_url") }}<input type="url" name="image_url" maxlength="2048" value="{{ draft.image_url or '' }}"></label>
+    <small>{{ t("content.image_hint") }}</small>
+    <button type="submit">{{ t("content.create") }}</button>
+  </form>
+</article>
+{% endif %}
 <form id="batch" method="post" action="{{ base }}/batch-approve" hx-post="{{ base }}/batch-approve" hx-target="#content" data-form="batch">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="status" value="{{ status }}">
@@ -33,9 +51,12 @@
       <form method="post" action="{{ act }}withdraw" hx-post="{{ act }}withdraw" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit" class="outline">{{ t("content.withdraw") }}</button></form>
       {% elif item.status == "approved" %}
       <form method="post" action="{{ act }}schedule" hx-post="{{ act }}schedule" hx-target="#content" data-form="schedule"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}">
-        <input type="datetime-local" name="scheduled_for" required>
-        <input type="text" name="target_page_id" maxlength="64" placeholder="{{ t('content.target_page') }}">
-        <button type="submit">{{ t("content.schedule") }}</button></form>
+        {% set ok_pages = pages if item.channel != "instagram" else pages | selectattr("ig") | list %}
+        {% if ok_pages %}
+        <label>{{ t("content.schedule_utc") }}<input type="datetime-local" name="scheduled_for" required></label>
+        <select name="target_page_id" required>{% for p in ok_pages %}<option value="{{ p.page_id }}" {% if item.target_page_id == p.page_id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
+        <button type="submit">{{ t("content.schedule") }}</button>
+        {% else %}<p data-no-page><mark>{{ t("content.no_page_warning") }}</mark> <a href="/app/b/{{ brand.id }}/settings#connect">{{ t("content.connect_link") }}</a></p>{% endif %}</form>
       {% elif item.status == "scheduled" %}
       <form method="post" action="{{ act }}unschedule" hx-post="{{ act }}unschedule" hx-target="#content"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="{{ status }}"><button type="submit" class="outline">{{ t("content.unschedule") }}</button></form>
       {% elif item.status == "publish_failed" %}
