@@ -63,6 +63,12 @@
 - 🔴 **حظر تشغيلي حتى دمج SPRINT-12 Part A:** لا تفعيل للكتالوج، لا `PLATFORM_ADMIN_USER_IDS`، لا `suspend` لعلامة لها webhook حيّ.
 - نظافة GitHub: حُذف `wip/sprint11.1-chain` و`wip/sprint11.1-squash`.
 
+### المحطة 16: 6 نوفمبر 2026 — قبول14-A ودمج#60 وإصدار14-B
+- PR [#60](https://github.com/belalalibb/ai_agancy_markting/pull/60) مدموج في `e51958a8dbbb793bfc93efcaeba358e12e7da7f6` بعد المراجعة المستقلة (`sprints/SPRINT-14-A_REVIEW.md`): محلياً1668وحدة/163تكاملPG17 ومسبار3/3؛ التغطية95.08% منCI،ruffنظيف،المحمية0diff و619py+html. UI37 لا38 (تصحيح جمع29+8)،API98ثابت.
+- S14A-1 state يضيع عبرGETlogin وS14A-2 تحديثWAالنشط409 وS14A-3 رفض422يترجم عاماً **مثبتة ومفتوحة**؛ لا مانع دمج جديد، إغلاقها B-0 أول14-B مع تنظيف حرفية export.
+- التوجيه14-B: ملفالعلامةIf-Matchمنالنموذج، منافسون/أدلة، خطةdraft، إنشاء/اعتماد/جدولةUTC منفصلة، batchوترجمةAST، كتب عربية وbeauty_salons وهجرة0018. ≤900py+html وهجرة≤90 منفصلة؛UI46/API98؛ استثناءاتخلفيةضيقة بلا تبعيات.
+- علامةثانيةمؤجلة لغيابفرضmax_brandsخلفياً؛ لا UIحصص. المخطط يتوقف بعدstartSHA؛ تنفيذ14-B ينتظر إطلاق المالك. توكنGitHubالمكشوف يجبإلغاؤه/تدويره، لا يكتب فيالوثائق.
+
 ### المحطة 15: 4 نوفمبر 2026 — SPRINT-13.1-FIX مُتحقَّق حيّاً ومدموج (PR #55 ⇒ `main` @ `f566b09`) وإصدار SPRINT-14-A (الانضمام الذاتي بالعربية — الجزء الأول)
 - **SPRINT-13.1-FIX** (PR #55 @ `b82d4ec`؛ fix `5c3b0ba`): F-1 استمرارية `attempt_no` (`max_attempts = attempt_count + 3`، لا تصفير) · F-2 `ambiguous_outcome` ⇒ 409 `manual_verification_required` (D-070 يشمل المسار الإداري) · F-3 مهمة نشطة ⇒ 409 `publish_in_progress`، CAS rowcount ⇒ 409 `item_not_publish_failed` · F-4 حارس `token_encryption_key=None`، `EXPORT_COLUMNS` allowlist + `content_revisions`/`brand_competitors`، export/delete خارج حارس `suspended` (D-081) · F-5 `GET /admin/brands/{id}` + `…/whatsapp/summary` (PROTECTED ⇒ 98) · F-6 `pulse_step` يقرأ علم DB عبر `FlagReader` (D-016 محفوظ) · F-7 عزل المهمة السامة + عدّاد `publish_job_poisoned`.
 - **تحقق المخطط الحي المستقل** (`sprints/SPRINT-13_REVIEW.md` §8) على PG 17.11: ruff ✅ · تكامل **163/0** · PROTECTED 98 · ملفات محمية **0 diff** · `src/*.py` +462 ≤ 500 · مسبار مستقل 9/9 (حُذف): attempts `[1..6]` بصفر IntegrityError؛ ثلاث 409 حرفية بصفر `admin_actions`؛ export 202 / delete 204 بلا مفتاح ومع `http_client`؛ ZIP 12 ملفاً يحوي نصوص المنشورات والمنافسين ونص العميل «api_key/gAAAA» وبلا شيفرة Fernet؛ أدمن غير عضو 200 بثلاث بطاقات؛ علم DB يوقف Pulse؛ المهمة السامة لا تحجب السليمة. **⇒ دمج (D-063).** ملاحظة هامشية مُرحَّلة: `"gAAAA"` كبيرة الأحرف مقابل `k.lower()` في `lifecycle/service.py:49/80`.
