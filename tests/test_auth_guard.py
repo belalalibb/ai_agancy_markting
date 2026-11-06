@@ -143,7 +143,7 @@ def test_app_routes_redirect_without_session(client: TestClient) -> None:
         for m in sorted(getattr(r, "methods", None) or ())
         if m != "HEAD" and r.path not in {"/app/login", "/app/logout", "/app/register"}
     ]
-    assert len(guarded) == 33, guarded  # 14-A: +6 (brands, bridge, pages ×2, WA ×2) · 14-B: +1
+    assert len(guarded) == 39, guarded  # 14-A: +6 · 14-B: +1 (WA disable) +6 (brain)
     for method, template in guarded:
         path = _concrete(template)
         for cookies in ({}, {"app_session": "expired.or.garbage"}):

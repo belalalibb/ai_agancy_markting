@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}{{ t("brain.title") }}{% endblock %}
+{% block content %}
+{# 14-B B-1/B-2: profile + competitors + evidence. No raw JSON; no tone.reply_templates field. #}
+{% set base = "/app/b/" ~ brand.id ~ "/brain" %}
+<h1>{{ t("brain.title") }}</h1>
+{% if err == "profile_version_conflict" or err == "if_match_invalid" %}<p data-conflict><a href="{{ base }}">{{ t("brain.reload") }}</a></p>{% endif %}
+{% if not can_write %}<p data-readonly><mark>{{ t("brain.readonly") }}</mark></p>{% endif %}
+<form method="post" action="{{ base }}" data-form="profile">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="version" value="{{ form.version if form.version is not none else profile.version }}">
+  <fieldset {% if not can_write %}disabled{% endif %}>
+  <legend>{{ t("brain.sector") }}</legend>
+  <select name="sector">
+    <option value="">{{ t("brain.sector_unset") }}</option>
+    {% for s in sectors %}<option value="{{ s }}" {% if form.sector == s %}selected{% endif %}>{{ t("sector." ~ s) }}</option>{% endfor %}
+  </select>
+  </fieldset>
+  <fieldset {% if not can_write %}disabled{% endif %}>
+  <legend>{{ t("brain.products") }}</legend>
+  {% for p in form.products %}
+  <div data-product>
+    <input name="p_name" maxlength="120" placeholder="{{ t('brain.p_name') }}" value="{{ p.name or '' }}">
+    <input name="p_desc" maxlength="600" placeholder="{{ t('brain.p_desc') }}" value="{{ p.description or '' }}">
+    <input name="p_price" maxlength="60" placeholder="{{ t('brain.p_price') }}" value="{{ p.price_hint or '' }}">
+    <input name="p_url" maxlength="300" placeholder="{{ t('brain.p_url') }}" value="{{ p.url or '' }}">
+  </div>
+  {% endfor %}
+  </fieldset>
+  <fieldset {% if not can_write %}disabled{% endif %}>
+  <legend>{{ t("brain.audience") }}</legend>
+  <small>{{ t("brain.one_per_line") }}</small>
+  <label>{{ t("brain.segments") }}<textarea name="a_segments" rows="2">{{ form.audience.segments | join("\n") }}</textarea></label>
+  <label>{{ t("brain.regions") }}<textarea name="a_regions" rows="2">{{ form.audience.regions | join("\n") }}</textarea></label>
+  <label>{{ t("brain.languages") }}<textarea name="a_languages" rows="2">{{ form.audience.languages | join("\n") }}</textarea></label>
+  <label>{{ t("brain.age_bands") }}<textarea name="a_age_bands" rows="2">{{ form.audience.age_bands | join("\n") }}</textarea></label>
+  </fieldset>
+  <fieldset {% if not can_write %}disabled{% endif %}>
+  <legend>{{ t("brain.tone") }}</legend>
+  <label>{{ t("brain.voice") }}<input name="t_voice" maxlength="200" value="{{ form.tone.voice }}"></label>
+  <label>{{ t("brain.formality") }}<select name="t_formality">{% for f in formalities %}<option value="{{ f }}" {% if form.tone.formality == f %}selected{% endif %}>{{ t("formality." ~ f) }}</option>{% endfor %}</select></label>
+  <label>{{ t("brain.emoji") }}<select name="t_emoji">{% for e in emoji_policies %}<option value="{{ e }}" {% if form.tone.emoji_policy == e %}selected{% endif %}>{{ t("emoji." ~ e) }}</option>{% endfor %}</select></label>
+  {% if can_write %}<label>{{ t("brain.banned") }}<textarea name="t_banned" rows="3">{{ form.tone.banned_phrases | join("\n") }}</textarea></label>{% endif %}
+  </fieldset>
+  <fieldset {% if not can_write %}disabled{% endif %}>
+  <legend>{{ t("brain.goals") }}</legend>
+  {% for g in form.goals %}
+  <div data-goal>
+    <select name="g_kind">{% for k in goal_kinds %}<option value="{{ k }}" {% if g.kind == k %}selected{% endif %}>{{ t("goal." ~ k) }}</option>{% endfor %}</select>
+    <input name="g_target" maxlength="200" placeholder="{{ t('brain.g_target') }}" value="{{ g.target or '' }}">
+    <input name="g_days" type="number" min="1" max="365" placeholder="{{ t('brain.g_days') }}" value="{{ g.horizon_days or '' }}">
+  </div>
+  {% endfor %}
+  </fieldset>
+  {% if can_write %}<button type="submit">{{ t("brain.save") }}</button>{% endif %}
+</form>
+
+<article data-card="competitors">
+  <header><strong>{{ t("brain.competitors") }}</strong> · <small>{{ competitors | length }} / {{ max_competitors }}</small></header>
+  {% for c in competitors %}
+  <div data-competitor="{{ c.id }}">
+    <strong>{{ c.name }}</strong> · {{ t("competitor." ~ c.kind) }}
+    {% if c.allowed_hosts %}· <small>{{ c.allowed_hosts | join(" · ") }}</small>{% endif %}
+    · <small>{{ t("brain.refreshed_at") }}: {{ c.competitor_refreshed_at or "—" }}</small>
+    {% if can_write %}
+    <form method="post" action="{{ base }}/competitors/{{ c.id }}/refresh"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="outline">{{ t("brain.refresh") }}</button></form>
+    <form method="post" action="{{ base }}/competitors/{{ c.id }}/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary outline">{{ t("brain.delete") }}</button></form>
+    {% endif %}
+  </div>
+  {% else %}<p data-empty>{{ t("brain.no_competitors") }}</p>{% endfor %}
+  {% if can_write and competitors | length < max_competitors %}
+  <form method="post" action="{{ base }}/competitors" data-form="competitor">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>{{ t("brain.c_name") }}<input name="c_name" required maxlength="120"></label>
+    <label>{{ t("brain.c_kind") }}<select name="c_kind"><option value="direct">{{ t("competitor.direct") }}</option><option value="indirect">{{ t("competitor.indirect") }}</option></select></label>
+    <label>{{ t("brain.c_fb") }}<input name="c_fb" inputmode="numeric" pattern="[0-9]{1,32}" maxlength="32"></label>
+    <label>{{ t("brain.c_host") }}<input name="c_host" maxlength="253"></label>
+    <label>{{ t("brain.c_hosts") }}<textarea name="c_hosts" rows="2"></textarea></label>
+    <small>{{ t("brain.c_legal") }}</small>
+    <button type="submit">{{ t("brain.c_add") }}</button>
+  </form>
+  {% endif %}
+</article>
+
+<article data-card="evidence">
+  <header><strong>{{ t("brain.evidence") }}</strong></header>
+  {% if can_write %}<form method="post" action="{{ base }}/evidence/refresh"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="outline">{{ t("brain.evidence_refresh") }}</button></form>{% endif %}
+  {% for e in evidence %}
+  <p data-evidence="{{ e.id }}" data-grade="{{ e.evidence_kind }}">
+    <mark>{{ t("grade." ~ e.evidence_kind) }}</mark> {{ e.metric }}
+    {% if e.subject_kind == "competitor" %}· {{ names.get(e.subject_id, "—") }}{% endif %}
+    {% if e.confidence is defined %}· <small data-confidence>{{ t("brain.confidence") }}: {{ e.confidence }}</small>{% endif %}
+  </p>
+  {% else %}<p data-empty>{{ t("brain.no_evidence") }}</p>{% endfor %}
+</article>
+{% endblock %}

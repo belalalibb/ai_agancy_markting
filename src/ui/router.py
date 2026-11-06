@@ -27,7 +27,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from src.core.config import Settings, get_settings
 from src.modules.auth.jwt import ALGORITHM, AUDIENCE, AccessTokenCodec
-from src.ui.api import ApiClient, ApiError
+from src.ui.api import ApiClient, ApiError, error_code
 from src.ui.session import (
     APP_PREFIX,
     CSRF_FIELD,
@@ -1197,6 +1197,243 @@ async def recommendation_action(
     return await _diagnosis_page(
         request, get_settings(), gate.user, brand_id, flash=flash, share=share
     )
+
+
+# ------------------------------------------------------------------- brain ---
+EVIDENCE_LIMIT = 20
+FORMALITIES = ("casual", "neutral", "formal")  # = brand_brain Tone.formality
+EMOJI_POLICIES = ("none", "light", "free")  # = brand_brain Tone.emoji_policy
+GOAL_KINDS = ("awareness", "leads", "sales", "retention")  # = brand_brain GoalKind
+MAX_PRODUCTS, MAX_GOALS, MAX_COMPETITORS = 20, 5, 3  # = brand_brain.domain.models caps
+BRAIN_FLASHES = {  # translated keys for ``?flash=`` after a 303 (no free text)
+    "brain_saved": "brain.saved",
+    "competitor_added": "brain.competitor_added",
+    "competitor_deleted": "brain.competitor_deleted",
+    "competitor_refreshed": "brain.competitor_refreshed",
+    "competitor_unavailable": "brain.competitor_unavailable",
+    "evidence_refreshed": "brain.evidence_refreshed",
+}
+BRAIN_ERROR_STATUS = (403, 404, 409, 412, 422, 428, 429)
+
+
+def _lines(text: Any) -> list[str]:
+    return [line.strip() for line in str(text or "").splitlines() if line.strip()]
+
+
+def _val(form: Any, name: str) -> str:
+    return str(form.get(name) or "").strip()
+
+
+def _vals(form: Any, name: str) -> list[str]:
+    return [str(v).strip() for v in form.getlist(name)]
+
+
+def _profile_body(form: Any) -> dict[str, Any]:
+    """The ``PUT /brain/profile`` body — products/audience/tone/goals/sector only; the form
+    never carries ``tone.reply_templates`` (filled by accepting a recommendation, B-3)."""
+    columns = [_vals(form, n) for n in ("p_name", "p_desc", "p_price", "p_url")]
+    products = [
+        {"name": n, "description": d, "price_hint": p or None, "url": u or None}
+        for n, d, p, u in zip(*columns, strict=False)
+        if n or d or p or u
+    ]
+    goals = [
+        {"kind": k, "target": tg, "horizon_days": int(days) if days.isdigit() else days}
+        for k, tg, days in zip(
+            _vals(form, "g_kind"), _vals(form, "g_target"), _vals(form, "g_days"), strict=False
+        )
+        if tg or days
+    ]
+    audience = {k: _lines(form.get(f"a_{k}")) for k in ("segments", "regions", "languages")}
+    audience["age_bands"] = _lines(form.get("a_age_bands"))
+    return {
+        "products": products,
+        "audience": audience,
+        "tone": {
+            "voice": _val(form, "t_voice"),
+            "formality": _val(form, "t_formality"),
+            "emoji_policy": _val(form, "t_emoji"),
+            "banned_phrases": _lines(form.get("t_banned")),
+        },
+        "goals": goals,
+        "sector": _val(form, "sector") or None,
+    }
+
+
+async def _brain_ctx(api: ApiClient, brand_id: UUID) -> dict[str, Any]:
+    frame = await _brand_frame(api, brand_id)
+    brain = f"/brands/{brand_id}/brain"
+    competitors = await api.get(f"{brain}/competitors")
+    evidence = await api.get(f"{brain}/evidence", limit=EVIDENCE_LIMIT)
+    return {
+        **frame,
+        "profile": await api.get(f"{brain}/profile"),
+        "competitors": competitors["items"],
+        "evidence": evidence["items"],
+        "names": {c["id"]: c["name"] for c in competitors["items"]},
+    }
+
+
+async def _brain_page(  # noqa: PLR0913 - one argument per rendering input
+    request: Request,
+    settings: Settings,
+    user: AppUser,
+    brand_id: UUID,
+    *,
+    flash: str | None = None,
+    draft: Mapping[str, Any] | None = None,
+    error: str | None = None,
+    status: int = 200,
+    headers: Mapping[str, str] | None = None,
+) -> Response:
+    try:
+        user, data = await _call(request, settings, user, lambda api: _brain_ctx(api, brand_id))
+    except ApiError as exc:
+        return _api_failure(request, settings, user, exc)
+    form = dict(draft if draft is not None else data["profile"])  # the user's own inputs win
+    form["products"] = [*form.get("products", []), *[{}] * 3][:MAX_PRODUCTS]
+    form["goals"] = [*form.get("goals", []), *[{}] * 2][:MAX_GOALS]
+    ctx = {
+        **_base_ctx(user, settings, data["brand"]),
+        **data,
+        "form": form,
+        "flash": flash,
+        "err": error,
+        "can_write": data["brand"].get("role") in ("owner", "manager"),
+        "formalities": FORMALITIES,
+        "emoji_policies": EMOJI_POLICIES,
+        "goal_kinds": GOAL_KINDS,
+        "sectors": SECTORS,
+        "grades": GRADES,
+        "max_competitors": MAX_COMPETITORS,
+    }
+    response = _render(request, "brain.html", ctx, status=status)
+    response.headers.update(headers or {})
+    return _with_session(settings, user, response)
+
+
+@router.get("/b/{brand_id}/brain", response_class=HTMLResponse)
+async def brain(request: Request, brand_id: UUID, flash: str = "") -> Response:
+    settings = get_settings()
+    gate = await _gate_user(request, settings)
+    if gate.response is not None:
+        return gate.response
+    key = BRAIN_FLASHES.get(flash)
+    return await _brain_page(request, settings, gate.user, brand_id, flash=t(key) if key else None)
+
+
+async def _raw(api: ApiClient, method: str, path: str, body: Any, headers: Any) -> Any:
+    response = await api.request(method, path, json=body, headers=headers)
+    if response.status_code == 401:
+        raise ApiError(401, "unauthenticated")
+    return response
+
+
+async def _brain_write(  # noqa: PLR0913 - gate + one API write + its two outcomes
+    request: Request,
+    brand_id: UUID,
+    csrf: Any,
+    method: str,
+    path: str,
+    *,
+    ok: str,
+    body: Any = None,
+    headers: Mapping[str, str] | None = None,
+    draft: Mapping[str, Any] | None = None,
+) -> Response:
+    """CSRF 403 before any effect; success ⇒ 303 + closed flash key; failure ⇒ the page again
+    with the Arabic message, the user's inputs, the real status and ``Retry-After`` (B-1/B-2)."""
+    settings = get_settings()
+    gate = await _gate_user(request, settings, None if csrf is None else str(csrf))
+    if gate.response is not None:
+        return gate.response
+    try:
+        user, res = await _call(
+            request, settings, gate.user, lambda api: _raw(api, method, path, body, headers)
+        )
+    except ApiError:
+        return _denied(settings, request)
+    try:
+        payload = res.json() if res.content else None
+    except ValueError:
+        payload = None
+    if res.status_code < 400:
+        if isinstance(payload, dict) and payload.get("status") == "unavailable":
+            ok = "competitor_unavailable"
+        target = f"{APP_PREFIX}/b/{brand_id}/brain?flash={ok}"
+        return _with_session(settings, user, RedirectResponse(target, status_code=303))
+    code = error_code(payload, res.status_code)
+    retry = res.headers.get("retry-after")
+    extra = {"Retry-After": retry} if res.status_code == 429 and retry else None  # noqa: PLR2004
+    status = res.status_code if res.status_code in BRAIN_ERROR_STATUS else 502
+    return await _brain_page(
+        request, settings, user, brand_id, flash=_error_text(code), draft=draft, error=code,
+        status=status, headers=extra,
+    )  # fmt: skip
+
+
+@router.post("/b/{brand_id}/brain", response_class=HTMLResponse)
+async def brain_save(request: Request, brand_id: UUID) -> Response:
+    """``If-Match`` is the hidden ``version`` of the GET the user saw — never a refetch (a
+    concurrent edit ⇒ 412 ⇒ the user's text is kept, no blind retry, no version swap)."""
+    form = await request.form()
+    version = _val(form, "version")
+    body = _profile_body(form)
+    return await _brain_write(
+        request, brand_id, form.get(CSRF_FIELD), "PUT", f"/brands/{brand_id}/brain/profile",
+        ok="brain_saved", body=body, headers={"If-Match": version} if version.isdigit() else None,
+        draft={**body, "version": version},
+    )  # fmt: skip
+
+
+@router.post("/b/{brand_id}/brain/competitors", response_class=HTMLResponse)
+async def competitor_add(request: Request, brand_id: UUID) -> Response:
+    form = await request.form()
+    body: dict[str, Any] = {
+        "name": _val(form, "c_name"),
+        "kind": _val(form, "c_kind") or "direct",
+        "notes": _val(form, "c_notes"),
+        "allowed_hosts": _lines(form.get("c_hosts")),
+    }
+    for key, field in (("facebook_page_id", "c_fb"), ("website_host", "c_host")):
+        if _val(form, field):
+            body[key] = _val(form, field)
+    path = f"/brands/{brand_id}/brain/competitors"
+    return await _brain_write(
+        request, brand_id, form.get(CSRF_FIELD), "POST", path, ok="competitor_added", body=body
+    )
+
+
+@router.post("/b/{brand_id}/brain/competitors/{competitor_id}/delete", response_class=HTMLResponse)
+async def competitor_delete(
+    request: Request,
+    brand_id: UUID,
+    competitor_id: UUID,
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    path = f"/brands/{brand_id}/brain/competitors/{competitor_id}"
+    return await _brain_write(request, brand_id, csrf, "DELETE", path, ok="competitor_deleted")
+
+
+@router.post(
+    "/b/{brand_id}/brain/competitors/{competitor_id}/refresh", response_class=HTMLResponse
+)
+async def competitor_refresh(
+    request: Request,
+    brand_id: UUID,
+    competitor_id: UUID,
+    csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None,
+) -> Response:
+    path = f"/brands/{brand_id}/brain/competitors/{competitor_id}/refresh"
+    return await _brain_write(request, brand_id, csrf, "POST", path, ok="competitor_refreshed")
+
+
+@router.post("/b/{brand_id}/brain/evidence/refresh", response_class=HTMLResponse)
+async def evidence_refresh(
+    request: Request, brand_id: UUID, csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None
+) -> Response:
+    path = f"/brands/{brand_id}/brain/evidence/refresh"
+    return await _brain_write(request, brand_id, csrf, "POST", path, ok="evidence_refreshed")
 
 
 # ---------------------------------------------------------------- settings ---

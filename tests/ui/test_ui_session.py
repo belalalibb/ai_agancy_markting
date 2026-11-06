@@ -43,6 +43,7 @@ def _concrete(template: str) -> str:
         "rec_id",
         "grant_id",
         "connection_id",
+        "competitor_id",
     ):
         template = template.replace("{" + name + "}", SAMPLE)
     return template.replace("{action}", "submit").replace("{tab}", "providers")
@@ -56,8 +57,10 @@ def test_ui_routes_are_hidden_from_openapi_and_counted(ui_app: FastAPI) -> None:
     spec_paths = ui_app.openapi()["paths"]
     assert not any(path.startswith("/app") for path in spec_paths)
     # SPRINT-14-A: +8 (register ×2, brands, bridge, pages ×2, WA ×2) · 14-B B-0.2: +1 (WA disable)
-    assert len(ui_router.routes) == 38
-    assert len(APP_OPERATIONS) == 33  # +7 session-guarded (GET/POST register are public)
+    assert (
+        len(ui_router.routes) == 44
+    )  # 14-B B-1/B-2: +6 (brain GET/POST, competitors ×3, evidence)
+    assert len(APP_OPERATIONS) == 39  # +7 session-guarded (GET/POST register are public)
 
 
 @pytest.mark.parametrize(("method", "template"), APP_OPERATIONS, ids=IDS)
