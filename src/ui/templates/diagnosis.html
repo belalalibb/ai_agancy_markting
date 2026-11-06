@@ -7,6 +7,13 @@
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button type="submit">{{ t("diagnosis.diagnose") }}</button>
 </form>
+{% if brand.role != "viewer" %}
+<form method="post" action="/app/b/{{ brand.id }}/diagnosis/content-plan" hx-post="/app/b/{{ brand.id }}/diagnosis/content-plan" hx-target="#recommendations" data-form="content-plan">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="outline">{{ t("plan.make") }}</button>
+  <small>{{ t("plan.explain") }}</small>
+</form>
+{% endif %}
 <section id="recommendations">
   {% include "partials/recommendations.html" %}
 </section>

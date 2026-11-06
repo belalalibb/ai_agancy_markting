@@ -60,7 +60,7 @@ def test_ui_routes_are_hidden_from_openapi_and_counted(ui_app: FastAPI) -> None:
     assert (
         len(ui_router.routes) == 44
     )  # 14-B B-1/B-2: +6 (brain GET/POST, competitors ×3, evidence)
-    assert len(APP_OPERATIONS) == 39  # +7 session-guarded (GET/POST register are public)
+    assert len(APP_OPERATIONS) == 40  # +7 session-guarded (GET/POST register are public)
 
 
 @pytest.mark.parametrize(("method", "template"), APP_OPERATIONS, ids=IDS)

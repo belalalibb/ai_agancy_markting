@@ -492,5 +492,17 @@
   "error.competitor_not_found": "المنافس غير موجود.",
   "error.host_invalid": "عنوان الموقع غير صالح.",
   "error.host_blocked_platform": "لا يمكن استخدام منصات التواصل كمصدر؛ أضف موقعاً عاماً آخر.",
-  "error.refresh_rate_limited": "تجاوزت حد التحديث. حاول لاحقاً."
+  "error.refresh_rate_limited": "تجاوزت حد التحديث. حاول لاحقاً.",
+  "plan.make": "اقترح خطة محتوى",
+  "plan.explain": "تُنشأ مسودات فقط؛ لا شيء يُعتمد أو يُجدول أو يُنشر قبل مراجعتك.",
+  "plan.done": "أُنشئت {n} مسودة، واستُبعد {dropped} مقترحاً غير صالح.",
+  "plan.created": "المسودات المنشأة",
+  "plan.dropped": "المستبعدة",
+  "plan.open_drafts": "افتح المسودات",
+  "plan.human_next": "الخطوة التالية بيدك: أرسل للاعتماد ثم يعتمدها المالك ثم تُجدول.",
+  "error.ai_rate_limited": "مزوّد الذكاء الاصطناعي مشغول الآن. حاول بعد قليل.",
+  "error.ai_quota_exceeded": "استُنفدت حصة مزوّد الذكاء الاصطناعي.",
+  "error.ai_provider_misconfigured": "إعداد مزوّد الذكاء الاصطناعي غير صحيح. تواصل مع الإدارة.",
+  "error.ai_content_rejected": "رفض المزوّد هذا المحتوى. عدّل الطلب وحاول مجدداً.",
+  "error.ai_upstream_unavailable": "مزوّد الذكاء الاصطناعي غير متاح مؤقتاً. حاول لاحقاً."
 }

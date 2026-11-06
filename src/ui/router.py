@@ -1135,6 +1135,7 @@ async def _diagnosis_page(
     *,
     flash: str | None = None,
     share: Mapping[str, Any] | None = None,
+    content_plan: Mapping[str, Any] | None = None,
 ) -> Response:
     try:
         user, data = await _call(
@@ -1142,7 +1143,13 @@ async def _diagnosis_page(
         )
     except ApiError as exc:
         return _api_failure(request, settings, user, exc)
-    ctx = {**_base_ctx(user, settings, data["brand"]), **data, "flash": flash, "share": share}
+    ctx = {
+        **_base_ctx(user, settings, data["brand"]),
+        **data,
+        "flash": flash,
+        "share": share,
+        "content_plan": content_plan,
+    }
     name = "partials/recommendations.html" if _is_partial(request) else "diagnosis.html"
     return _with_session(settings, user, _render(request, name, ctx))
 
@@ -1167,6 +1174,27 @@ async def diagnose(
     if flash is None and isinstance(result, dict):
         flash = t("diagnosis.done", n=len(result.get("recommendations", [])))
     return await _diagnosis_page(request, get_settings(), gate.user, brand_id, flash=flash)
+
+
+@router.post("/b/{brand_id}/diagnosis/content-plan", response_class=HTMLResponse)
+async def content_plan(
+    request: Request, brand_id: UUID, csrf: Annotated[str | None, Form(alias=CSRF_FIELD)] = None
+) -> Response:
+    """B-3: ``POST /brain/content-plan`` ⇒ ≤7 **drafts** (D-055: nothing is approved, scheduled
+    or queued here — each draft still needs submit ⇒ OWNER approve ⇒ schedule by a human)."""
+    path = f"/brands/{brand_id}/brain/content-plan"
+    gate, flash, result = await _action(request, csrf, "POST", path, None)
+    if gate.response is not None:
+        return gate.response
+    plan = None
+    if flash is None and isinstance(result, dict):
+        items = result.get("items", [])
+        dropped = int(result.get("items_dropped", 0))
+        plan = {"items": items, "dropped": dropped}
+        flash = t("plan.done", n=len(items), dropped=dropped)
+    return await _diagnosis_page(
+        request, get_settings(), gate.user, brand_id, flash=flash, content_plan=plan
+    )
 
 
 @router.post("/b/{brand_id}/diagnosis/{rec_id}/{action}", response_class=HTMLResponse)
