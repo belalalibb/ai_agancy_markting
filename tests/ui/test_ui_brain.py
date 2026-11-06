@@ -166,8 +166,14 @@ def test_brain_viewer_is_read_only(
     assert "data-readonly" in html and 'name="t_banned"' not in html
     assert 'type="submit">' + MESSAGES["brain.save"] not in html
     assert 'data-form="competitor"' not in html and "/evidence/refresh" not in html
+    # no write form of any kind: the only <form> left is the shell's logout; no profile
+    # form, version carrier or brain submit button
+    assert html.count("<form") == 1 and 'action="/app/logout"' in html
+    assert 'data-form="profile"' not in html and 'name="version"' not in html
+    assert html.count('type="submit"') == 1
+    assert html.count("<fieldset disabled") == html.count("<fieldset")
     res = ui_client.post(BRAIN, data=_form(csrf))
-    assert res.status_code == 403 or res.status_code == 422 or res.status_code >= 400
+    assert res.status_code == 403
     assert not brain_repo.profiles
     for path, data in (
         (f"{BRAIN}/competitors", {"csrf": csrf, "c_name": "x"}),

@@ -6,9 +6,10 @@
 <h1>{{ t("brain.title") }}</h1>
 {% if err == "profile_version_conflict" or err == "if_match_invalid" %}<p data-conflict><a href="{{ base }}">{{ t("brain.reload") }}</a></p>{% endif %}
 {% if not can_write %}<p data-readonly><mark>{{ t("brain.readonly") }}</mark></p>{% endif %}
-<form method="post" action="{{ base }}" data-form="profile">
+{% if can_write %}<form method="post" action="{{ base }}" data-form="profile">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="version" value="{{ form.version if form.version is not none else profile.version }}">
+{% else %}<div data-view="profile">{% endif %}
   <fieldset {% if not can_write %}disabled{% endif %}>
   <legend>{{ t("brain.sector") }}</legend>
   <select name="sector">
@@ -53,7 +54,7 @@
   {% endfor %}
   </fieldset>
   {% if can_write %}<button type="submit">{{ t("brain.save") }}</button>{% endif %}
-</form>
+{% if can_write %}</form>{% else %}</div>{% endif %}
 
 <article data-card="competitors">
   <header><strong>{{ t("brain.competitors") }}</strong> · <small>{{ competitors | length }} / {{ max_competitors }}</small></header>
