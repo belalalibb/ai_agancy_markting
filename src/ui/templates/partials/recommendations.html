@@ -1,7 +1,7 @@
 {% if flash %}<p role="alert" data-flash>{{ flash }}</p>{% endif %}
 {% if content_plan %}
 <article data-plan>
-  <p data-plan-counts>{{ t("plan.created") }}: {{ content_plan["items"] | length }} · {{ t("content_plan.dropped") }}: {{ content_plan.dropped }}</p>
+  <p data-plan-counts>{{ t("plan.created") }}: {{ content_plan["items"] | length }} · {{ t("plan.dropped") }}: {{ content_plan.dropped }}</p>
   <ul>{% for i in content_plan["items"] %}<li data-plan-item="{{ i.item_id }}" data-status="{{ i.status }}">{{ i.title }} · <small>{{ i.channel }}</small></li>{% endfor %}</ul>
   <p><a href="/app/b/{{ brand.id }}/content?status=draft" data-link="drafts">{{ t("plan.open_drafts") }}</a> · <small>{{ t("plan.human_next") }}</small></p>
 </article>
