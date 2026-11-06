@@ -8,6 +8,9 @@
 
 ## 1. ملخص الحالة العامة للمشروع (Project Snapshot)
 
+> **14-B تقدّم جزئي (مؤقت — لا يُقرأ كاكتمال):** الفرع `work/implementation`. منجز ومدفوع: B-0 (S14A-1..3)، B-1/B-2 (brain + competitors + evidence)، B-3 (content-plan)، إصلاح CI للرأس 3f75140 (مفتاح قالب `plan.dropped` + عدّادات المسارات 45)، إخفاء نموذج الكتابة عن VIEWER في brain، B-4 (`POST content/new` + قائمة الصفحات + UTC؛ UI=46، API محمية=98). B-5: اختبار AST لتغطية `error.<code>` (90 رمزاً، 18 غير مترجم عند إعادة القياس ⇒ أُضيفت) — **اختبارات الدفعة الموسّعة (حصة/عنصر غير مسموح/أدوار) لم تُكتب بعد**. **لم يبدأ:** B-6 (playbooks/Sector/هجرة 0018)، PG17 المحلي (لا PostgreSQL مثبّت)، رحلة المتصفح على PG، دورة الهجرة، تقرير §9، PR.
+> **تنبيه للمراجع قبل 0018:** مهمة restore-drill في `.github/workflows/ci.yml` تحمل `EXPECTED_HEAD: "0017"` (سطر 160) وتتحقق بـ`grep -q "^$EXPECTED_HEAD " current.txt`؛ هجرة 0018 ستكسرها. تعديل ci.yml خارج نطاق 14-B ⇒ **مطلوب قرار المراجع** (لا تعطيل ولا تخفيف للحارس).
+
 - **اسم المشروع:** AI Marketing Platform (AI Growth OS / BrandMind AI / QEVION)
 - **الحالة الإجمالية:** `SPRINT_14_B_ISSUED__PR60_MERGED_e51958a__B0_OPEN__AWAITING_OWNER_LAUNCH`
 - **آخر تحديث للمؤشر:** 2026-11-06 — مراجعة 14-A مستقلة مكتملة: PR [#60](https://github.com/belalalibb/ai_agancy_markting/pull/60) **مدموج** في `e51958a8dbbb793bfc93efcaeba358e12e7da7f6`؛ [التقرير](./sprints/SPRINT-14-A_REVIEW.md). محلياً ruff نظيف، وحدات1668/1668، تكاملPG17 163، مسبار3/3 حُذف؛ تغطية95.08% **CI فقط**؛ محمية0diff،API98/UI37. S14A-1 ضياعstate بعدlogin وS14A-2 تحديثWA النشط409 وS14A-3 رسالة422 العامة **مثبتة ولم تُصلح**؛ B-0 إلزامي أول14-B مع تنظيف حرفية التصدير. صدر14-B B-0..B-6 ودُمج PR [#61](https://github.com/belalalibb/ai_agancy_markting/pull/61) بعد CI6/6؛ **start SHA = `adaf10611e3abd274581ee815243c4d998fa8d99`** مسجّل في§6؛ المخطط متوقف دون تنفيذ، والمنفذ ينتظر إطلاق المالك.
