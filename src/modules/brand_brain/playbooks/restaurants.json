@@ -1,30 +1,31 @@
 {
   "sector": "restaurants",
-  "title": "Restaurants & cafés",
+  "lang": "ar",
+  "title": "المطاعم والكافيهات",
   "tone": "friendly",
   "content_pillars": [
-    "signature dishes and seasonal menu",
-    "behind the scenes: kitchen and team",
-    "customer reviews and user photos",
-    "offers, combos and delivery reminders"
+    "الأطباق المميزة وقائمة الموسم",
+    "كواليس المطبخ والفريق",
+    "آراء الزبائن وصورهم",
+    "العروض والوجبات المجمّعة وتذكير التوصيل"
   ],
   "pulse_thresholds": {"wa_first_response_minutes": 10, "posts_per_week_min": 4, "wa_window_closing_hours": 4},
   "reply_templates": [
-    "Welcome! Our menu and today's specials are here — what would you like to order?",
-    "Thanks for reaching out. Delivery takes about 35–45 minutes; shall I confirm your order?",
-    "We would love to host you. For how many guests and at what time?"
+    "أهلاً بك! قائمتنا وأطباق اليوم هنا، ماذا تحب أن تطلب؟",
+    "شكراً لتواصلك. التوصيل يستغرق من 35 إلى 45 دقيقة تقريباً، هل أؤكد طلبك؟",
+    "يسعدنا استضافتك. لكم عدد الأشخاص وفي أي موعد؟"
   ],
   "metrics": ["orders_from_whatsapp", "reservation_requests", "menu_link_clicks", "review_mentions"],
   "calendar": [
-    {"month": 3, "label": "Ramadan iftar & suhoor menus"},
-    {"month": 6, "label": "Summer drinks and outdoor seating"},
-    {"month": 12, "label": "Year-end gatherings and group bookings"}
+    {"month": 3, "label": "قوائم الإفطار والسحور في رمضان"},
+    {"month": 6, "label": "مشروبات الصيف والجلسات الخارجية"},
+    {"month": 12, "label": "لمّات نهاية العام وحجوزات المجموعات"}
   ],
   "tips": [
-    "Post one dish photo before lunch time; it is the highest-intent hour.",
-    "Answer WhatsApp orders within 10 minutes — late replies lose the order.",
-    "Pin the delivery number and opening hours in the page bio.",
-    "Ask happy diners for a photo review the same evening.",
-    "Announce a weekday combo on Sunday to lift the slow mid-week."
+    "انشر صورة طبق واحد قبل وقت الغداء؛ فهي الساعة الأعلى نيّة للشراء.",
+    "ردّ على طلبات واتساب خلال 10 دقائق؛ التأخر يضيّع الطلب.",
+    "ثبّت رقم التوصيل ومواعيد العمل في نبذة الصفحة.",
+    "اطلب من الزبون الراضي صورة وتقييماً في المساء نفسه.",
+    "أعلن عن وجبة مجمّعة لأيام الأسبوع يوم الأحد لتنشيط منتصف الأسبوع."
   ]
 }

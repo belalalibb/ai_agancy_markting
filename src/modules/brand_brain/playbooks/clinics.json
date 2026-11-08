@@ -1,30 +1,31 @@
 {
   "sector": "clinics",
-  "title": "Clinics & medical practices",
+  "lang": "ar",
+  "title": "العيادات والمراكز الطبية",
   "tone": "professional",
   "content_pillars": [
-    "doctor introductions and credentials",
-    "educational tips (no diagnoses, no promises)",
-    "booking process and opening hours",
-    "patient experience and facility"
+    "تعريف بالأطباء ومؤهلاتهم",
+    "نصائح توعوية (بلا تشخيص ولا وعود)",
+    "طريقة الحجز ومواعيد العمل",
+    "تجربة المريض والمنشأة"
   ],
   "pulse_thresholds": {"wa_first_response_minutes": 15, "posts_per_week_min": 3, "wa_window_closing_hours": 4},
   "reply_templates": [
-    "Thank you for contacting us. Which doctor or service would you like to book?",
-    "Our clinic is open 9:00–21:00. Shall I reserve a slot for you?",
-    "For medical questions a consultation is needed — I can book the nearest available time."
+    "شكراً لتواصلك معنا. مع أي طبيب أو لأي خدمة تود الحجز؟",
+    "عيادتنا تعمل من 9 صباحاً حتى 9 مساءً. هل أحجز لك موعداً؟",
+    "الأسئلة الطبية تحتاج إلى استشارة؛ يمكنني حجز أقرب موعد متاح."
   ],
   "metrics": ["booking_requests", "wa_first_response_minutes", "no_show_rate", "educational_post_saves"],
   "calendar": [
-    {"month": 1, "label": "New-year check-up campaign"},
-    {"month": 9, "label": "Back-to-school vaccinations and screenings"},
-    {"month": 10, "label": "Awareness month content"}
+    {"month": 1, "label": "حملة الفحص الدوري مع بداية العام"},
+    {"month": 9, "label": "التطعيمات والفحوصات مع العودة إلى المدارس"},
+    {"month": 10, "label": "محتوى شهر التوعية"}
   ],
   "tips": [
-    "Reply to booking requests within 15 minutes; confirm date, time and doctor.",
-    "Publish one educational post per week — never a diagnosis or a guarantee.",
-    "Introduce one team member a month with credentials.",
-    "Send a reminder 24 hours before the appointment to cut no-shows.",
-    "Keep the price list and insurance partners one tap away."
+    "ردّ على طلبات الحجز خلال 15 دقيقة، وأكّد التاريخ والوقت واسم الطبيب.",
+    "انشر منشوراً توعوياً واحداً أسبوعياً، ولا تنشر تشخيصاً أو ضماناً أبداً.",
+    "عرّف بفرد من الفريق كل شهر مع مؤهلاته.",
+    "أرسل تذكيراً قبل الموعد بـ24 ساعة لتقليل الغياب.",
+    "اجعل قائمة الأسعار وشركات التأمين المتعاقد معها على بُعد نقرة."
   ]
 }

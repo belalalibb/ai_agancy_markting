@@ -49,6 +49,7 @@ class Playbook(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sector: str = Field(pattern=r"^[a-z_]+$", max_length=32)
+    lang: Literal["ar", "en"] = "ar"  # SPRINT-14-B B-6: only ``ar`` books are active
     title: str = Field(min_length=1, max_length=80)
     tone: Literal["professional", "friendly", "promotional"]
     content_pillars: list[str] = Field(min_length=1, max_length=8)
@@ -81,6 +82,9 @@ def load_playbooks(directory: Path = PLAYBOOKS_DIR) -> dict[str, Playbook]:
             raise PlaybookLoadError(msg) from exc
         if book.sector != sector:
             msg = f"playbook {path.name!r} declares sector {book.sector!r}"
+            raise PlaybookLoadError(msg)
+        if book.lang != "ar":
+            msg = f"playbook {path.name!r} is active but declares lang {book.lang!r}"
             raise PlaybookLoadError(msg)
         books[sector] = book
     return books

@@ -1,0 +1,49 @@
+{
+  "sector": "clinics",
+  "title": "Clinics & medical practices",
+  "tone": "professional",
+  "content_pillars": [
+    "doctor introductions and credentials",
+    "educational tips (no diagnoses, no promises)",
+    "booking process and opening hours",
+    "patient experience and facility"
+  ],
+  "pulse_thresholds": {
+    "wa_first_response_minutes": 15,
+    "posts_per_week_min": 3,
+    "wa_window_closing_hours": 4
+  },
+  "reply_templates": [
+    "Thank you for contacting us. Which doctor or service would you like to book?",
+    "Our clinic is open 9:00–21:00. Shall I reserve a slot for you?",
+    "For medical questions a consultation is needed — I can book the nearest available time."
+  ],
+  "metrics": [
+    "booking_requests",
+    "wa_first_response_minutes",
+    "no_show_rate",
+    "educational_post_saves"
+  ],
+  "calendar": [
+    {
+      "month": 1,
+      "label": "New-year check-up campaign"
+    },
+    {
+      "month": 9,
+      "label": "Back-to-school vaccinations and screenings"
+    },
+    {
+      "month": 10,
+      "label": "Awareness month content"
+    }
+  ],
+  "tips": [
+    "Reply to booking requests within 15 minutes; confirm date, time and doctor.",
+    "Publish one educational post per week — never a diagnosis or a guarantee.",
+    "Introduce one team member a month with credentials.",
+    "Send a reminder 24 hours before the appointment to cut no-shows.",
+    "Keep the price list and insurance partners one tap away."
+  ],
+  "lang": "en"
+}
